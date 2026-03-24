@@ -2,3 +2,5 @@
 - When partial history is left on old relay hint, try to continue syncing with newer group relays
 - Relay GC: when a group's DAG grows by N events and an event still has no children, delete it. This removes "zombie" events (e.g. unauthorised kicks) that no honest client ever referenced. Threshold N should be configurable (default 100). Clients must NOT GC from local cache.
 - Optimise initial sync: when client already has partial history, avoid fetching genesis separately then all events - fetch all events once and validate genesis from the first event received. Avoid sync completely if DAG is up-to-date.
+- Graceful handling of closing WS connection
+- Fix clear event log button
