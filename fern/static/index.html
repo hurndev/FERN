@@ -83,10 +83,10 @@ header select { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; 
 <div id="app">
   <header>
     <h1>FERN DAG Visualiser</h1>
-    <input type="text" id="storage-path" value="~/.fern" placeholder="Storage path" readonly
-           title="Storage directory (set at server startup)" style="
-      background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:3px 8px;
-      border-radius:6px;font-family:inherit;font-size:12px;width:140px;">
+    <span id="storage-path" style="
+      background:#21262d;color:#8b949e;border:1px solid #30363d;padding:3px 8px;
+      border-radius:6px;font-family:inherit;font-size:11px;max-width:300px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="Storage directory"></span>
     <select id="group-select"><option value="">No groups found</option></select>
     <div id="status">
       <span class="dot disconnected" id="ws-dot"></span>
@@ -195,28 +195,23 @@ function copyFullId(btn) {
 
 // --- API ---
 
-function storageParam() {
-  const val = document.getElementById('storage-path')?.value?.trim();
-  return val ? `?storage=${encodeURIComponent(val)}` : '';
-}
-
 async function fetchGroups() {
   const res = await fetch('/api/groups');
   return res.json();
 }
 
 async function fetchDAG(group) {
-  const res = await fetch(`/api/groups/${group}/dag${storageParam()}`);
+  const res = await fetch(`/api/groups/${group}/dag`);
   return res.json();
 }
 
 async function fetchState(group) {
-  const res = await fetch(`/api/groups/${group}/state${storageParam()}`);
+  const res = await fetch(`/api/groups/${group}/state`);
   return res.json();
 }
 
 async function fetchEvents(group) {
-  const res = await fetch(`/api/groups/${group}${storageParam()}`);
+  const res = await fetch(`/api/groups/${group}`);
   return res.json();
 }
 
@@ -565,7 +560,10 @@ async function init() {
   try {
     const info = await (await fetch('/api/info')).json();
     if (info.storage) {
-      document.getElementById('storage-path').value = info.storage;
+      storagePath = info.storage;
+      const el = document.getElementById('storage-path');
+      el.textContent = info.storage;
+      el.title = info.storage;
     }
   } catch (e) {
     console.error('Failed to fetch server info:', e);
