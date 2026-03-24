@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FERN Chat</title>
+<script type="importmap">
+{ "imports": {
+    "@noble/ed25519": "https://cdn.jsdelivr.net/npm/@noble/ed25519@1.7.3/+esm"
+}}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/jdenticon@3.3.0/dist/jdenticon.min.js" async></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  background: #0a0a0a;
+  color: #b8b8b0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+a { color: #6a9fd8; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* === Layout === */
+#app {
+  display: grid;
+  grid-template-columns: 220px 1fr 260px;
+  grid-template-rows: 32px 1fr 38px;
+  height: 100vh;
+}
+
+/* === Header === */
+#header {
+  grid-column: 1 / -1;
+  background: #1a1a2e;
+  border-bottom: 1px solid #2a2a3a;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 12px;
+}
+#header .logo {
+  font-weight: bold;
+  font-size: 14px;
+  color: #d4aa70;
+  letter-spacing: 1px;
+}
+#header .identity {
+  font-size: 11px;
+  color: #707060;
+}
+#header .identity .pubkey {
+  color: #8a8a7a;
+  cursor: pointer;
+}
+#header .identity .pubkey:hover { color: #b8b8b0; }
+#header .status {
+  margin-left: auto;
+  font-size: 11px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+#header .status .dot {
+  width: 6px; height: 6px;
+  border-radius: 0;
+  background: #3a6a3a;
+  display: inline-block;
+}
+#header .status .dot.off { background: #6a3a3a; }
+
+/* === Sidebar (Groups) === */
+#sidebar {
+  background: #111118;
+  border-right: 1px solid #2a2a3a;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#sidebar .section-title {
+  padding: 8px 10px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #505048;
+  border-bottom: 1px solid #1a1a22;
+}
+#sidebar .actions {
+  padding: 6px 8px;
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #1a1a22;
+}
+#sidebar .actions button {
+  flex: 1;
+  background: #1a1a2e;
+  color: #b8b8b0;
+  border: 1px solid #2a2a3a;
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+#sidebar .actions button:hover { background: #22223a; border-color: #3a3a4a; }
+
+#group-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+#group-list .group-item {
+  padding: 5px 10px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+#group-list .group-item:hover { background: #16161e; }
+#group-list .group-item.active {
+  background: #1a1a28;
+  border-left-color: #d4aa70;
+  color: #d4d4c8;
+}
+#group-list .group-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#group-list .group-item .count {
+  font-size: 10px;
+  color: #505048;
+  background: #1a1a22;
+  padding: 0 4px;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* === Chat Area === */
+#chat {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #0e0e12;
+}
+#chat-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid #2a2a3a;
+  background: #111118;
+}
+#chat-header .group-name {
+  font-size: 13px;
+  font-weight: bold;
+  color: #d4d4c8;
+}
+#chat-header .group-desc {
+  font-size: 11px;
+  color: #606058;
+  margin-top: 2px;
+}
+#chat-header .invite-link {
+  font-size: 11px;
+  color: #5a7a5a;
+  margin-top: 3px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#chat-header .invite-link:hover { color: #8aba8a; }
+#chat-header .invite-link.copied { color: #d4aa70; }
+#chat-header .manage-btn, #chat-header .join-btn, #chat-header .leave-btn {
+  background: none; border: 1px solid #2a2a3a; color: #8a8a7a;
+  font-family: inherit; font-size: 10px; padding: 2px 8px;
+  cursor: pointer; margin-top: 4px; margin-right: 4px;
+}
+#chat-header .manage-btn:hover { color: #d4aa70; border-color: #d4aa70; }
+#chat-header .join-btn:hover { color: #5a9a5a; border-color: #5a9a5a; }
+#chat-header .leave-btn:hover { color: #c85a5a; border-color: #c85a5a; }
+
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+#messages .msg {
+  padding: 2px 12px;
+  line-height: 1.5;
+  word-wrap: break-word;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+#messages .msg:hover { background: #13131a; }
+#messages .msg .icon {
+  width: 14px; height: 14px;
+  vertical-align: middle;
+  margin: 0 4px;
+}
+#messages .msg .ts {
+  color: #404038;
+  font-size: 11px;
+  margin-right: 6px;
+}
+#messages .msg .author {
+  font-weight: bold;
+  margin-right: 4px;
+}
+#messages .msg .content { color: #b8b8b0; }
+#messages .msg.system {
+  color: #606058;
+  font-style: italic;
+  font-size: 12px;
+}
+#messages .msg.system .content { color: #606058; }
+#messages .empty {
+  padding: 20px;
+  text-align: center;
+  color: #404038;
+  font-size: 12px;
+}
+
+#input-area {
+  padding: 6px 8px;
+  border-top: 1px solid #2a2a3a;
+  background: #111118;
+  display: flex;
+  gap: 6px;
+}
+#input-area input {
+  flex: 1;
+  background: #0a0a0e;
+  border: 1px solid #2a2a3a;
+  color: #d4d4c8;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+#input-area input:focus { border-color: #d4aa70; }
+#input-area input:disabled { opacity: 0.4; }
+#input-area button {
+  background: #1a1a2e;
+  color: #d4aa70;
+  border: 1px solid #2a2a3a;
+  padding: 5px 14px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  font-weight: bold;
+}
+#input-area button:hover { background: #22223a; }
+#input-area button:disabled { opacity: 0.3; cursor: default; }
+
+/* === Right Panel === */
+#right-panel {
+  background: #111118;
+  border-left: 1px solid #2a2a3a;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#right-panel .section-title {
+  padding: 8px 10px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #505048;
+  border-bottom: 1px solid #1a1a22;
+}
+#members {
+  max-height: 35%;
+  overflow-y: auto;
+  border-bottom: 1px solid #2a2a3a;
+  padding: 4px 0;
+}
+#members .member {
+  padding: 2px 10px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#members .member .icon {
+  width: 20px; height: 20px;
+  flex-shrink: 0;
+}
+#members .member .dot {
+  width: 5px; height: 5px;
+  background: #3a6a3a;
+  display: inline-block;
+}
+#members .member .name { color: #8a8a7a; }
+#members .member .role {
+  font-size: 10px;
+  color: #d4aa70;
+  margin-left: auto;
+}
+#members .member.founder .name { color: #d4aa70; }
+#members .member.not-joined .name { color: #505048; font-style: italic; }
+
+#event-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-size: 11px;
+}
+#event-log .log-entry {
+  padding: 1px 10px;
+  line-height: 1.4;
+  border-bottom: 1px solid #131318;
+}
+#event-log .log-entry .log-ts { color: #353530; margin-right: 4px; }
+#event-log .log-entry.relay { color: #5a8a5a; }
+#event-log .log-entry.publish { color: #6a9fd8; }
+#event-log .log-entry.sync { color: #8a7aaa; }
+#event-log .log-entry.error { color: #c85a5a; }
+#event-log .log-entry.local { color: #707060; }
+#event-log .log-entry.browser { color: #5080a0; }
+#event-log .clear-log {
+  padding: 4px 10px;
+  cursor: pointer;
+  color: #404038;
+  font-size: 10px;
+}
+#event-log .clear-log:hover { color: #707060; }
+
+/* === Modals === */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-overlay.hidden { display: none; }
+.modal {
+  background: #16161e;
+  border: 1px solid #2a2a3a;
+  padding: 16px;
+  min-width: 360px;
+  max-width: 480px;
+}
+.modal h3 {
+  font-size: 13px;
+  color: #d4aa70;
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.modal label {
+  display: block;
+  font-size: 11px;
+  color: #707060;
+  margin-bottom: 3px;
+  margin-top: 8px;
+}
+.modal input, .modal textarea {
+  width: 100%;
+  background: #0a0a0e;
+  border: 1px solid #2a2a3a;
+  color: #d4d4c8;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.modal input:focus, .modal textarea:focus { border-color: #d4aa70; }
+.modal textarea { resize: vertical; min-height: 40px; }
+.modal .modal-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.modal .modal-actions button {
+  background: #1a1a2e;
+  color: #b8b8b0;
+  border: 1px solid #2a2a3a;
+  padding: 4px 14px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.modal .modal-actions button.primary {
+  color: #d4aa70;
+  font-weight: bold;
+}
+.modal .modal-actions button:hover { background: #22223a; }
+
+/* === Scrollbar === */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #0a0a0a; }
+::-webkit-scrollbar-thumb { background: #2a2a3a; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
+
+/* === Welcome Screen === */
+#welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #404038;
+  gap: 12px;
+}
+#welcome .title {
+  font-size: 24px;
+  color: #d4aa70;
+  letter-spacing: 3px;
+}
+#welcome .subtitle { font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <span class="logo">FERN CHAT</span>
+    <span class="identity" id="identity-display">
+      <svg id="self-icon" data-jdenticon-value="" width="20" height="20" style="vertical-align:middle;margin-right:4px"></svg>
+      <span class="pubkey" id="pubkey-display" title="Click to copy">no identity</span>
+    </span>
+    <div class="status">
+      <span class="dot off" id="ws-dot"></span>
+      <span id="ws-status">disconnected</span>
+    </div>
+  </div>
+
+  <div id="sidebar">
+    <div class="section-title">Groups</div>
+    <div class="actions">
+      <button onclick="showCreateGroup()">+ New</button>
+      <button onclick="showJoinGroup()">Join</button>
+    </div>
+    <div id="group-list"></div>
+  </div>
+
+  <div id="chat">
+    <div id="chat-header" style="display:none">
+      <div class="group-name" id="group-name"></div>
+      <div class="group-desc" id="group-desc"></div>
+      <div class="invite-link" id="invite-link" title="Click to copy invite link"></div>
+      <div id="group-actions" style="display:none">
+        <button class="join-btn" id="join-btn" onclick="joinCurrentGroup()" style="display:none">Join Group</button>
+        <button class="leave-btn" id="leave-btn" onclick="leaveCurrentGroup()" style="display:none">Leave Group</button>
+        <button class="manage-btn" id="manage-btn" onclick="showManageGroup()">Manage Group</button>
+      </div>
+    </div>
+    <div id="messages">
+      <div id="welcome">
+        <div class="title">FERN CHAT</div>
+        <div class="subtitle">Create or join a group to start</div>
+        <div class="subtitle">Your identity is a keypair stored in this browser</div>
+      </div>
+    </div>
+    <div id="input-area">
+      <input type="text" id="msg-input" placeholder="Type a message..." disabled
+             onkeydown="if(event.key==='Enter')sendMessage()">
+      <button id="send-btn" onclick="sendMessage()" disabled>Send</button>
+    </div>
+  </div>
+
+  <div id="right-panel">
+    <div class="section-title">Members</div>
+    <div id="members"><div style="padding:8px;color:#404038;font-size:12px">No group selected</div></div>
+    <div class="section-title">Event Log</div>
+    <div id="event-log">
+      <div class="clear-log" onclick="clearLog()">clear log</div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Group Modal -->
+<div class="modal-overlay hidden" id="modal-create">
+  <div class="modal">
+    <h3>Create Group</h3>
+    <label>Group Name</label>
+    <input type="text" id="create-name" placeholder="My Group">
+    <label>Description</label>
+    <input type="text" id="create-desc" placeholder="Optional description">
+    <label>Relay URLs (one per line)</label>
+    <textarea id="create-relays" rows="3">ws://localhost:8787
+ws://localhost:8788</textarea>
+    <div class="modal-actions">
+      <button onclick="closeModals()">Cancel</button>
+      <button class="primary" onclick="createGroup()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Join Group Modal -->
+<div class="modal-overlay hidden" id="modal-join">
+  <div class="modal">
+    <h3>Join Group</h3>
+    <label>Group Address (pubkey@relay)</label>
+    <input type="text" id="join-address" placeholder="abc123...@ws://localhost:8787">
+    <div class="modal-actions">
+      <button onclick="closeModals()">Cancel</button>
+      <button class="primary" onclick="joinGroup()">Join</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manage Group Modal -->
+<div class="modal-overlay hidden" id="modal-manage">
+  <div class="modal">
+    <h3>Manage Group</h3>
+
+    <label>Group Name</label>
+    <input type="text" id="manage-name" placeholder="Group name">
+
+    <label>Description</label>
+    <input type="text" id="manage-desc" placeholder="Description">
+
+    <label>Relays (one per line)</label>
+    <textarea id="manage-relays" rows="4" placeholder="ws://localhost:8787&#10;ws://localhost:8788"></textarea>
+
+    <div class="modal-actions">
+      <button onclick="closeModals()">Cancel</button>
+      <button class="primary" onclick="saveGroupMetadata()">Save Name/Desc</button>
+      <button class="primary" onclick="saveGroupRelays()">Save Relays</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as ed from '@noble/ed25519';
+
+// =========================================================================
+// Crypto
+// =========================================================================
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function utf8Encode(str) { return new TextEncoder().encode(str); }
+
+async function sha256Hex(data) {
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return bytesToHex(new Uint8Array(hash));
+}
+
+async function generateKeypair() {
+  const priv = ed.utils.randomPrivateKey();
+  const pub = await ed.getPublicKey(priv);
+  return { priv: bytesToHex(priv), pub: bytesToHex(pub) };
+}
+
+async function signMessage(privHex, messageBytes) {
+  const sig = await ed.sign(messageBytes, hexToBytes(privHex));
+  return bytesToHex(sig);
+}
+
+async function verifySignature(pubHex, sigHex, messageBytes) {
+  try {
+    return await ed.verify(hexToBytes(sigHex), messageBytes, hexToBytes(pubHex));
+  } catch { return false; }
+}
+
+// =========================================================================
+// Key Storage
+// =========================================================================
+
+function loadKeys() {
+  const data = localStorage.getItem('fern_keys');
+  return data ? JSON.parse(data) : null;
+}
+
+function saveKeys(keys) {
+  localStorage.setItem('fern_keys', JSON.stringify(keys));
+}
+
+// =========================================================================
+// Event Creation (matches protocol spec exactly)
+// =========================================================================
+
+function canonicalSerialise(eventType, group, author, parents, content, ts) {
+  const sortedParents = [...parents].sort();
+  const arr = [eventType, group, author, sortedParents, content, ts];
+  return utf8Encode(JSON.stringify(arr));
+}
+
+async function buildEvent(eventType, groupHex, authorHex, privHex, parents, content, ts) {
+  if (!ts) ts = Math.floor(Date.now() / 1000);
+  const canonical = canonicalSerialise(eventType, groupHex, authorHex, parents, content, ts);
+  const id = await sha256Hex(canonical);
+  const sig = await signMessage(privHex, canonical);
+  return { id, type: eventType, group: groupHex, author: authorHex, parents: [...parents].sort(), content, ts, sig };
+}
+
+// =========================================================================
+// State
+// =========================================================================
+
+let keys = null;
+let ws = null;
+let currentGroup = null;
+let groups = [];
+let events = [];
+let eventLog = [];
+
+const USER_COLORS = [
+  '#c8a060', '#60a0c8', '#a0c860', '#c860a0', '#60c8a0',
+  '#c86060', '#6060c8', '#60c860', '#c8c860', '#c860c8',
+];
+
+function userColor(pubkey) {
+  let hash = 0;
+  for (let i = 0; i < pubkey.length; i++) hash = ((hash << 5) - hash) + pubkey.charCodeAt(i);
+  return USER_COLORS[Math.abs(hash) % USER_COLORS.length];
+}
+
+// =========================================================================
+// Logging
+// =========================================================================
+
+function addLog(kind, message) {
+  const ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  eventLog.push({ ts, kind, message });
+  renderLog();
+}
+
+function clearLog() {
+  eventLog = [];
+  renderLog();
+}
+
+function renderLog() {
+  const el = document.getElementById('event-log');
+  let html = '<div class="clear-log" onclick="clearLog()">clear log</div>';
+  for (const entry of eventLog) {
+    html += `<div class="log-entry ${entry.kind}"><span class="log-ts">${entry.ts}</span>${entry.message}</div>`;
+  }
+  el.innerHTML = html;
+  el.scrollTop = el.scrollHeight;
+}
+
+// =========================================================================
+// WebSocket
+// =========================================================================
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('ws-dot').classList.remove('off');
+    document.getElementById('ws-status').textContent = 'connected';
+    addLog('browser', 'WebSocket connected to server');
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.add('off');
+    document.getElementById('ws-status').textContent = 'disconnected';
+    addLog('error', 'WebSocket disconnected');
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'event') {
+      handleIncomingEvent(msg.event, msg.relay);
+    } else if (msg.type === 'log') {
+      addLog(msg.kind, msg.message);
+    } else if (msg.type === 'error') {
+      addLog('error', msg.message);
+    } else if (msg.type === 'ok') {
+      // published successfully
+    }
+  };
+}
+
+function wsSend(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+}
+
+// =========================================================================
+// Event Handling
+// =========================================================================
+
+function handleIncomingEvent(event, relay) {
+  if (events.find(e => e.id === event.id)) return;
+  events.push(event);
+  events.sort((a, b) => a.ts - b.ts || a.id.localeCompare(b.id));
+  if (currentGroup === event.group) {
+    renderMessages();
+    renderMembers();
+    updateInputState();
+    updateManageButton();
+  }
+}
+
+async function loadGroupEvents(groupPubkey) {
+  events = [];
+  addLog('local', `Loading local events for ${groupPubkey.slice(0, 12)}...`);
+  wsSend({ action: 'load_local', group: groupPubkey });
+
+  setTimeout(() => {
+    wsSend({ action: 'sync', since: 0 });
+  }, 500);
+}
+
+// =========================================================================
+// Rendering
+// =========================================================================
+
+function identicon(pubkey, size = 20) {
+  return `<svg class="icon" data-jdenticon-value="${pubkey}" width="${size}" height="${size}"></svg>`;
+}
+
+function updateJdenticon() {
+  if (typeof jdenticon !== 'undefined') {
+    jdenticon.update('[data-jdenticon-value]');
+  } else {
+    setTimeout(updateJdenticon, 200);
+  }
+}
+
+function renderGroups() {
+  const el = document.getElementById('group-list');
+  if (!groups.length) {
+    el.innerHTML = '<div style="padding:8px;color:#404038;font-size:11px">No groups yet</div>';
+    return;
+  }
+  el.innerHTML = groups.map(g => `
+    <div class="group-item ${currentGroup === g.pubkey ? 'active' : ''}"
+         onclick="selectGroup('${g.pubkey}')">
+      <span class="name">${escHtml(g.name)}</span>
+      <span class="count">${g.member_count}</span>
+    </div>
+  `).join('');
+}
+
+function renderMessages() {
+  const el = document.getElementById('messages');
+
+  if (!events.length) {
+    el.innerHTML = '<div class="empty">No messages yet</div>';
+    return;
+  }
+
+  let html = '';
+  for (const event of events) {
+    const ts = new Date(event.ts * 1000).toLocaleTimeString('en-GB', { hour12: false });
+    const author = event.author.slice(0, 12);
+    const color = userColor(event.author);
+
+    if (event.type === 'message') {
+      html += `<div class="msg">
+        <div>
+          <span class="ts">${ts}</span>
+          ${identicon(event.author, 14)}
+          <span class="author" style="color:${color}">${escHtml(author)}</span>
+          <span class="content">${escHtml(event.content)}</span>
+        </div>
+      </div>`;
+    } else {
+      const desc = describeEvent(event);
+      html += `<div class="msg system">
+        <span class="ts">${ts}</span>
+        <span class="content">*** ${escHtml(desc)} ***</span>
+      </div>`;
+    }
+  }
+  el.innerHTML = html;
+  el.scrollTop = el.scrollHeight;
+  updateJdenticon();
+}
+
+function renderMembers() {
+  const el = document.getElementById('members');
+  if (!currentGroup) {
+    el.innerHTML = '<div style="padding:8px;color:#404038;font-size:12px">No group selected</div>';
+    return;
+  }
+
+  const state = deriveState(events);
+  let html = '';
+
+  // Show all invited members, mark joined/not-joined
+  const allMembers = [...new Set([...state.members, ...state.joined])];
+  for (const m of allMembers) {
+    const isJoined = state.joined.includes(m);
+    const isMod = state.mods.includes(m);
+    const isFounder = state.founder === m;
+    const color = userColor(m);
+    const cssClass = isFounder ? 'founder' : (isJoined ? '' : 'not-joined');
+    const statusLabel = isJoined ? '' : ' (not joined)';
+    html += `<div class="member ${cssClass}">
+      ${identicon(m, 20)}
+      <span class="name" style="color:${color}">${m.slice(0, 16)}...</span>
+      ${isFounder ? '<span class="role">founder</span>' : isMod ? '<span class="role">mod</span>' : ''}
+      ${!isJoined && !isFounder ? '<span class="role" style="color:#505048">offline</span>' : ''}
+    </div>`;
+  }
+  el.innerHTML = html || '<div style="padding:8px;color:#404038;font-size:12px">No members</div>';
+  updateJdenticon();
+}
+
+function describeEvent(event) {
+  const author = event.author.slice(0, 12);
+  switch (event.type) {
+    case 'group_genesis': return `Group created: ${event.content.name || 'unnamed'}`;
+    case 'group_invite': return `${author} invited ${event.content.invitee?.slice(0, 12) || '?'}`;
+    case 'group_join': return `${author} joined`;
+    case 'group_leave': return `${author} left`;
+    case 'group_kick': return `${author} kicked ${event.content.target?.slice(0, 12) || '?'}`;
+    case 'mod_add': return `${author} promoted ${event.content.target?.slice(0, 12) || '?'} to mod`;
+    case 'mod_remove': return `${author} demoted ${event.content.target?.slice(0, 12) || '?'}`;
+    case 'relay_update': return `${author} updated relays`;
+    case 'group_metadata': return `${author} updated group info`;
+    default: return `${author}: [${event.type}]`;
+  }
+}
+
+function deriveState(events) {
+  const state = { members: new Set(), joined: new Set(), mods: new Set(), founder: null, relays: [], name: '', description: '', public: true };
+  const sorted = [...events].sort((a, b) => a.ts - b.ts || a.id.localeCompare(b.id));
+  for (const e of sorted) {
+    if (e.type === 'group_genesis') {
+      state.founder = e.content.founder;
+      state.members = new Set([e.content.founder]);
+      state.joined = new Set([e.content.founder]); // founder auto-joins
+      state.mods = new Set([e.content.founder]);
+      state.relays = e.content.relays || [];
+      state.name = e.content.name || '';
+      state.description = e.content.description || '';
+      state.public = e.content.public !== false;
+    } else if (e.type === 'group_invite') {
+      if (state.mods.has(e.author)) state.members.add(e.content.invitee);
+    } else if (e.type === 'group_join') {
+      if (state.public || state.members.has(e.author)) {
+        state.joined.add(e.author);
+      }
+    } else if (e.type === 'group_leave') {
+      state.joined.delete(e.author);
+    } else if (e.type === 'group_kick') {
+      if (state.mods.has(e.author)) {
+        if (e.content.target === state.founder) return; // founder cannot be kicked
+        state.joined.delete(e.content.target);
+        state.mods.delete(e.content.target);
+      }
+    } else if (e.type === 'mod_add') {
+      if (state.mods.has(e.author)) state.mods.add(e.content.target);
+    } else if (e.type === 'mod_remove') {
+      if (state.mods.has(e.author)) {
+        if (state.mods.size <= 1) return; // cannot remove the last mod
+        state.mods.delete(e.content.target);
+      }
+    } else if (e.type === 'relay_update') {
+      if (state.mods.has(e.author)) state.relays = e.content.relays || [];
+    } else if (e.type === 'group_metadata') {
+      if (state.mods.has(e.author)) {
+        if (e.content.name !== undefined) state.name = e.content.name;
+        if (e.content.description !== undefined) state.description = e.content.description;
+      }
+    }
+  }
+  state.members = [...state.members];
+  state.joined = [...state.joined];
+  state.mods = [...state.mods];
+  return state;
+}
+
+function escHtml(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+// =========================================================================
+// Input State
+// =========================================================================
+
+function updateInputState() {
+  if (!keys || !currentGroup) {
+    document.getElementById('msg-input').disabled = true;
+    document.getElementById('send-btn').disabled = true;
+    return;
+  }
+  const state = deriveState(events);
+  const canPost = state.joined.includes(keys.pub);
+  document.getElementById('msg-input').disabled = !canPost;
+  document.getElementById('send-btn').disabled = !canPost;
+  document.getElementById('msg-input').placeholder = canPost ? 'Type a message...' : 'Join the group to post messages';
+}
+
+// =========================================================================
+// Actions
+// =========================================================================
+
+async function selectGroup(pubkey) {
+  currentGroup = pubkey;
+  const group = groups.find(g => g.pubkey === pubkey);
+
+  document.getElementById('chat-header').style.display = '';
+  document.getElementById('group-name').textContent = group?.name || pubkey.slice(0, 16) + '...';
+  document.getElementById('group-desc').textContent = group?.description || '';
+
+  const relays = group?.relays || [];
+  const address = `${pubkey}@${relays.join(',')}`;
+  const el = document.getElementById('invite-link');
+  el.textContent = address;
+  el.title = address;
+  el.className = 'invite-link';
+  el.onclick = () => {
+    navigator.clipboard.writeText(address);
+    el.textContent = 'copied!';
+    el.className = 'invite-link copied';
+    setTimeout(() => {
+      el.textContent = address;
+      el.className = 'invite-link';
+    }, 1500);
+  };
+
+  renderGroups();
+  renderMessages();
+  renderMembers();
+  updateInputState();
+  updateManageButton();
+
+  // Connect to relays
+  const connectRelays = group?.relays || [];
+  if (connectRelays.length) {
+    for (const relay of connectRelays) {
+      addLog('browser', `Connecting to ${relay}...`);
+      wsSend({ action: 'connect_relay', relay, group: pubkey });
+    }
+  }
+
+  loadGroupEvents(pubkey);
+}
+
+async function sendMessage() {
+  if (!keys || !currentGroup) return;
+  const input = document.getElementById('msg-input');
+  const content = input.value.trim();
+  if (!content) return;
+  input.value = '';
+
+  const tips = getTips(events);
+
+  addLog('browser', `Signing message...`);
+  const event = await buildEvent('message', currentGroup, keys.pub, keys.priv, tips, content);
+
+  addLog('browser', `Event created: ${event.id.slice(0, 12)}...`);
+  wsSend({ action: 'publish', event });
+
+  handleIncomingEvent(event, 'local');
+}
+
+async function createGroup() {
+  if (!keys) return;
+  const name = document.getElementById('create-name').value.trim();
+  const desc = document.getElementById('create-desc').value.trim();
+  const relays = document.getElementById('create-relays').value.trim().split('\n').map(s => s.trim()).filter(Boolean);
+  if (!name || !relays.length) return;
+  closeModals();
+
+  const groupKeys = await generateKeypair();
+  localStorage.setItem(`fern_group_key_${groupKeys.pub}`, groupKeys.priv);
+
+  addLog('browser', `Generating group keypair: ${groupKeys.pub.slice(0, 12)}...`);
+  addLog('browser', `Signing genesis event...`);
+
+  const content = {
+    name, description: desc, public: true,
+    founder: keys.pub,
+    mods: [keys.pub],
+    relays: relays,
+  };
+
+  const genesis = await buildEvent('group_genesis', groupKeys.pub, keys.pub, groupKeys.priv, [], content);
+
+  addLog('browser', `Genesis event: ${genesis.id.slice(0, 12)}...`);
+
+  const res = await fetch('/api/groups', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event: genesis }),
+  });
+
+  if (res.ok) {
+    addLog('local', `Group created locally`);
+    await refreshGroups();
+    selectGroup(groupKeys.pub);
+
+    for (const r of relays) {
+      wsSend({ action: 'connect_relay', relay: r, group: groupKeys.pub });
+    }
+    setTimeout(() => {
+      for (const r of relays) {
+        wsSend({ action: 'publish', event: genesis, relay: r });
+      }
+    }, 1000);
+  } else {
+    const err = await res.json();
+    addLog('error', `Failed to create group: ${err.error}`);
+  }
+}
+
+async function joinGroup() {
+  const address = document.getElementById('join-address').value.trim();
+  closeModals();
+  if (!address.includes('@')) {
+    addLog('error', 'Invalid address format. Use: pubkey@relay');
+    return;
+  }
+
+  const [groupPubkey, ...rest] = address.split('@');
+  const relayHints = rest.join('@');
+  const relay = relayHints.startsWith('ws') ? relayHints : `ws://${relayHints}`;
+
+  addLog('browser', `Joining group ${groupPubkey.slice(0, 12)}...`);
+
+  wsSend({ action: 'connect_relay', relay, group: groupPubkey });
+  wsSend({ action: 'sync', since: 0 });
+
+  setTimeout(async () => {
+    await refreshGroups();
+    selectGroup(groupPubkey);
+  }, 2000);
+}
+
+async function joinCurrentGroup() {
+  if (!keys || !currentGroup) return;
+  const state = deriveState(events);
+
+  // In private groups, must be invited first
+  if (!state.public && !state.members.includes(keys.pub)) {
+    addLog('error', 'You must be invited to join this private group.');
+    return;
+  }
+
+  const tips = getTips(events);
+  if (!tips.length) { addLog('error', 'No events in group yet.'); return; }
+
+  addLog('browser', 'Signing group_join event...');
+  const event = await buildEvent('group_join', currentGroup, keys.pub, keys.priv, tips, {});
+  wsSend({ action: 'publish', event });
+  handleIncomingEvent(event, 'local');
+  addLog('local', 'Joined group!');
+}
+
+async function leaveCurrentGroup() {
+  if (!keys || !currentGroup) return;
+  const state = deriveState(events);
+
+  if (!state.joined.includes(keys.pub)) {
+    addLog('error', 'You are not a member of this group.');
+    return;
+  }
+
+  const tips = getTips(events);
+  addLog('browser', 'Signing group_leave event...');
+  const event = await buildEvent('group_leave', currentGroup, keys.pub, keys.priv, tips, {});
+  wsSend({ action: 'publish', event });
+  handleIncomingEvent(event, 'local');
+  addLog('local', 'Left group.');
+}
+
+// =========================================================================
+// Helpers
+// =========================================================================
+
+function getTips(events) {
+  if (!events.length) return [];
+  const allParents = new Set();
+  for (const e of events) (e.parents || []).forEach(p => allParents.add(p));
+  const ids = new Set(events.map(e => e.id));
+  const tips = [...ids].filter(id => !allParents.has(id));
+  return tips.length ? tips : [events[events.length - 1].id];
+}
+
+async function refreshGroups() {
+  const res = await fetch('/api/groups');
+  groups = await res.json();
+  renderGroups();
+}
+
+function showCreateGroup() {
+  if (!keys) { addLog('error', 'Generate an identity first (click "no identity")'); return; }
+  document.getElementById('modal-create').classList.remove('hidden');
+}
+
+function showJoinGroup() {
+  document.getElementById('modal-join').classList.remove('hidden');
+}
+
+function closeModals() {
+  document.querySelectorAll('.modal-overlay').forEach(m => m.classList.add('hidden'));
+}
+
+async function initIdentity() {
+  keys = loadKeys();
+  if (!keys) {
+    addLog('browser', 'Generating new Ed25519 keypair...');
+    keys = await generateKeypair();
+    saveKeys(keys);
+    addLog('browser', `Identity created: ${keys.pub.slice(0, 16)}...`);
+  }
+  const el = document.getElementById('pubkey-display');
+  el.textContent = keys.pub.slice(0, 16) + '...';
+  el.title = keys.pub;
+  el.onclick = () => {
+    navigator.clipboard.writeText(keys.pub);
+    el.textContent = 'copied!';
+    setTimeout(() => { el.textContent = keys.pub.slice(0, 16) + '...'; }, 1000);
+  };
+  const icon = document.getElementById('self-icon');
+  if (icon) icon.setAttribute('data-jdenticon-value', keys.pub);
+  updateJdenticon();
+}
+
+// =========================================================================
+// Group Management
+// =========================================================================
+
+function updateManageButton() {
+  if (!keys || !currentGroup) { document.getElementById('group-actions').style.display = 'none'; return; }
+  const state = deriveState(events);
+  const isMod = state.mods.includes(keys.pub);
+  const isJoined = state.joined.includes(keys.pub);
+  const isFounder = state.founder === keys.pub;
+
+  document.getElementById('group-actions').style.display = '';
+  document.getElementById('manage-btn')?.style && (document.getElementById('manage-btn').style.display = isMod ? '' : 'none');
+
+  // Show join/leave buttons
+  const joinBtn = document.getElementById('join-btn');
+  const leaveBtn = document.getElementById('leave-btn');
+
+  if (isFounder) {
+    joinBtn.style.display = 'none';
+    leaveBtn.style.display = 'none';
+  } else if (isJoined) {
+    joinBtn.style.display = 'none';
+    leaveBtn.style.display = '';
+  } else {
+    joinBtn.style.display = '';
+    leaveBtn.style.display = 'none';
+  }
+}
+
+function showManageGroup() {
+  if (!keys || !currentGroup) return;
+  const state = deriveState(events);
+  if (!state.mods.includes(keys.pub)) return;
+
+  document.getElementById('manage-name').value = state.name || '';
+  document.getElementById('manage-desc').value = state.description || '';
+  document.getElementById('manage-relays').value = (state.relays || []).join('\n');
+  document.getElementById('modal-manage').classList.remove('hidden');
+}
+
+async function saveGroupMetadata() {
+  if (!keys || !currentGroup) return;
+  closeModals();
+
+  const name = document.getElementById('manage-name').value.trim();
+  const desc = document.getElementById('manage-desc').value.trim();
+  const tips = getTips(events);
+
+  addLog('browser', 'Signing group_metadata event...');
+  const content = { name, description: desc };
+  const event = await buildEvent('group_metadata', currentGroup, keys.pub, keys.priv, tips, content);
+
+  addLog('browser', `Event created: ${event.id.slice(0, 12)}...`);
+  wsSend({ action: 'publish', event });
+  handleIncomingEvent(event, 'local');
+}
+
+async function saveGroupRelays() {
+  if (!keys || !currentGroup) return;
+  closeModals();
+
+  const newRelays = document.getElementById('manage-relays').value.trim().split('\n').map(s => s.trim()).filter(Boolean);
+  if (!newRelays.length) { addLog('error', 'Need at least one relay'); return; }
+
+  const state = deriveState(events);
+  const tips = getTips(events);
+  const oldRelays = state.relays.length ? state.relays : ['ws://localhost:8787', 'ws://localhost:8788'];
+
+  addLog('browser', 'Signing relay_update event...');
+  const content = { relays: newRelays };
+  const event = await buildEvent('relay_update', currentGroup, keys.pub, keys.priv, tips, content);
+
+  addLog('browser', `Event created: ${event.id.slice(0, 12)}...`);
+
+  for (const r of oldRelays) {
+    wsSend({ action: 'publish', event, relay: r });
+  }
+  for (const r of newRelays) {
+    wsSend({ action: 'connect_relay', relay: r, group: currentGroup });
+  }
+  setTimeout(() => {
+    for (const r of newRelays) {
+      wsSend({ action: 'publish', event, relay: r });
+    }
+  }, 1000);
+
+  handleIncomingEvent(event, 'local');
+}
+
+// Expose globals
+window.selectGroup = selectGroup;
+window.sendMessage = sendMessage;
+window.createGroup = createGroup;
+window.joinGroup = joinGroup;
+window.joinCurrentGroup = joinCurrentGroup;
+window.leaveCurrentGroup = leaveCurrentGroup;
+window.showCreateGroup = showCreateGroup;
+window.showJoinGroup = showJoinGroup;
+window.showManageGroup = showManageGroup;
+window.saveGroupMetadata = saveGroupMetadata;
+window.saveGroupRelays = saveGroupRelays;
+window.closeModals = closeModals;
+window.clearLog = clearLog;
+
+// =========================================================================
+// Boot
+// =========================================================================
+
+await initIdentity();
+await refreshGroups();
+connectWS();
+addLog('browser', 'FERN Chat ready');
+
+</script>
+</body>
+</html>

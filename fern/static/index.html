@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FERN DAG Visualiser</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; overflow: hidden; }
+
+#app { display: grid; grid-template-columns: 1fr 380px; grid-template-rows: 48px 1fr; height: 100vh; }
+
+header { grid-column: 1 / -1; background: #161b22; border-bottom: 1px solid #30363d; display: flex; align-items: center; padding: 0 16px; gap: 16px; }
+header h1 { font-size: 14px; font-weight: 600; color: #58a6ff; white-space: nowrap; }
+header select { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 4px 8px; border-radius: 6px; font-family: inherit; font-size: 13px; min-width: 300px; }
+#status { font-size: 12px; color: #8b949e; margin-left: auto; display: flex; gap: 16px; align-items: center; }
+#status .dot { width: 8px; height: 8px; border-radius: 50%; background: #3fb950; display: inline-block; }
+#status .dot.disconnected { background: #f85149; }
+
+#graph-container { position: relative; overflow: hidden; background: #0d1117; }
+#graph-container svg { width: 100%; height: 100%; }
+
+#sidebar { background: #161b22; border-left: 1px solid #30363d; overflow-y: auto; display: flex; flex-direction: column; }
+.sidebar-section { border-bottom: 1px solid #30363d; padding: 12px 16px; }
+.sidebar-section h2 { font-size: 12px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+
+.state-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+.state-grid .label { color: #8b949e; }
+.state-grid .value { color: #c9d1d9; word-break: break-all; }
+.state-grid .value.mono { font-size: 12px; }
+
+.member-list { list-style: none; font-size: 12px; }
+.member-list li { padding: 2px 0; color: #c9d1d9; }
+.member-list .mod { color: #58a6ff; }
+.member-list .mod::after { content: " mod"; color: #8b949e; font-size: 10px; }
+
+#event-detail { flex: 1; }
+#event-detail .empty { color: #484f58; font-size: 13px; font-style: italic; }
+.detail-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
+.detail-grid .label { color: #8b949e; }
+.detail-grid .value { color: #c9d1d9; word-break: break-all; }
+.detail-grid .value.valid { color: #3fb950; }
+.detail-grid .value.invalid { color: #f85149; }
+
+.content-block { margin-top: 8px; padding: 8px; background: #21262d; border-radius: 6px; font-size: 12px; }
+.content-block .key { color: #8b949e; }
+.content-block .val { color: #c9d1d9; }
+
+.copy-id { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
+.copy-id span { font-family: inherit; }
+.copy-btn {
+  background: none; border: 1px solid #30363d; color: #8b949e; border-radius: 4px;
+  padding: 1px 5px; font-size: 10px; cursor: pointer; font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.copy-btn:hover { background: #30363d; color: #c9d1d9; }
+.copy-btn.copied { color: #3fb950; border-color: #3fb950; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; }
+.legend-item { display: flex; align-items: center; gap: 4px; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+.tooltip {
+  position: absolute; pointer-events: none; background: #1c2128; border: 1px solid #30363d;
+  border-radius: 6px; padding: 8px 12px; font-size: 12px; max-width: 400px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 10; display: none;
+}
+.tooltip .tt-type { font-weight: 600; }
+.tooltip .tt-author { color: #8b949e; }
+.tooltip .tt-content { color: #c9d1d9; margin-top: 4px; }
+
+.node circle { stroke-width: 2; cursor: pointer; transition: r 0.15s; }
+.node circle:hover { r: 12; }
+.node circle.selected { stroke: #ffffff; stroke-width: 3; }
+.node text { font-size: 10px; fill: #8b949e; pointer-events: none; }
+.edge { stroke: #30363d; stroke-width: 1.5; fill: none; }
+.edge.highlighted { stroke: #58a6ff; stroke-width: 2; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>FERN DAG Visualiser</h1>
+    <input type="text" id="storage-path" value="~/.fern" placeholder="Storage path"
+           title="Storage directory path" style="
+      background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:3px 8px;
+      border-radius:6px;font-family:inherit;font-size:12px;width:140px;">
+    <select id="group-select"><option value="">No groups found</option></select>
+    <div id="status">
+      <span class="dot disconnected" id="ws-dot"></span>
+      <span id="ws-status">disconnected</span>
+      <span id="event-count">0 events</span>
+    </div>
+  </header>
+
+  <div id="graph-container">
+    <svg></svg>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+
+  <div id="sidebar">
+    <div class="sidebar-section" id="state-section">
+      <h2>Group State</h2>
+      <div id="state-content"><span style="color:#484f58;font-size:13px">Select a group</span></div>
+    </div>
+    <div class="sidebar-section">
+      <h2>Legend</h2>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#f0883e"></div>genesis</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#58a6ff"></div>message</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div>invite</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#56d364"></div>join</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#8b949e"></div>leave</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#f85149"></div>kick</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#bc8cff"></div>mod_add</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#db61a2"></div>mod_remove</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#79c0ff"></div>relay_update</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#d2a8ff"></div>metadata</div>
+      </div>
+    </div>
+    <div class="sidebar-section" id="event-detail">
+      <h2>Event Detail</h2>
+      <div id="detail-content"><span class="empty">Click a node to inspect</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const TYPE_COLORS = {
+  group_genesis: "#f0883e",
+  message: "#58a6ff",
+  group_invite: "#3fb950",
+  group_join: "#56d364",
+  group_leave: "#8b949e",
+  group_kick: "#f85149",
+  mod_add: "#bc8cff",
+  mod_remove: "#db61a2",
+  relay_update: "#79c0ff",
+  group_metadata: "#d2a8ff",
+};
+
+const TYPE_ICONS = {
+  group_genesis: "\u2605",
+  message: "\u25B6",
+  group_invite: "\u2795",
+  group_join: "\u2713",
+  group_leave: "\u2715",
+  group_kick: "\u2796",
+  mod_add: "\u2605",
+  mod_remove: "\u2606",
+  relay_update: "\u27F3",
+  group_metadata: "\u270E",
+};
+
+let currentGroup = null;
+let ws = null;
+let allEvents = [];
+let dagData = { nodes: [], edges: [] };
+let selectedNode = null;
+
+// D3 setup
+const svg = d3.select("#graph-container svg");
+const container = svg.append("g");
+const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", e => container.attr("transform", e.transform));
+svg.call(zoom);
+
+const edgeGroup = container.append("g").attr("class", "edges");
+const nodeGroup = container.append("g").attr("class", "nodes");
+const defs = svg.append("defs");
+defs.append("marker").attr("id", "arrow").attr("viewBox", "0 -5 10 10")
+  .attr("refX", 20).attr("refY", 0).attr("markerWidth", 6).attr("markerHeight", 6)
+  .attr("orient", "auto").append("path").attr("d", "M0,-5L10,0L0,5").attr("fill", "#30363d");
+
+const tooltip = d3.select("#tooltip");
+
+// --- Helpers ---
+
+function copyableId(fullId, truncateLen = 10) {
+  const short = fullId.slice(0, truncateLen);
+  return `<span class="copy-id"><span>${short}</span><button class="copy-btn" data-id="${fullId}" onclick="copyFullId(this)" title="${fullId}">copy</button></span>`;
+}
+
+function copyFullId(btn) {
+  const fullId = btn.getAttribute('data-id');
+  navigator.clipboard.writeText(fullId).then(() => {
+    btn.textContent = '✓';
+    setTimeout(() => btn.textContent = 'copy', 1000);
+  }).catch(() => {
+    btn.textContent = '✗';
+    setTimeout(() => btn.textContent = 'copy', 1000);
+  });
+}
+
+// --- API ---
+
+function storageParam() {
+  const val = document.getElementById('storage-path')?.value?.trim();
+  return val ? `?storage=${encodeURIComponent(val)}` : '';
+}
+
+async function fetchGroups() {
+  const res = await fetch(`/api/groups${storageParam()}`);
+  return res.json();
+}
+
+async function fetchDAG(group) {
+  const res = await fetch(`/api/groups/${group}/dag${storageParam()}`);
+  return res.json();
+}
+
+async function fetchState(group) {
+  const res = await fetch(`/api/groups/${group}/state${storageParam()}`);
+  return res.json();
+}
+
+async function fetchEvents(group) {
+  const res = await fetch(`/api/groups/${group}${storageParam()}`);
+  return res.json();
+}
+
+// --- WebSocket ---
+
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    d3.select("#ws-dot").classed("disconnected", false);
+    d3.select("#ws-status").text("connected");
+    if (currentGroup) ws.send(JSON.stringify({ action: "subscribe", group: currentGroup }));
+  };
+
+  ws.onclose = () => {
+    d3.select("#ws-dot").classed("disconnected", true);
+    d3.select("#ws-status").text("disconnected");
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "update" && msg.group === currentGroup) {
+      allEvents = msg.events;
+      renderFromEvents(msg.events);
+    } else if (msg.type === "full_sync") {
+      allEvents = msg.events;
+      renderFromEvents(msg.events);
+    }
+  };
+}
+
+// --- Layout ---
+
+function computeLayout(events) {
+  const eventMap = {};
+  events.forEach(e => eventMap[e.id] = e);
+
+  // Topological sort with BFS layering
+  const inDegree = {};
+  const children = {};
+  events.forEach(e => {
+    inDegree[e.id] = 0;
+    children[e.id] = [];
+  });
+  events.forEach(e => {
+    (e.parents || []).forEach(pid => {
+      if (eventMap[pid]) {
+        inDegree[e.id]++;
+        children[pid].push(e.id);
+      }
+    });
+  });
+
+  // BFS to assign layers
+  const layers = {};
+  const queue = [];
+  events.forEach(e => {
+    if (inDegree[e.id] === 0) {
+      layers[e.id] = 0;
+      queue.push(e.id);
+    }
+  });
+
+  while (queue.length) {
+    const id = queue.shift();
+    const layer = layers[id];
+    children[id].forEach(cid => {
+      layers[cid] = Math.max(layers[cid] || 0, layer + 1);
+      inDegree[cid]--;
+      if (inDegree[cid] === 0) queue.push(cid);
+    });
+  }
+
+  // Group by layer
+  const byLayer = {};
+  events.forEach(e => {
+    const l = layers[e.id] || 0;
+    if (!byLayer[l]) byLayer[l] = [];
+    byLayer[l].push(e);
+  });
+
+  // Position nodes
+  const nodeWidth = 180;
+  const layerHeight = 100;
+  const nodes = [];
+  const maxLayer = Math.max(...Object.keys(byLayer).map(Number), 0);
+
+  Object.keys(byLayer).sort((a, b) => a - b).forEach(l => {
+    const layerNodes = byLayer[l];
+    const totalWidth = layerNodes.length * nodeWidth;
+    layerNodes.forEach((e, i) => {
+      nodes.push({
+        ...e,
+        x: (i - (layerNodes.length - 1) / 2) * nodeWidth,
+        y: l * layerHeight,
+        layer: Number(l),
+      });
+    });
+  });
+
+  // Build edges
+  const edges = [];
+  events.forEach(e => {
+    (e.parents || []).forEach(pid => {
+      if (eventMap[pid]) {
+        edges.push({ source: pid, target: e.id });
+      }
+    });
+  });
+
+  return { nodes, edges };
+}
+
+// --- Rendering ---
+
+function renderFromEvents(events) {
+  if (!events || events.length === 0) {
+    nodeGroup.selectAll("*").remove();
+    edgeGroup.selectAll("*").remove();
+    d3.select("#event-count").text("0 events");
+    return;
+  }
+
+  dagData = computeLayout(events);
+  d3.select("#event-count").text(`${events.length} events`);
+
+  renderDAG();
+}
+
+function renderDAG() {
+  const { nodes, edges } = dagData;
+  if (!nodes.length) return;
+
+  // Auto-fit
+  const xExtent = d3.extent(nodes, d => d.x);
+  const yExtent = d3.extent(nodes, d => d.y);
+  const pad = 80;
+  const graphEl = document.getElementById("graph-container");
+  const w = graphEl.clientWidth;
+  const h = graphEl.clientHeight;
+  const gw = (xExtent[1] - xExtent[0]) + pad * 2;
+  const gh = (yExtent[1] - yExtent[0]) + pad * 2;
+  const scale = Math.min(w / gw, h / gh, 1.5);
+  const cx = (xExtent[0] + xExtent[1]) / 2;
+  const cy = (yExtent[0] + yExtent[1]) / 2;
+
+  svg.transition().duration(400).call(
+    zoom.transform,
+    d3.zoomIdentity.translate(w / 2, h / 2).scale(scale).translate(-cx, -cy)
+  );
+
+  // Edges
+  const edgeSel = edgeGroup.selectAll(".edge").data(edges, d => `${d.source}-${d.target}`);
+  edgeSel.exit().transition().duration(200).attr("opacity", 0).remove();
+
+  const nodeMap = {};
+  nodes.forEach(n => nodeMap[n.id] = n);
+
+  const edgeEnter = edgeSel.enter().append("path").attr("class", "edge")
+    .attr("marker-end", "url(#arrow)").attr("opacity", 0);
+
+  edgeEnter.merge(edgeSel)
+    .attr("d", d => {
+      const s = nodeMap[d.source];
+      const t = nodeMap[d.target];
+      if (!s || !t) return "";
+      const midY = (s.y + t.y) / 2;
+      return `M${s.x},${s.y} C${s.x},${midY} ${t.x},${midY} ${t.x},${t.y}`;
+    })
+    .transition().duration(300).attr("opacity", 1);
+
+  // Nodes
+  const nodeSel = nodeGroup.selectAll(".node").data(nodes, d => d.id);
+  nodeSel.exit().transition().duration(200).attr("opacity", 0).remove();
+
+  const nodeEnter = nodeSel.enter().append("g").attr("class", "node")
+    .attr("transform", d => `translate(${d.x},${d.y})`)
+    .attr("opacity", 0);
+
+  nodeEnter.append("circle").attr("r", 8);
+  nodeEnter.append("text").attr("dy", -14).attr("text-anchor", "middle");
+
+  const merged = nodeEnter.merge(nodeSel);
+
+  merged.transition().duration(300)
+    .attr("transform", d => `translate(${d.x},${d.y})`)
+    .attr("opacity", 1);
+
+  merged.select("circle")
+    .attr("fill", d => TYPE_COLORS[d.type] || "#8b949e")
+    .attr("stroke", d => d.valid ? "#30363d" : "#f85149")
+    .classed("selected", d => selectedNode === d.id);
+
+  merged.select("text")
+    .text(d => {
+      const icon = TYPE_ICONS[d.type] || "\u25CF";
+      return `${icon} ${d.type.replace("group_", "")} @${d.author.slice(0, 8)}`;
+    });
+
+  // Events
+  merged.on("click", (e, d) => selectNode(d.id));
+  merged.on("mouseenter", (e, d) => showTooltip(e, d));
+  merged.on("mouseleave", () => hideTooltip());
+
+  // Highlight edges for selected node
+  edgeGroup.selectAll(".edge")
+    .classed("highlighted", d => selectedNode && (d.source === selectedNode || d.target === selectedNode));
+}
+
+function selectNode(id) {
+  selectedNode = id;
+  renderDAG();
+  showEventDetail(id);
+}
+
+function showEventDetail(id) {
+  const event = allEvents.find(e => e.id === id);
+  if (!event) return;
+
+  const v = event.verification || {};
+  const ts = new Date(event.ts * 1000).toLocaleString();
+
+  let html = `<div class="detail-grid">
+    <span class="label">ID</span><span class="value mono">${copyableId(event.id)}</span>
+    <span class="label">Type</span><span class="value">${TYPE_ICONS[event.type] || ""} ${event.type}</span>
+    <span class="label">Group</span><span class="value mono">${copyableId(event.group)}</span>
+    <span class="label">Author</span><span class="value mono">${copyableId(event.author)}</span>
+    <span class="label">Time</span><span class="value">${ts}</span>
+    <span class="label">Sig</span><span class="value mono">${copyableId(event.sig)}</span>
+    <span class="label">ID valid</span><span class="value ${v.id_valid ? 'valid' : 'invalid'}">${v.id_valid ? '\u2713 PASS' : '\u2717 FAIL'}</span>
+    <span class="label">Sig valid</span><span class="value ${v.sig_valid ? 'valid' : 'invalid'}">${v.sig_valid ? '\u2713 PASS' : '\u2717 FAIL'}</span>
+  </div>`;
+
+  if (event.parents && event.parents.length) {
+    html += `<div class="content-block"><div class="key">Parents (${event.parents.length}):</div>`;
+    event.parents.forEach(p => {
+      html += `<div style="margin:2px 0">${copyableId(p)} <span style="font-size:10px;color:#58a6ff;cursor:pointer" onclick="selectNode('${p}')">go \u2192</span></div>`;
+    });
+    html += `</div>`;
+  }
+
+  if (event.content !== undefined) {
+    if (typeof event.content === "string") {
+      html += `<div class="content-block"><div class="key">Content:</div><div class="val">${event.content}</div></div>`;
+    } else {
+      html += `<div class="content-block"><div class="key">Content:</div>`;
+      for (const [k, v] of Object.entries(event.content)) {
+        if (Array.isArray(v)) {
+          html += `<div><span class="key">${k}:</span></div>`;
+          v.forEach(item => {
+            if (typeof item === "string" && item.length === 64 && /^[0-9a-f]+$/.test(item)) {
+              html += `<div style="margin-left:8px">${copyableId(item)}</div>`;
+            } else {
+              html += `<div style="margin-left:8px"><span class="val">${item}</span></div>`;
+            }
+          });
+        } else if (typeof v === "string" && v.length === 64 && /^[0-9a-f]+$/.test(v)) {
+          html += `<div><span class="key">${k}:</span> ${copyableId(v)}</div>`;
+        } else {
+          html += `<div><span class="key">${k}:</span> <span class="val">${v}</span></div>`;
+        }
+      }
+      html += `</div>`;
+    }
+  }
+
+  d3.select("#detail-content").html(html);
+}
+
+function showTooltip(e, d) {
+  const ts = new Date(d.ts * 1000).toLocaleTimeString();
+  let content = d.content_preview || "";
+  tooltip.html(`
+    <div class="tt-type">${TYPE_ICONS[d.type] || ""} ${d.type}</div>
+    <div class="tt-author">@${d.author} \u00b7 ${ts}</div>
+    ${content ? `<div class="tt-content">${content}</div>` : ""}
+  `);
+  tooltip.style("display", "block")
+    .style("left", (e.offsetX + 15) + "px")
+    .style("top", (e.offsetY - 10) + "px");
+}
+
+function hideTooltip() {
+  tooltip.style("display", "none");
+}
+
+async function renderState(group) {
+  const state = await fetchState(group);
+  let html = `<div class="state-grid">
+    <span class="label">Name</span><span class="value">${state.name}</span>
+    <span class="label">Events</span><span class="value">${state.event_count}</span>
+    <span class="label">Tips</span><span class="value">${state.tips.length}</span>
+    <span class="label">Gaps</span><span class="value" style="${state.gaps.length ? 'color:#f85149' : ''}">${state.gaps.length}</span>
+  </div>`;
+
+  if (state.description) {
+    html += `<div class="content-block" style="margin-top:8px"><div class="val">${state.description}</div></div>`;
+  }
+
+  html += `<h2 style="margin-top:12px;margin-bottom:6px;font-size:12px;color:#8b949e;text-transform:uppercase">Members (${state.members.length})</h2>`;
+  html += `<ul class="member-list">`;
+  state.members.forEach(m => {
+    const isMod = state.mods.includes(m);
+    html += `<li class="${isMod ? 'mod' : ''}">${copyableId(m)}${isMod ? '' : ''}</li>`;
+  });
+  html += `</ul>`;
+
+  if (state.relays.length) {
+    html += `<h2 style="margin-top:12px;margin-bottom:6px;font-size:12px;color:#8b949e;text-transform:uppercase">Relays (${state.relays.length})</h2>`;
+    state.relays.forEach(r => {
+      html += `<div style="font-size:12px;color:#c9d1d9">${r}</div>`;
+    });
+  }
+
+  if (state.gaps.length) {
+    html += `<h2 style="margin-top:12px;margin-bottom:6px;font-size:12px;color:#f85149;text-transform:uppercase">Gaps (${state.gaps.length})</h2>`;
+    state.gaps.forEach(g => {
+      html += `<div style="margin:2px 0">${copyableId(g)}</div>`;
+    });
+  }
+
+  d3.select("#state-content").html(html);
+}
+
+async function loadGroup(group) {
+  currentGroup = group;
+  selectedNode = null;
+  d3.select("#detail-content").html('<span class="empty">Click a node to inspect</span>');
+
+  const [dag, events] = await Promise.all([fetchDAG(group), fetchEvents(group)]);
+  allEvents = events;
+  renderFromEvents(dag.nodes.map(n => ({ ...n, parents: dag.edges.filter(e => e.target === n.id).map(e => e.source) })));
+  await renderState(group);
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: "subscribe", group }));
+  }
+}
+
+// --- Init ---
+
+async function init() {
+  const groups = await fetchGroups();
+  const select = d3.select("#group-select");
+
+  if (groups.length === 0) {
+    select.html('<option value="">No groups found</option>');
+    return;
+  }
+
+  select.html(groups.map(g =>
+    `<option value="${g.pubkey}">${g.name} (${g.pubkey.slice(0, 12)}... \u00b7 ${g.event_count} events)</option>`
+  ).join(""));
+
+  select.on("change", function () { loadGroup(this.value); });
+  loadGroup(groups[0].pubkey);
+  connectWS();
+}
+
+// Reload when storage path changes (on Enter or blur)
+document.getElementById('storage-path').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') init();
+});
+document.getElementById('storage-path').addEventListener('blur', () => init());
+
+init();
+</script>
+</body>
+</html>

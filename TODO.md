@@ -1,0 +1,4 @@
+- Don't sync when full history is already stored. Check the number of events on servers and compare latest event hash.
+- When partial history is left on old relay hint, try to continue syncing with newer group relays
+- Relay GC: when a group's DAG grows by N events and an event still has no children, delete it. This removes "zombie" events (e.g. unauthorised kicks) that no honest client ever referenced. Threshold N should be configurable (default 100). Clients must NOT GC from local cache.
+- Optimise initial sync: when client already has partial history, avoid fetching genesis separately then all events - fetch all events once and validate genesis from the first event received. Avoid sync completely if DAG is up-to-date.
