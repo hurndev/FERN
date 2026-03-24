@@ -93,19 +93,19 @@ fern-test spawn-user alice
 fern-test spawn-user bob
 
 # Terminal 3: Set test user and create a group
-export FERN_TEST_NAME=alice
+export FERN_TEST_USER=alice
 fern create --name "Test Group" --relay ws://localhost:8787
 
 # Terminal 4: View DAG in browser (auto-uses /tmp/alice)
-export FERN_TEST_NAME=alice
+export FERN_TEST_USER=alice
 fern-inspect
 
 # Terminal 5: Send messages (auto-uses /tmp/alice)
-export FERN_TEST_NAME=alice
+export FERN_TEST_USER=alice
 fern send <group> -m "Hello from Alice" --relay ws://localhost:8787
 
 # Concurrent sends from multiple users
 fern-test multi-send <group> alice bob --concurrent --count 10
 ```
 
-**Note:** When `FERN_TEST_NAME` is set, all `fern`, `fern-chat`, and `fern-inspect` commands automatically use `/tmp/<name>` storage and print `[TEST USER]` on startup.
+**Note:** When `FERN_TEST_USER` is set, all `fern`, `fern-chat`, and `fern-inspect` commands automatically use `/tmp/<name>` storage and print `[TEST USER]` on startup.

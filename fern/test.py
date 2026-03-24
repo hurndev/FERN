@@ -63,7 +63,7 @@ def spawn_user(name: str, storage: str | None):
 
     click.echo(f"# User: {name}")
     click.echo(f"export FERN_TEST_HOME={user_dir}")
-    click.echo(f"export FERN_TEST_NAME={name}")
+    click.echo(f"export FERN_TEST_USER={name}")
     click.echo(f"export FERN_TEST_PUBKEY={pubkey}")
     click.echo(f"# Key stored at: {key_path}")
 
