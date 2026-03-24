@@ -2,7 +2,7 @@
 
 FERN (Fault-tolerant Event Relay Network) is a messaging protocol designed for decentralised public group chats. Users and groups are not tied to any particular server, making it censorship resistant by design. Messages (events) associated with groups are published to multiple relay servers simultaneously, in a similar fashion to NOSTR, but with stronger guarantees around group integrity and message history.
 
-Relay servers are intentionally dumb. They store and forward signed events, but have no authority users and groups. Everything is verified locally by the client. Each group lives on a selection of 'canonical' relays, so if one relay goes down the group continues to exist. Groups can be instantly migrated to new relays, and message history will go with it.
+Relay servers are intentionally dumb. They store and forward signed events, but have no authority over users and groups. Everything is verified locally by the client. Each group lives on a selection of 'canonical' relays, so if one relay goes down the group continues to exist. Groups can be instantly migrated to new relays, and message history will go with it.
 
 Message history is structured as a DAG (Directed Acyclic Graph), a similar concept to a blockchain. Every message references the messages before it, making the history tamper-proof and fully verifiable by anyone. Censorship is always detectable as a visible gap  in the chain. Clients automatically heal divergent relays by redistributing any messages a relay is missing, so the full message history is maintained across all group relays without direct communication between them.
 
