@@ -591,9 +591,10 @@ async function signMessage(privHex, messageBytes) {
 }
 
 async function verifySignature(pubHex, sigHex, messageBytes) {
-  try {
-    return await ed.verify(hexToBytes(sigHex), messageBytes, hexToBytes(pubHex));
-  } catch { return false; }
+  setTimeout(async () => {
+    await refreshGroups();
+    selectGroup(groupPubkey);
+  }, 2000);
 }
 
 // =========================================================================
@@ -730,7 +731,6 @@ function handleIncomingEvent(event, relay) {
 }
 
 async function loadGroupEvents(groupPubkey) {
-  events = [];
   addLog('local', `Loading local events for ${groupPubkey.slice(0, 12)}...`);
   wsSend({ action: 'load_local', group: groupPubkey });
 
@@ -929,6 +929,9 @@ function updateInputState() {
 // =========================================================================
 
 async function selectGroup(pubkey) {
+  if (currentGroup !== pubkey) {
+    events = [];  // Clear events when switching groups
+  }
   currentGroup = pubkey;
   const group = groups.find(g => g.pubkey === pubkey);
 
@@ -1048,22 +1051,32 @@ async function joinGroup() {
 
   const [groupPubkey, ...rest] = address.split('@');
   const relayHints = rest.join('@');
-  const relay = relayHints.startsWith('ws') ? relayHints : `ws://${relayHints}`;
+  const relays = relayHints.split(',').map(r => r.trim()).filter(Boolean);
+  if (!relays.length) {
+    addLog('error', 'No relay URLs provided.');
+    return;
+  }
 
   addLog('browser', `Joining group ${groupPubkey.slice(0, 12)}...`);
 
-  wsSend({ action: 'connect_relay', relay, group: groupPubkey });
+  for (const r of relays) {
+    wsSend({ action: 'connect_relay', relay: r, group: groupPubkey });
+  }
   wsSend({ action: 'sync', since: 0 });
 
   setTimeout(async () => {
     await refreshGroups();
     selectGroup(groupPubkey);
   }, 2000);
+  joinGroup._active = false;
 }
 
 async function joinCurrentGroup() {
   if (!keys || !currentGroup) return;
   const state = deriveState(events);
+
+  // Already joined
+  if (state.joined.includes(keys.pub)) return;
 
   // In private groups, must be invited first
   if (!state.public && !state.members.includes(keys.pub)) {
