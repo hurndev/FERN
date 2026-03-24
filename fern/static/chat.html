@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FERN Chat</title>
+<link rel="icon" type="image/png" href="/static/fern.png">
 <script type="importmap">
 { "imports": {
     "@noble/ed25519": "https://cdn.jsdelivr.net/npm/@noble/ed25519@1.7.3/+esm"
@@ -83,11 +84,36 @@ a:hover { text-decoration: underline; }
 }
 #sidebar .section-title {
   padding: 8px 10px 4px;
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 1px;
   color: #505048;
   border-bottom: 1px solid #1a1a22;
+}
+#sidebar #identity-display {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  font-size: 10px;
+  color: #606058;
+  cursor: pointer;
+}
+#sidebar #identity-display:hover { color: #909088; }
+#sidebar #identity-display .pubkey {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#sidebar #profile-section {
+  border-bottom: 1px solid #1a1a22;
+}
+#sidebar .profile-label {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #505048;
 }
 #sidebar .actions {
   padding: 6px 8px;
@@ -417,11 +443,8 @@ a:hover { text-decoration: underline; }
 <body>
 <div id="app">
   <div id="header">
+    <img src="/static/fern.svg" alt="" width="20" height="20" style="vertical-align:middle">
     <span class="logo">FERN CHAT</span>
-    <span class="identity" id="identity-display">
-      <svg id="self-icon" data-jdenticon-value="" width="20" height="20" style="vertical-align:middle;margin-right:4px"></svg>
-      <span class="pubkey" id="pubkey-display" title="Click to copy">no identity</span>
-    </span>
     <div class="status">
       <span class="dot off" id="ws-dot"></span>
       <span id="ws-status">disconnected</span>
@@ -429,6 +452,13 @@ a:hover { text-decoration: underline; }
   </div>
 
   <div id="sidebar">
+    <div id="profile-section">
+      <div class="profile-label">You</div>
+      <div id="identity-display" title="Click to copy public key">
+        <svg id="self-icon" data-jdenticon-value="" width="16" height="16" style="vertical-align:middle;margin-right:4px"></svg>
+        <span class="pubkey" id="pubkey-display">no identity</span>
+      </div>
+    </div>
     <div class="section-title">Groups</div>
     <div class="actions">
       <button onclick="showCreateGroup()">+ New</button>

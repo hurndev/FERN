@@ -51,6 +51,7 @@ class WebVisualiser:
 
     def _setup_routes(self):
         self.app.router.add_get("/", self.handle_index)
+        self.app.router.add_static("/static", self._get_static_dir())
         self.app.router.add_get("/api/groups", self.handle_groups)
         self.app.router.add_get("/api/groups/{group_pubkey}", self.handle_group_events)
         self.app.router.add_get(

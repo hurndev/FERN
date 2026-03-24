@@ -381,6 +381,11 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     # PHASE 3: FINALISE LOCAL STORAGE
     # =========================================================================
 
+    # Merge local events that may not have come from relays yet
+    for eid, event in dag.events.items():
+        if eid not in all_validated:
+            all_validated[eid] = event
+
     # Clear and re-store all events in proper order
     dag.events.clear()
     dag.children.clear()
