@@ -39,8 +39,8 @@ def event_to_dict(event: dict) -> dict:
 class WebVisualiser:
     """Web server for FERN DAG visualization."""
 
-    def __init__(self, ern_dir: str, host: str = "127.0.0.1", port: int = 8080):
-        self.ern_dir = Path(ern_dir)
+    def __init__(self, fern_dir: str, host: str = "127.0.0.1", port: int = 8080):
+        self.fern_dir = Path(fern_dir)
         self.host = host
         self.port = port
         self.ws_clients: set[web.WebSocketResponse] = set()
@@ -51,6 +51,7 @@ class WebVisualiser:
     def _setup_routes(self):
         self.app.router.add_get("/", self.handle_index)
         self.app.router.add_static("/static", self._get_static_dir())
+        self.app.router.add_get("/api/info", self.handle_info)
         self.app.router.add_get("/api/groups", self.handle_groups)
         self.app.router.add_get("/api/groups/{group_pubkey}", self.handle_group_events)
         self.app.router.add_get(
@@ -63,18 +64,21 @@ class WebVisualiser:
         return Path(__file__).parent / "static"
 
     def _list_groups(self) -> list[str]:
-        groups_dir = self.ern_dir / "groups"
+        groups_dir = self.fern_dir / "groups"
         if not groups_dir.exists():
             return []
         return sorted(f.stem for f in groups_dir.glob("*.json"))
 
     def _get_dag(self, group_pubkey: str) -> EventDAG:
-        groups_dir = self.ern_dir / "groups"
+        groups_dir = self.fern_dir / "groups"
         return EventDAG(group_pubkey, str(groups_dir))
 
     async def handle_index(self, request: web.Request) -> web.Response:
         index_path = self._get_static_dir() / "index.html"
         return web.FileResponse(index_path)
+
+    async def handle_info(self, request: web.Request) -> web.Response:
+        return web.json_response({"storage": str(self.fern_dir)})
 
     async def handle_groups(self, request: web.Request) -> web.Response:
         groups = self._list_groups()
@@ -222,7 +226,7 @@ class WebVisualiser:
         await site.start()
 
         print(f"FERN Web Visualiser running at http://{self.host}:{self.port}")
-        print(f"Data: {self.ern_dir}")
+        print(f"Data: {self.fern_dir}")
         print("Press Ctrl+C to stop.")
 
         try:
