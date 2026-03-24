@@ -11,7 +11,7 @@ from aiohttp import web, WSMsgType
 
 from .dag import ClientStorage
 from .events import verify_event
-from .storage import get_storage_path
+from .storage import resolve_fern_dir
 
 
 class RelayConnection:
@@ -415,16 +415,17 @@ class ChatApp:
 
 
 @click.command()
+@click.option("--home", default=None, help="Home directory containing .fern folder")
 @click.option("--host", default="127.0.0.1", help="Bind host")
 @click.option("--port", default=8080, help="Bind port")
-@click.option("--storage", default=None, help="Storage directory")
-def main(host: str, port: int, storage: str | None):
-    """FERN Chat - Web-based chat client."""
-    if storage:
-        storage_dir = os.path.join(os.path.expanduser(storage), ".fern")
-    else:
-        storage_dir = get_storage_path("FERN_CHAT_STORAGE")
-    app = ChatApp(storage_dir, host=host, port=port)
+def main(home: str | None, host: str, port: int):
+    """FERN Chat - Web-based chat client.
+
+    Uses ~/.fern by default. Set FERN_TEST_USER to use /tmp/<user>/.fern
+    instead. Use --home to specify a custom home directory.
+    """
+    fern_dir = resolve_fern_dir(home)
+    app = ChatApp(str(fern_dir), host=host, port=port)
     asyncio.run(app.start())
 
 

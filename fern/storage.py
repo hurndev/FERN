@@ -3,29 +3,24 @@
 import os
 from pathlib import Path
 
-DEFAULT_STORAGE = "~/.fern"
+DEFAULT_FERN_DIR = "~/.fern"
 
 
-def get_storage_path(env_var: str | None = None) -> str:
-    """Get the storage path for the current context.
+def resolve_fern_dir(home: str | None = None) -> Path:
+    """Resolve the .fern directory path.
 
-    If FERN_TEST_USER is set, automatically uses /tmp/<FERN_TEST_USER>/.fern.
-    The env_var parameter allows components to override the env var name
-    (e.g., "FERN_WEB_STORAGE" for the web UI).
+    Priority:
+    1. --home argument if provided
+    2. FERN_TEST_USER env var -> /tmp/<user>/.fern
+    3. ~/.fern default
     """
+    if home:
+        return Path(os.path.expanduser(home)) / ".fern"
+
     test_name = os.environ.get("FERN_TEST_USER")
     if test_name:
-        path = f"/tmp/{test_name}/.fern"
+        path = Path(f"/tmp/{test_name}/.fern")
         print(f"[TEST USER] Using storage at {path}")
         return path
 
-    env_path = os.environ.get(env_var) if env_var else None
-    if env_path:
-        return env_path
-
-    return os.path.expanduser(DEFAULT_STORAGE)
-
-
-def test_mode_active() -> bool:
-    """Check if running in test mode."""
-    return bool(os.environ.get("FERN_TEST_USER"))
+    return Path(os.path.expanduser(DEFAULT_FERN_DIR))

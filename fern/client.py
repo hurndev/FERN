@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import click
@@ -25,14 +26,16 @@ from .events import (
     verify_event_signature,
 )
 from .dag import ClientStorage, EventDAG
-from .storage import get_storage_path
+from .storage import resolve_fern_dir
 
 
 BOOTSTRAP_RELAYS = ["ws://localhost:8787", "ws://localhost:8788"]
 
+_fern_home: str | None = None
+
 
 def get_storage() -> ClientStorage:
-    return ClientStorage(get_storage_path())
+    return ClientStorage(str(resolve_fern_dir(_fern_home)))
 
 
 def get_canonical_relays(
@@ -482,9 +485,17 @@ def print_heal_summary(summary: dict) -> None:
 
 
 @click.group()
-def cli():
-    """FERN - Fault-tolerant Event Relay Network CLI client."""
-    pass
+@click.option("--home", help="Home directory containing .fern folder")
+@click.pass_context
+def cli(ctx, home):
+    """FERN - Fault-tolerant Event Relay Network CLI client.
+
+    Uses ~/.fern by default. Set FERN_TEST_USER to use /tmp/<user>/.fern
+    instead. Use --home to specify a custom home directory.
+    """
+    global _fern_home
+    _fern_home = home
+    ctx.ensure_object(dict)
 
 
 @cli.command()

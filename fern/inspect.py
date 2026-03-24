@@ -3,15 +3,14 @@
 import asyncio
 import json
 import os
-import time
 from pathlib import Path
 
 import click
 from aiohttp import web, WSMsgType
 
-from .dag import ClientStorage, EventDAG
+from .dag import EventDAG
 from .events import verify_event_id, verify_event_signature
-from .storage import get_storage_path
+from .storage import resolve_fern_dir
 
 
 def verify_event_full(event: dict) -> dict:
@@ -40,8 +39,8 @@ def event_to_dict(event: dict) -> dict:
 class WebVisualiser:
     """Web server for FERN DAG visualization."""
 
-    def __init__(self, storage_dir: str, host: str = "127.0.0.1", port: int = 8080):
-        self.storage = ClientStorage(os.path.expanduser(storage_dir))
+    def __init__(self, ern_dir: str, host: str = "127.0.0.1", port: int = 8080):
+        self.ern_dir = Path(ern_dir)
         self.host = host
         self.port = port
         self.ws_clients: set[web.WebSocketResponse] = set()
@@ -63,23 +62,25 @@ class WebVisualiser:
     def _get_static_dir(self) -> Path:
         return Path(__file__).parent / "static"
 
+    def _list_groups(self) -> list[str]:
+        groups_dir = self.ern_dir / "groups"
+        if not groups_dir.exists():
+            return []
+        return sorted(f.stem for f in groups_dir.glob("*.json"))
+
+    def _get_dag(self, group_pubkey: str) -> EventDAG:
+        groups_dir = self.ern_dir / "groups"
+        return EventDAG(group_pubkey, str(groups_dir))
+
     async def handle_index(self, request: web.Request) -> web.Response:
         index_path = self._get_static_dir() / "index.html"
         return web.FileResponse(index_path)
 
-    def _get_storage(self, request: web.Request) -> ClientStorage:
-        """Get storage from request, with optional ?storage=path override."""
-        custom = request.query.get("storage")
-        if custom:
-            return ClientStorage(os.path.expanduser(custom))
-        return self.storage
-
     async def handle_groups(self, request: web.Request) -> web.Response:
-        storage = self._get_storage(request)
-        groups = storage.list_groups()
+        groups = self._list_groups()
         result = []
         for gpub in groups:
-            dag = storage.get_group_dag(gpub)
+            dag = self._get_dag(gpub)
             state = dag.get_state()
             result.append(
                 {
@@ -93,15 +94,13 @@ class WebVisualiser:
 
     async def handle_group_events(self, request: web.Request) -> web.Response:
         group_pubkey = request.match_info["group_pubkey"]
-        storage = self._get_storage(request)
-        dag = storage.get_group_dag(group_pubkey)
+        dag = self._get_dag(group_pubkey)
         events = [event_to_dict(e) for e in dag.get_all_events()]
         return web.json_response(events)
 
     async def handle_group_state(self, request: web.Request) -> web.Response:
         group_pubkey = request.match_info["group_pubkey"]
-        storage = self._get_storage(request)
-        dag = storage.get_group_dag(group_pubkey)
+        dag = self._get_dag(group_pubkey)
         state = dag.get_state()
         gaps = dag.get_missing_parents()
         tips = dag.get_tips()
@@ -124,8 +123,7 @@ class WebVisualiser:
     async def handle_group_dag(self, request: web.Request) -> web.Response:
         """Return nodes + edges for graph rendering."""
         group_pubkey = request.match_info["group_pubkey"]
-        storage = self._get_storage(request)
-        dag = storage.get_group_dag(group_pubkey)
+        dag = self._get_dag(group_pubkey)
         events = dag.get_all_events()
 
         nodes = []
@@ -171,7 +169,7 @@ class WebVisualiser:
                     if data.get("action") == "subscribe":
                         group = data.get("group")
                         if group:
-                            dag = self.storage.get_group_dag(group)
+                            dag = self._get_dag(group)
                             events = [event_to_dict(e) for e in dag.get_all_events()]
                             await ws.send_json({"type": "full_sync", "events": events})
                 elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
@@ -188,9 +186,9 @@ class WebVisualiser:
             if not self.ws_clients:
                 continue
 
-            groups = self.storage.list_groups()
+            groups = self._list_groups()
             for gpub in groups:
-                dag = self.storage.get_group_dag(gpub)
+                dag = self._get_dag(gpub)
                 mtime = dag.db_path.stat().st_mtime if dag.db_path.exists() else 0
                 prev = self._group_mtimes.get(gpub, 0)
                 if mtime != prev:
@@ -224,7 +222,7 @@ class WebVisualiser:
         await site.start()
 
         print(f"FERN Web Visualiser running at http://{self.host}:{self.port}")
-        print(f"Storage: {os.path.expanduser(self.storage.base_dir)}")
+        print(f"Data: {self.ern_dir}")
         print("Press Ctrl+C to stop.")
 
         try:
@@ -238,13 +236,21 @@ class WebVisualiser:
 
 
 @click.command()
+@click.option("--home", default=None, help="Home directory containing .fern folder")
 @click.option("--host", default="127.0.0.1", help="Bind host")
 @click.option("--port", default=8080, help="Bind port")
-@click.option("--storage", default=None, help="Storage directory")
-def main(host: str, port: int, storage: str | None):
-    """FERN DAG Inspector - Visualise group event history."""
-    storage_dir = storage or get_storage_path("FERN_DAG_STORAGE")
-    vis = WebVisualiser(storage_dir, host=host, port=port)
+def main(home: str | None, host: str, port: int):
+    """FERN DAG Inspector - Visualise group event history.
+
+    Uses ~/.fern by default. Set FERN_TEST_USER to use /tmp/<user>/.fern
+    instead. Use --home to specify a custom home directory.
+    """
+    fern_dir = resolve_fern_dir(home)
+    if not fern_dir.exists():
+        click.echo(f"Error: no .fern directory found at path: {fern_dir}", err=True)
+        raise SystemExit(1)
+
+    vis = WebVisualiser(str(fern_dir), host=host, port=port)
     asyncio.run(vis.start())
 
 
