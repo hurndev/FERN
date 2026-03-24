@@ -1,6 +1,6 @@
 # FERN
 
-FERN (Fault-tolerant Event Relay Network) is a messaging protocol designed for decentralised public group chats. Users and groups are not tied to any particular server, making it censorship resistant by design. Messages (events) associated with groups are published to multiple relay servers simultaneously, in a similar fashion to NOSTR, but with stronger guarantees around group integrity and message history.
+FERN (Fault-tolerant Event Relay Network) is a messaging protocol designed for decentralised public group chats. Users and groups are not tied to any particular server, making it censorship resistant by design. Messages (events) associated with groups are published to multiple relay servers simultaneously, so the group continues to exist even if some relays go offline.
 
 Relay servers are intentionally dumb. They store and forward signed events, but have no authority over users and groups. Everything is verified locally by the client. Each group lives on a selection of 'canonical' relays, so if one relay goes down the group continues to exist. Groups can be instantly migrated to new relays, and message history will go with it.
 
