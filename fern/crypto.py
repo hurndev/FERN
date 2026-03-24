@@ -65,6 +65,11 @@ def load_private_key(path: str, password: str | None = None) -> str:
     """Load a private key from a PEM file. Returns hex string."""
     with open(path, "rb") as f:
         pem = f.read()
+    return load_private_key_from_pem(pem, password)
+
+
+def load_private_key_from_pem(pem: bytes, password: str | None = None) -> str:
+    """Load a private key from PEM bytes. Returns hex string."""
     privkey = load_pem_private_key(pem, password.encode() if password else None)
     assert isinstance(privkey, Ed25519PrivateKey)
     raw = privkey.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())

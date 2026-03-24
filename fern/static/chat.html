@@ -601,9 +601,23 @@ async function verifySignature(pubHex, sigHex, messageBytes) {
 // Key Storage
 // =========================================================================
 
-function loadKeys() {
-  const data = localStorage.getItem('fern_keys');
-  return data ? JSON.parse(data) : null;
+async function loadKeys() {
+  // Try localStorage first for quick load
+  const cached = localStorage.getItem('fern_keys');
+  if (cached) return JSON.parse(cached);
+
+  // Fetch from filesystem via API
+  try {
+    const res = await fetch('/api/keys');
+    const keys = await res.json();
+    if (keys.pub) {
+      localStorage.setItem('fern_keys', JSON.stringify(keys));
+      return keys;
+    }
+  } catch (e) {
+    console.error('Failed to load keys:', e);
+  }
+  return null;
 }
 
 function saveKeys(keys) {
@@ -1144,7 +1158,7 @@ function closeModals() {
 }
 
 async function initIdentity() {
-  keys = loadKeys();
+  keys = await loadKeys();
   if (!keys) {
     addLog('browser', 'Generating new Ed25519 keypair...');
     keys = await generateKeypair();

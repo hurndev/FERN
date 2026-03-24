@@ -83,8 +83,8 @@ header select { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; 
 <div id="app">
   <header>
     <h1>FERN DAG Visualiser</h1>
-    <input type="text" id="storage-path" value="~/.fern" placeholder="Storage path"
-           title="Storage directory path" style="
+    <input type="text" id="storage-path" value="~/.fern" placeholder="Storage path" readonly
+           title="Storage directory (set at server startup)" style="
       background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:3px 8px;
       border-radius:6px;font-family:inherit;font-size:12px;width:140px;">
     <select id="group-select"><option value="">No groups found</option></select>
@@ -201,7 +201,7 @@ function storageParam() {
 }
 
 async function fetchGroups() {
-  const res = await fetch(`/api/groups${storageParam()}`);
+  const res = await fetch('/api/groups');
   return res.json();
 }
 
@@ -561,10 +561,20 @@ async function loadGroup(group) {
 // --- Init ---
 
 async function init() {
+  // Fetch server info to get storage path
+  try {
+    const info = await (await fetch('/api/info')).json();
+    if (info.storage) {
+      document.getElementById('storage-path').value = info.storage;
+    }
+  } catch (e) {
+    console.error('Failed to fetch server info:', e);
+  }
+
   const groups = await fetchGroups();
   const select = d3.select("#group-select");
 
-  if (groups.length === 0) {
+  if (!Array.isArray(groups) || groups.length === 0) {
     select.html('<option value="">No groups found</option>');
     return;
   }
@@ -577,12 +587,6 @@ async function init() {
   loadGroup(groups[0].pubkey);
   connectWS();
 }
-
-// Reload when storage path changes (on Enter or blur)
-document.getElementById('storage-path').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') init();
-});
-document.getElementById('storage-path').addEventListener('blur', () => init());
 
 init();
 </script>
