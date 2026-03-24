@@ -257,6 +257,8 @@ class ChatApp:
             "/api/groups/{group_pubkey}/state", self.handle_group_state
         )
         self.app.router.add_post("/api/groups", self.handle_create_group)
+        self.app.router.add_get("/api/keys", self.handle_get_keys)
+        self.app.router.add_post("/api/keys", self.handle_post_keys)
         self.app.router.add_get("/ws", self.handle_ws)
 
     def _get_static_dir(self) -> Path:
@@ -287,6 +289,41 @@ class ChatApp:
                 }
             )
         return web.json_response(result)
+
+    async def handle_get_keys(self, request: web.Request) -> web.Response:
+        """Get or generate user keypair. Returns {pub, priv} or just {pub} if existing."""
+        from . import crypto
+
+        key_path = self.storage.get_user_key_path()
+        if os.path.exists(key_path):
+            privkey = crypto.load_private_key(key_path)
+            pubkey = crypto.public_key_from_private(privkey)
+        else:
+            privkey, pubkey = crypto.generate_keypair()
+            crypto.save_keypair(privkey, key_path)
+
+        return web.json_response({"pub": pubkey, "priv": privkey})
+
+    async def handle_post_keys(self, request: web.Request) -> web.Response:
+        """Import a private key from PEM. Body: {priv: pem_string}."""
+        from . import crypto
+
+        try:
+            body = await request.json()
+            priv_pem_str = body.get("priv", "")
+            if not priv_pem_str:
+                return web.json_response({"error": "no priv key provided"}, status=400)
+
+            priv_pem_bytes = (
+                priv_pem_str.encode() if isinstance(priv_pem_str, str) else priv_pem_str
+            )
+            privkey = crypto.load_private_key_from_pem(priv_pem_bytes)
+            pubkey = crypto.public_key_from_private(privkey)
+            key_path = self.storage.get_user_key_path()
+            crypto.save_keypair(privkey, key_path)
+            return web.json_response({"pub": pubkey})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
 
     async def handle_group_events(self, request: web.Request) -> web.Response:
         group_pubkey = request.match_info["group_pubkey"]
@@ -383,7 +420,10 @@ class ChatApp:
 @click.option("--storage", default=None, help="Storage directory")
 def main(host: str, port: int, storage: str | None):
     """FERN Chat - Web-based chat client."""
-    storage_dir = storage or get_storage_path("FERN_CHAT_STORAGE")
+    if storage:
+        storage_dir = os.path.join(os.path.expanduser(storage), ".fern")
+    else:
+        storage_dir = get_storage_path("FERN_CHAT_STORAGE")
     app = ChatApp(storage_dir, host=host, port=port)
     asyncio.run(app.start())
 
