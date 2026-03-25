@@ -535,13 +535,23 @@ def profile():
 @click.option("--description", default="", help="Group description")
 @click.option("--public/--private", default=True, help="Public or private group")
 @click.option(
-    "--relay", default=None, help="Use only this relay (default: localhost:8787 + 8788)"
+    "--relays",
+    default=None,
+    help="Canonical relays as comma-separated list (e.g. ws://localhost:8787,ws://localhost:8788). If not provided, prompted.",
 )
 @click.option("--group-key-name", default="default", help="Name for group key file")
 def create_group(
-    name: str, description: str, public: bool, relay: str | None, group_key_name: str
+    name: str,
+    description: str,
+    public: bool,
+    relays: str | None,
+    group_key_name: str,
 ):
-    """Create a new group and publish genesis to relay."""
+    """Create a new group and publish genesis to relay.
+
+    Prompts for canonical relays, defaulting to bootstrap relays (localhost:8787, localhost:8788).
+    Use --relays to specify relays without prompting (e.g. --relays ws://relay1:8787,ws://relay2:8788).
+    """
     storage = get_storage()
 
     # Load user key
@@ -560,10 +570,16 @@ def create_group(
     storage.save_group_key(group_privkey, group_key_name)
 
     # Determine relays
-    if relay:
-        relays = [relay]
+    if relays:
+        relay_list = [r.strip() for r in relays.split(",") if r.strip()]
     else:
-        relays = list(BOOTSTRAP_RELAYS)
+        default_relays = ",".join(BOOTSTRAP_RELAYS)
+        relay_str = click.prompt(
+            f"Canonical relays",
+            default=default_relays,
+            show_default=True,
+        )
+        relay_list = [r.strip() for r in relay_str.split(",") if r.strip()]
 
     # Create genesis event
     genesis = create_group_genesis(
@@ -572,7 +588,7 @@ def create_group(
         name=name,
         description=description,
         public=public,
-        relays=relays,
+        relays=relay_list,
     )
 
     # Store locally
@@ -580,8 +596,8 @@ def create_group(
     dag.add_event(genesis)
 
     # Publish to relays
-    click.echo(f"Publishing genesis to {len(relays)} relay(s)...")
-    results = asyncio.run(publish_to_relays(genesis, relays))
+    click.echo(f"Publishing genesis to {len(relay_list)} relay(s)...")
+    results = asyncio.run(publish_to_relays(genesis, relay_list))
 
     for url, result in results.items():
         if result.get("type") == "ok":
@@ -592,8 +608,8 @@ def create_group(
     click.echo(f"\nGroup created!")
     click.echo(f"  Name: {name}")
     click.echo(f"  Group pubkey: {group_pubkey}")
-    click.echo(f"  Address: {group_pubkey}@{','.join(relays)}")
-    click.echo(f"  Relays: {', '.join(relays)}")
+    click.echo(f"  Address: {group_pubkey}@{','.join(relay_list)}")
+    click.echo(f"  Relays: {', '.join(relay_list)}")
     click.echo(f"  Group key saved to: {storage.get_group_key_path(group_key_name)}")
 
 
