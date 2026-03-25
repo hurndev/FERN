@@ -42,8 +42,9 @@ You can specify a custom storage location with `--storage <path>`, and a port wi
 ```bash
 fern keygen                    # Generate Ed25519 identity keypair
 fern profile                   # Display your public key
-fern create --name "My Group" --relay ws://localhost:8787  # Create a group
-fern groups                    # List all known groups
+fern create --name "My Group"  # Create a group (prompts for relays)
+fern create --name "My Group" --relays ws://relay1:8787,ws://relay2:8787  # Create with specific relays
+fern groups                    # List all known groups (from known relays)
 fern send <group-pubkey> -m "Hello"  # Send a message
 fern messages <group-pubkey>   # Show messages in a group
 fern subscribe <group-pubkey>  # Subscribe and display messages in real-time
@@ -56,13 +57,15 @@ fern relay-update <group-pubkey> --add ws://relay2:8787  # Update canonical rela
 fern wipe                      # Delete all local data, keep keypair
 ```
 
+Most commands perform a sync first to get the latest event history.
+
 ### Web Chat (`fern-chat`)
 
 ```bash
-fern-chat --port 8080
+fern-chat
 ```
 
-Opens the chat webapp. Experimental, history sync is currently broken.
+Opens the chat webapp.
 
 ### DAG Inspector (`fern-inspect`)
 
