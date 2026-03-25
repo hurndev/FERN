@@ -35,7 +35,7 @@ def test_cli():
 @click.argument("name")
 @click.option("--storage", default=None, help="Storage base directory (default: /tmp)")
 def spawn_user(name: str, storage: str | None):
-    """Create an isolated test user with keypair in /tmp/<name>.
+    """Create an isolated test user with keypair in /tmp/<name>/.fern.
 
     Returns the user's pubkey and storage path. The user is created in
     /tmp/<name> by default, or under --storage if specified.
@@ -53,13 +53,13 @@ def spawn_user(name: str, storage: str | None):
 
     privkey, pubkey = crypto.generate_keypair()
 
-    keys_dir = user_dir / "keys"
-    keys_dir.mkdir(exist_ok=True)
+    keys_dir = user_dir / ".fern" / "keys"
+    keys_dir.mkdir(parents=True, exist_ok=True)
     key_path = keys_dir / "user.pem"
     crypto.save_keypair(privkey, str(key_path))
 
-    groups_dir = user_dir / "groups"
-    groups_dir.mkdir(exist_ok=True)
+    groups_dir = user_dir / ".fern" / "groups"
+    groups_dir.mkdir(parents=True, exist_ok=True)
 
     click.echo(f"# User: {name}")
     click.echo(f"export FERN_TEST_HOME={user_dir}")
@@ -82,7 +82,7 @@ def list_users(storage: str | None):
     for user_dir in sorted(base_dir.iterdir()):
         if not user_dir.is_dir():
             continue
-        key_path = user_dir / "keys" / "user.pem"
+        key_path = user_dir / ".fern" / "keys" / "user.pem"
         if not key_path.exists():
             continue
 
@@ -90,7 +90,7 @@ def list_users(storage: str | None):
         privkey = crypto.load_private_key(str(key_path))
         pubkey = crypto.public_key_from_private(privkey)
 
-        groups_dir = user_dir / "groups"
+        groups_dir = user_dir / ".fern" / "groups"
         group_count = len(list(groups_dir.glob("*.json"))) if groups_dir.exists() else 0
 
         click.echo(f"{user_dir.name}: {pubkey[:16]}... ({group_count} groups)")
@@ -113,7 +113,7 @@ def wipe_users(storage: str | None, yes: bool):
     user_dirs = [
         d
         for d in base_dir.iterdir()
-        if d.is_dir() and (d / "keys" / "user.pem").exists()
+        if d.is_dir() and (d / ".fern" / "keys" / "user.pem").exists()
     ]
 
     if not user_dirs:
