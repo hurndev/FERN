@@ -72,22 +72,28 @@ async def publish_to_relays(event: dict, relay_urls: list[str]) -> dict:
 async def fetch_genesis(relay_url: str, group_pubkey: str) -> dict | None:
     """Fetch the genesis event from a relay. Returns event or None."""
     try:
-        async with websockets.connect(relay_url) as ws:
-            await ws.send(
-                json.dumps(
-                    {
-                        "action": "sync",
-                        "group": group_pubkey,
-                        "since": 0,
-                    }
+        async with asyncio.timeout(1.5):
+            async with websockets.connect(relay_url) as ws:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "action": "sync",
+                            "group": group_pubkey,
+                            "since": 0,
+                        }
+                    )
                 )
-            )
-            async for raw in ws:
-                msg = json.loads(raw)
-                if msg["type"] == "event" and msg["event"]["type"] == "group_genesis":
-                    return msg["event"]
-                elif msg["type"] == "sync_complete":
-                    break
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    if (
+                        msg["type"] == "event"
+                        and msg["event"]["type"] == "group_genesis"
+                    ):
+                        return msg["event"]
+                    elif msg["type"] == "sync_complete":
+                        break
+    except asyncio.TimeoutError:
+        click.echo(f"    {relay_url}: timeout fetching genesis", err=True)
     except Exception:
         pass
     return None
