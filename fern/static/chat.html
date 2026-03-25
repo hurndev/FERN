@@ -448,6 +448,7 @@ a:hover { text-decoration: underline; }
     <div class="status">
       <span class="dot off" id="ws-dot"></span>
       <span id="ws-status">disconnected</span>
+      <label style="margin-left:12px;font-size:11px"><input type="checkbox" id="auto-subscribe" checked> auto-subscribe</label>
     </div>
   </div>
 
@@ -977,10 +978,11 @@ async function selectGroup(pubkey) {
 
   // Connect to relays
   const connectRelays = group?.relays || [];
+  const autoSub = document.getElementById('auto-subscribe').checked;
   if (connectRelays.length) {
     for (const relay of connectRelays) {
       addLog('browser', `Connecting to ${relay}...`);
-      wsSend({ action: 'connect_relay', relay, group: pubkey });
+      wsSend({ action: 'connect_relay', relay, group: pubkey, subscribe: autoSub });
     }
   }
 
@@ -1042,7 +1044,7 @@ async function createGroup() {
     selectGroup(groupKeys.pub);
 
     for (const r of relays) {
-      wsSend({ action: 'connect_relay', relay: r, group: groupKeys.pub });
+      wsSend({ action: 'connect_relay', relay: r, group: groupKeys.pub, subscribe: document.getElementById('auto-subscribe').checked });
     }
     setTimeout(() => {
       for (const r of relays) {
@@ -1074,7 +1076,7 @@ async function joinGroup() {
   addLog('browser', `Joining group ${groupPubkey.slice(0, 12)}...`);
 
   for (const r of relays) {
-    wsSend({ action: 'connect_relay', relay: r, group: groupPubkey });
+    wsSend({ action: 'connect_relay', relay: r, group: groupPubkey, subscribe: document.getElementById('auto-subscribe').checked });
   }
   wsSend({ action: 'sync', since: 0 });
 
