@@ -17,9 +17,10 @@ from .storage import resolve_fern_dir
 class RelayConnection:
     """Manages a WebSocket connection to a relay for a specific group."""
 
-    def __init__(self, relay_url: str, group_pubkey: str):
+    def __init__(self, relay_url: str, group_pubkey: str, subscribe: bool = True):
         self.relay_url = relay_url
         self.group_pubkey = group_pubkey
+        self.subscribe = subscribe
         self.ws = None
         self.connected = False
         self._read_task = None
@@ -35,19 +36,20 @@ class RelayConnection:
             self.ws = await websockets.connect(self.relay_url)
             self.connected = True
             await on_log("relay", f"Connected to {self.relay_url}")
-            # Subscribe
-            await self.ws.send(
-                json.dumps(
-                    {
-                        "action": "subscribe",
-                        "group": self.group_pubkey,
-                    }
+            # Subscribe (if enabled)
+            if self.subscribe:
+                await self.ws.send(
+                    json.dumps(
+                        {
+                            "action": "subscribe",
+                            "group": self.group_pubkey,
+                        }
+                    )
                 )
-            )
-            await on_log(
-                "relay",
-                f"Subscribed to {self.group_pubkey[:12]}... on {self.relay_url}",
-            )
+                await on_log(
+                    "relay",
+                    f"Subscribed to {self.group_pubkey[:12]}... on {self.relay_url}",
+                )
             # Read loop
             self._read_task = asyncio.create_task(self._read_loop())
         except Exception as e:
@@ -146,7 +148,8 @@ class ChatSession:
             relay_url = msg["relay"]
             group_pubkey = msg["group"]
             self.group_pubkey = group_pubkey
-            conn = RelayConnection(relay_url, group_pubkey)
+            do_subscribe = msg.get("subscribe", True)
+            conn = RelayConnection(relay_url, group_pubkey, subscribe=do_subscribe)
             self.relay_connections[relay_url] = conn
             await conn.connect(
                 on_event=self._on_relay_event,
