@@ -6,3 +6,6 @@
 - Fix clear event log button
 - sync_and_heal can lose local-only events during group migration: if user creates events offline (never published) then group migrates, the local events in dag.events are cleared at line 328 but not preserved before the clear. Need to preserve all_validated before clearing, or merge local events after migration.
 - Distinguish between adding and joining a group in the chat UI
+- Fix 'thundering herd' problem where many clients try to heal a relay at once
+- Fix fern-test simultaneous send
+- Healing relays from local events - even if all relays loose event history, a client should automatically heal the relays from their local event storage

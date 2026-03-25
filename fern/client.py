@@ -99,6 +99,29 @@ async def fetch_genesis(relay_url: str, group_pubkey: str) -> dict | None:
     return None
 
 
+async def fetch_summary_from_relay(relay_url: str, group_pubkey: str) -> dict | None:
+    """Fetch a summary (event count and tips) from a relay. Returns summary or None."""
+    try:
+        async with asyncio.timeout(1.5):
+            async with websockets.connect(relay_url) as ws:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "action": "summary",
+                            "group": group_pubkey,
+                        }
+                    )
+                )
+                msg = json.loads(await ws.recv())
+                if msg.get("type") == "summary":
+                    return msg
+    except asyncio.TimeoutError:
+        click.echo(f"    {relay_url}: timeout fetching summary", err=True)
+    except Exception:
+        pass
+    return None
+
+
 def validate_genesis(event: dict) -> tuple[bool, str]:
     """Validate a genesis event. Returns (valid, reason)."""
     if not event:
@@ -135,8 +158,10 @@ def validate_genesis(event: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-async def fetch_events_from_relay(relay_url: str, group_pubkey: str) -> list[dict]:
-    """Fetch all events from a relay without storing. Returns list of raw events."""
+async def fetch_events_from_relay(
+    relay_url: str, group_pubkey: str, since: int = 0
+) -> list[dict]:
+    """Fetch events from a relay since a timestamp. Returns list of raw events."""
     events = []
     try:
         async with websockets.connect(relay_url) as ws:
@@ -145,7 +170,7 @@ async def fetch_events_from_relay(relay_url: str, group_pubkey: str) -> list[dic
                     {
                         "action": "sync",
                         "group": group_pubkey,
-                        "since": 0,
+                        "since": since,
                     }
                 )
             )
@@ -161,9 +186,18 @@ async def fetch_events_from_relay(relay_url: str, group_pubkey: str) -> list[dic
 
 
 async def fetch_and_validate_events(
-    relay_urls: list[str], group_pubkey: str
+    relay_urls: list[str],
+    group_pubkey: str,
+    since: int = 0,
+    skip_genesis_validation: bool = False,
 ) -> tuple[dict[str, dict], dict[str, set[str]], list[str], int]:
     """Fetch events from multiple relays in parallel and validate them.
+
+    Args:
+        relay_urls: List of relay URLs to fetch from
+        group_pubkey: Group public key
+        since: Only fetch events with ts >= since (0 = full sync)
+        skip_genesis_validation: If True, skip genesis validation (for incremental sync)
 
     Returns:
         - all_validated: dict mapping event_id -> event
@@ -176,31 +210,40 @@ async def fetch_and_validate_events(
     good_relays: list[str] = []
     invalid_count = 0
 
-    # Fetch genesis from all relays to validate them
-    genesis_tasks = [fetch_genesis(url, group_pubkey) for url in relay_urls]
-    genesis_results = await asyncio.gather(*genesis_tasks)
+    # Fetch genesis from all relays to validate them (unless skipped)
+    if skip_genesis_validation:
+        # For incremental sync, assume local genesis is valid and all relays are good
+        good_relays = list(relay_urls)
+        valid_genesis = None
+    else:
+        genesis_tasks = [fetch_genesis(url, group_pubkey) for url in relay_urls]
+        genesis_results = await asyncio.gather(*genesis_tasks)
 
-    valid_genesis = None
-    for url, genesis in zip(relay_urls, genesis_results):
-        if genesis is None:
-            click.echo(f"    {url}: no genesis found")
-            continue
-        ok, reason = validate_genesis(genesis)
-        if ok:
-            if valid_genesis is None:
-                valid_genesis = genesis
-            elif genesis["id"] != valid_genesis["id"]:
-                click.echo(f"    {url}: DIFFERENT genesis - discarding", err=True)
+        valid_genesis = None
+        for url, genesis in zip(relay_urls, genesis_results):
+            if genesis is None:
+                click.echo(f"    {url}: no genesis found")
                 continue
-            good_relays.append(url)
-        else:
-            click.echo(f"    {url}: genesis INVALID ({reason}) - discarding", err=True)
+            ok, reason = validate_genesis(genesis)
+            if ok:
+                if valid_genesis is None:
+                    valid_genesis = genesis
+                elif genesis["id"] != valid_genesis["id"]:
+                    click.echo(f"    {url}: DIFFERENT genesis - discarding", err=True)
+                    continue
+                good_relays.append(url)
+            else:
+                click.echo(
+                    f"    {url}: genesis INVALID ({reason}) - discarding", err=True
+                )
 
     if not good_relays:
         return {}, {}, [], 0
 
-    # Fetch all events from good relays
-    fetch_tasks = [fetch_events_from_relay(url, group_pubkey) for url in good_relays]
+    # Fetch events from good relays (using since parameter for incremental sync)
+    fetch_tasks = [
+        fetch_events_from_relay(url, group_pubkey, since) for url in good_relays
+    ]
     fetch_results = await asyncio.gather(*fetch_tasks)
 
     for url, events in zip(good_relays, fetch_results):
@@ -225,11 +268,11 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     through the event history itself, rather than trusting hint relays.
 
     Process:
-      1. Initial sync from hint relays
-      2. Derive canonical relays from downloaded events
-      3. If derived relays differ from current, switch and continue syncing
-      4. Repeat until relay list stabilises
-      5. Heal divergence across all canonical relays
+      1. Check local state - if we have events, get latest timestamp and tips
+      2. Query relay summaries to check if sync is even needed
+      3. If summaries match local state, skip sync (already in sync)
+      4. If not, do incremental or full sync depending on local state
+      5. Heal any divergence across canonical relays
 
     Returns summary dict with sync statistics.
     """
@@ -242,10 +285,98 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
         "invalid_events": 0,
         "healed_events": 0,
         "gaps": [],
+        "skipped": False,
     }
 
     if not hint_relays:
         return summary
+
+    # =========================================================================
+    # PHASE 0: CHECK IF SYNC IS NEEDED (incremental sync optimization)
+    # =========================================================================
+    # If we have local events, check relay summaries first to avoid
+    # unnecessary full history downloads.
+    # =========================================================================
+
+    local_latest_ts = 0
+    local_tips: set[str] = set()
+    local_count = dag.count
+
+    if local_count > 0:
+        all_events = dag.get_all_events()
+        if all_events:
+            local_latest_ts = all_events[-1]["ts"]
+        local_tips = set(dag.get_tips())
+
+        click.echo(f"  Local state: {local_count} events, latest ts={local_latest_ts}")
+        click.echo(f"  Fetching relay summaries to check if sync is needed...")
+
+        # Fetch summaries from all hint relays
+        summary_tasks = [
+            fetch_summary_from_relay(url, dag.group_pubkey) for url in hint_relays
+        ]
+        summary_results = await asyncio.gather(*summary_tasks)
+
+        relay_summaries: dict[str, dict] = {}
+        for url, s in zip(hint_relays, summary_results):
+            if s is not None:
+                relay_summaries[url] = s
+
+        if relay_summaries:
+            # Check if all relays agree and match local state
+            all_match = True
+            first_count = None
+            first_tips = None
+
+            for url, s in relay_summaries.items():
+                count = s.get("count", 0)
+                tips = set(s.get("tips", []))
+
+                if first_count is None:
+                    first_count = count
+                    first_tips = tips
+                elif count != first_count or tips != first_tips:
+                    # Relays disagree with each other - need full sync
+                    all_match = False
+                    break
+
+            if all_match and first_count is not None:
+                if first_count == local_count and first_tips == local_tips:
+                    # Local state matches all relays - we're in sync!
+                    summary["skipped"] = True
+                    click.echo(
+                        f"  [SKIP] Local state matches relay summaries "
+                        f"({local_count} events, {len(local_tips)} tips)"
+                    )
+
+                    # Still need to update canonical relays from group state
+                    state = dag.get_state()
+                    summary["canonical_relays"] = (
+                        state.relays if state.relays else list(hint_relays)
+                    )
+
+                    # Check for gaps
+                    gaps = dag.get_missing_parents()
+                    summary["gaps"] = sorted(gaps)
+                    if gaps:
+                        click.echo(f"  WARNING: {len(gaps)} gap(s) detected")
+                    else:
+                        click.echo("  DAG complete - no gaps")
+
+                    return summary
+                elif first_count <= local_count:
+                    # Relays have same or fewer events than local - our local state
+                    # might be ahead or we have extra events (gap healing needed)
+                    click.echo(
+                        f"  Local has {local_count} events, relays have {first_count} - "
+                        f"checking if healing needed"
+                    )
+                else:
+                    # Relays have more events - need incremental sync
+                    click.echo(
+                        f"  Relay has {first_count} events (local has {local_count}) - "
+                        f"need incremental sync"
+                    )
 
     # =========================================================================
     # PHASE 1: SYNC WITH RELAY DISCOVERY
@@ -258,6 +389,7 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     current_relays = list(hint_relays)
     all_validated: dict[str, dict] = {}
     seen_relays: set[str] = set()
+    event_ids_before_sync = set(dag.events.keys())
 
     while current_relays:
         summary["sync_rounds"] += 1
@@ -271,13 +403,25 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
         used_this_round = frozenset(current_relays)
         seen_relays.update(current_relays)
 
+        # Determine sync mode: incremental if we have local events, full otherwise
+        sync_since = local_latest_ts if local_latest_ts > 0 else 0
+        skip_genesis = local_latest_ts > 0
+
+        if sync_since > 0:
+            click.echo(f"    Incremental sync since ts={sync_since}")
+
         # Fetch and validate events from current relays
         (
             events,
             relay_event_ids,
             good_relays,
             invalid_count,
-        ) = await fetch_and_validate_events(current_relays, dag.group_pubkey)
+        ) = await fetch_and_validate_events(
+            current_relays,
+            dag.group_pubkey,
+            since=sync_since,
+            skip_genesis_validation=skip_genesis,
+        )
 
         summary["invalid_events"] += invalid_count
 
@@ -336,12 +480,21 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
 
     summary["total_events"] = len(all_validated)
 
+    # Compute events received during this sync (for incremental sync healing)
+    new_event_ids = set(all_validated.keys()) - event_ids_before_sync
+
     # =========================================================================
     # PHASE 2: HEAL CANONICAL RELAYS
     # =========================================================================
     # Now that we have the full history and know the canonical relays,
     # we heal any divergence between them by cross-referencing event sets.
     # =========================================================================
+
+    # Merge local events into all_validated BEFORE healing
+    # (local events are in dag.events but may not be in all_validated yet)
+    for eid, event in dag.events.items():
+        if eid not in all_validated:
+            all_validated[eid] = event
 
     # Determine final canonical relays from group state
     state = dag.get_state()
@@ -351,13 +504,16 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     click.echo(f"\n  [Healing] Canonical relays: {', '.join(canonical_relays)}")
 
     # Fetch event IDs from all canonical relays to compare
+    # Use same `since` parameter for consistency - we only need to heal recent events
     canonical_event_ids: dict[str, set[str]] = {}
     for url in canonical_relays:
         if url in relay_event_ids:
             canonical_event_ids[url] = relay_event_ids[url]
         else:
-            # Fetch from this relay if we haven't already
-            events = await fetch_events_from_relay(url, dag.group_pubkey)
+            # Fetch from this relay if we haven't already (with same since parameter)
+            events = await fetch_events_from_relay(
+                url, dag.group_pubkey, since=sync_since
+            )
             ids = set()
             for event in events:
                 ok, _ = verify_event(event)
@@ -368,12 +524,16 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
             canonical_event_ids[url] = ids
 
     # Heal: push missing events to relays that don't have them
-    all_event_ids = set(all_validated.keys())
+    # For full sync: heal all events (we have complete picture from all relays)
+    # For incremental sync: only heal the new events we received in this sync
+    events_to_heal = set(all_validated.keys()) if sync_since == 0 else new_event_ids
     healed = 0
+
+    click.echo(f"    Healing {len(events_to_heal)} event(s)")
 
     for url in canonical_relays:
         relay_ids = canonical_event_ids.get(url, set())
-        missing = all_event_ids - relay_ids
+        missing = events_to_heal - relay_ids
         if missing:
             click.echo(f"    {url}: missing {len(missing)} event(s), pushing...")
             for event_id in missing:
@@ -389,11 +549,6 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     # =========================================================================
     # PHASE 3: FINALISE LOCAL STORAGE
     # =========================================================================
-
-    # Merge local events that may not have come from relays yet
-    for eid, event in dag.events.items():
-        if eid not in all_validated:
-            all_validated[eid] = event
 
     # Clear and re-store all events in proper order
     dag.events.clear()
