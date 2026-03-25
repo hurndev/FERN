@@ -591,13 +591,6 @@ async function signMessage(privHex, messageBytes) {
   return bytesToHex(sig);
 }
 
-async function verifySignature(pubHex, sigHex, messageBytes) {
-  setTimeout(async () => {
-    await refreshGroups();
-    selectGroup(groupPubkey);
-  }, 2000);
-}
-
 // =========================================================================
 // Key Storage
 // =========================================================================
@@ -653,6 +646,8 @@ let currentGroup = null;
 let groups = [];
 let events = [];
 let eventLog = [];
+let pendingSyncs = new Set();
+let connectedRelays = new Set();
 
 const USER_COLORS = [
   '#c8a060', '#60a0c8', '#a0c860', '#c860a0', '#60c8a0',
@@ -721,6 +716,8 @@ function connectWS() {
       addLog('error', msg.message);
     } else if (msg.type === 'ok') {
       // published successfully
+    } else if (msg.type === 'sync_complete') {
+      handleSyncComplete(msg.relay);
     }
   };
 }
@@ -745,13 +742,22 @@ function handleIncomingEvent(event, relay) {
   }
 }
 
-async function loadGroupEvents(groupPubkey) {
-  addLog('local', `Loading local events for ${groupPubkey.slice(0, 12)}...`);
-  wsSend({ action: 'load_local', group: groupPubkey });
-
-  setTimeout(() => {
-    wsSend({ action: 'sync', since: 0 });
-  }, 500);
+function handleSyncComplete(relay) {
+  pendingSyncs.delete(relay);
+  if (pendingSyncs.size === 0) {
+    addLog('sync', 'All syncs complete');
+    // If joinGroup is waiting to call selectGroup, do that now
+    if (window._pendingSelectGroup) {
+      window._pendingSelectGroup();
+    } else {
+      // Otherwise, if we're already in a group, subscribe to live events
+      const autoSub = document.getElementById('auto-subscribe').checked;
+      if (autoSub && currentGroup) {
+        addLog('browser', 'Subscribing to live events...');
+        wsSend({ action: 'subscribe' });
+      }
+    }
+  }
 }
 
 // =========================================================================
@@ -976,17 +982,31 @@ async function selectGroup(pubkey) {
   updateInputState();
   updateManageButton();
 
-  // Connect to relays
-  const connectRelays = group?.relays || [];
-  const autoSub = document.getElementById('auto-subscribe').checked;
-  if (connectRelays.length) {
-    for (const relay of connectRelays) {
-      addLog('browser', `Connecting to ${relay}...`);
-      wsSend({ action: 'connect_relay', relay, group: pubkey, subscribe: autoSub });
-    }
-  }
+  // Reset sync tracking
+  pendingSyncs = new Set();
+  connectedRelays = new Set();
 
-  loadGroupEvents(pubkey);
+  // 1. Load local cache immediately for instant display
+  addLog('local', `Loading local events...`);
+  wsSend({ action: 'load_local', group: pubkey });
+
+  // 2. Connect to relays (no subscribe yet)
+  if (relays.length) {
+    for (const relay of relays) {
+      addLog('browser', `Connecting to ${relay}...`);
+      wsSend({ action: 'connect_relay', relay, group: pubkey, subscribe: false });
+      pendingSyncs.add(relay);
+      connectedRelays.add(relay);
+    }
+
+    // 3. After a brief connection delay, send sync to all relays
+    setTimeout(() => {
+      addLog('sync', `Syncing from ${connectedRelays.size} relay(s)...`);
+      wsSend({ action: 'sync', since: 0 });
+    }, 100);
+  } else {
+    addLog('error', 'No relays configured for this group');
+  }
 }
 
 async function sendMessage() {
@@ -1041,16 +1061,19 @@ async function createGroup() {
   if (res.ok) {
     addLog('local', `Group created locally`);
     await refreshGroups();
-    selectGroup(groupKeys.pub);
 
+    // Publish genesis to relays first
     for (const r of relays) {
-      wsSend({ action: 'connect_relay', relay: r, group: groupKeys.pub, subscribe: document.getElementById('auto-subscribe').checked });
+      wsSend({ action: 'connect_relay', relay: r, group: groupKeys.pub, subscribe: false });
     }
     setTimeout(() => {
       for (const r of relays) {
         wsSend({ action: 'publish', event: genesis, relay: r });
       }
-    }, 1000);
+    }, 500);
+
+    // Then select the group - this will sync and subscribe
+    selectGroup(groupKeys.pub);
   } else {
     const err = await res.json();
     addLog('error', `Failed to create group: ${err.error}`);
@@ -1075,16 +1098,30 @@ async function joinGroup() {
 
   addLog('browser', `Joining group ${groupPubkey.slice(0, 12)}...`);
 
-  for (const r of relays) {
-    wsSend({ action: 'connect_relay', relay: r, group: groupPubkey, subscribe: document.getElementById('auto-subscribe').checked });
-  }
-  wsSend({ action: 'sync', since: 0 });
+  // Reset sync tracking for the join
+  pendingSyncs = new Set();
+  connectedRelays = new Set();
 
-  setTimeout(async () => {
+  // Connect to relays (subscribe will happen after sync via selectGroup's handleSyncComplete)
+  for (const r of relays) {
+    wsSend({ action: 'connect_relay', relay: r, group: groupPubkey, subscribe: false });
+    pendingSyncs.add(r);
+    connectedRelays.add(r);
+  }
+
+  // Send sync after brief connection delay
+  setTimeout(() => {
+    addLog('sync', `Syncing from ${connectedRelays.size} relay(s)...`);
+    wsSend({ action: 'sync', since: 0 });
+  }, 100);
+
+  // Set up to call selectGroup when all syncs complete
+  const originalHandleSyncComplete = window._pendingSelectGroup;
+  window._pendingSelectGroup = async () => {
     await refreshGroups();
     selectGroup(groupPubkey);
-  }, 2000);
-  joinGroup._active = false;
+    window._pendingSelectGroup = null;
+  };
 }
 
 async function joinCurrentGroup() {

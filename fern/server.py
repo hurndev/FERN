@@ -151,20 +151,15 @@ class RelayServer:
         return True, "ok"
 
     async def handle_subscribe(self, ws, group: str) -> None:
-        """Handle subscription to a group."""
+        """Handle subscription to a group.
+
+        Subscribes to receive new events only. For historical events, use the sync action first.
+        """
         print(f"    subscribe: group={group[:16]}...")
         if group not in self.subscriptions:
             self.subscriptions[group] = set()
         self.subscriptions[group].add(ws)
-
-        # Send all existing events for this group
-        if group in self.groups:
-            count = len(self.groups[group])
-            print(f"    sending {count} existing events to subscriber")
-            for event in sorted(
-                self.groups[group].values(), key=lambda e: (e["ts"], e["id"])
-            ):
-                await ws.send(json.dumps({"type": "event", "event": event}))
+        print(f"    subscribed - waiting for new events")
 
     async def handle_publish(self, ws, event: dict) -> None:
         """Handle event publishing."""
