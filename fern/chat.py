@@ -26,6 +26,8 @@ class RelayConnection:
         self._read_task = None
         self._on_event = None
         self._on_log = None
+        self._on_sync_complete = None
+        self._subscribed = False
 
     async def connect(self, on_event, on_log):
         self._on_event = on_event
@@ -36,24 +38,31 @@ class RelayConnection:
             self.ws = await websockets.connect(self.relay_url)
             self.connected = True
             await on_log("relay", f"Connected to {self.relay_url}")
-            # Subscribe (if enabled)
             if self.subscribe:
-                await self.ws.send(
-                    json.dumps(
-                        {
-                            "action": "subscribe",
-                            "group": self.group_pubkey,
-                        }
-                    )
-                )
-                await on_log(
-                    "relay",
-                    f"Subscribed to {self.group_pubkey[:12]}... on {self.relay_url}",
-                )
-            # Read loop
+                await self._send_subscribe()
             self._read_task = asyncio.create_task(self._read_loop())
         except Exception as e:
             await on_log("error", f"Failed to connect to {self.relay_url}: {e}")
+            # Connection failed - treat as sync complete with 0 events
+            if self._on_sync_complete:
+                await self._on_sync_complete(self.relay_url)
+
+    async def _send_subscribe(self):
+        """Send subscribe action to relay."""
+        if self.ws and self.connected and not self._subscribed:
+            await self.ws.send(
+                json.dumps(
+                    {
+                        "action": "subscribe",
+                        "group": self.group_pubkey,
+                    }
+                )
+            )
+            self._subscribed = True
+            await self._on_log(
+                "relay",
+                f"Subscribed to {self.group_pubkey[:12]}... on {self.relay_url}",
+            )
 
     async def _read_loop(self):
         try:
@@ -61,6 +70,9 @@ class RelayConnection:
                 msg = json.loads(raw)
                 if msg.get("type") == "event" and self._on_event:
                     await self._on_event(msg["event"], self.relay_url)
+                elif msg.get("type") == "sync_complete":
+                    if self._on_sync_complete:
+                        await self._on_sync_complete(self.relay_url)
                 elif msg.get("type") == "ok":
                     await self._on_log("relay", f"OK: {msg.get('id', '?')[:12]}...")
                 elif msg.get("type") == "error":
@@ -72,6 +84,13 @@ class RelayConnection:
                 await self._on_log("error", f"Disconnected from {self.relay_url}: {e}")
         finally:
             self.connected = False
+
+    def set_on_sync_complete(self, callback):
+        """Set callback for sync_complete message."""
+        self._on_sync_complete = callback
+
+    def is_subscribed(self) -> bool:
+        return self._subscribed
 
     async def publish(self, event: dict):
         if self.ws and self.connected:
@@ -148,9 +167,14 @@ class ChatSession:
             relay_url = msg["relay"]
             group_pubkey = msg["group"]
             self.group_pubkey = group_pubkey
-            do_subscribe = msg.get("subscribe", True)
-            conn = RelayConnection(relay_url, group_pubkey, subscribe=do_subscribe)
+            conn = RelayConnection(relay_url, group_pubkey, subscribe=False)
             self.relay_connections[relay_url] = conn
+
+            async def on_sync_complete(url):
+                await self.log("sync", f"Sync complete from {url}")
+                await self.send({"type": "sync_complete", "relay": url})
+
+            conn.set_on_sync_complete(on_sync_complete)
             await conn.connect(
                 on_event=self._on_relay_event,
                 on_log=self.log,
@@ -201,6 +225,14 @@ class ChatSession:
                 for conn in self.relay_connections.values():
                     await conn.sync(since)
 
+        elif action == "subscribe":
+            relay_url = msg.get("relay")
+            if relay_url and relay_url in self.relay_connections:
+                await self.relay_connections[relay_url]._send_subscribe()
+            else:
+                for conn in self.relay_connections.values():
+                    await conn._send_subscribe()
+
         elif action == "load_local":
             group_pubkey = msg["group"]
             dag = self.storage.get_group_dag(group_pubkey)
@@ -220,7 +252,7 @@ class ChatSession:
         if self.group_pubkey:
             dag = self.storage.get_group_dag(self.group_pubkey)
             ok, reason = dag.add_event(event)
-            if not ok:
+            if not ok and reason != "duplicate":
                 eid = event.get("id", "?")[:16]
                 await self.log(
                     "error", f"Invalid event from {relay_url}: {reason} ({eid}...)"

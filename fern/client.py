@@ -754,6 +754,8 @@ def subscribe(group_pubkey: str, relay: str | None):
     def on_event(event, ok, reason):
         if ok:
             click.echo(format_event(event))
+        elif reason == "duplicate":
+            pass  # Already seen - normal during catch-up, not an error
         else:
             eid = event.get("id", "?")[:16]
             click.echo(f"[INVALID EVENT: {reason}] {eid}...")
