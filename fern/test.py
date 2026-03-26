@@ -165,14 +165,15 @@ def multi_send(
 
     async def send_as_user(user_name: str, user_home: str, msg_num: int) -> dict:
         """Send a single message as a user."""
-        key_path = Path(user_home) / "keys" / "user.pem"
+        fern_dir = Path(user_home) / ".fern"
+        key_path = fern_dir / "keys" / "user.pem"
         if not key_path.exists():
             return {"user": user_name, "success": False, "error": "no key"}
 
         privkey = crypto.load_private_key(str(key_path))
         pubkey = crypto.public_key_from_private(privkey)
 
-        storage_dir = Path(user_home) / "groups"
+        storage_dir = fern_dir / "groups"
         from .dag import EventDAG
 
         dag = EventDAG(group_pubkey, str(storage_dir))
