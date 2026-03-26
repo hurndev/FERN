@@ -251,12 +251,21 @@ class ChatSession:
             if relay_url and relay_url in self.relay_connections:
                 result = await self.relay_connections[relay_url].publish(event)
                 published = result.get("type") == "ok" if result else False
+            elif relay_url:
+                # Specific relay requested but not connected - this is a definite failure
+                published = False
             else:
+                # No specific relay - publish to all and count successes
+                success_count = 0
+                fail_count = 0
                 for conn in self.relay_connections.values():
                     result = await conn.publish(event)
                     if result and result.get("type") == "ok":
-                        published = True
-                        break
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                # Consider it a success if at least one relay accepted
+                published = success_count > 0
 
             if published:
                 dag = self.storage.get_group_dag(event["group"])
@@ -264,11 +273,11 @@ class ChatSession:
                 await self.send({"type": "ok", "id": event["id"]})
             else:
                 await self.send(
-                        {
-                            "type": "error",
-                            "message": "Failed to publish. Your message has been saved in browser.",
-                            "event_id": event["id"],
-                        }
+                    {
+                        "type": "error",
+                        "message": "Failed to publish. Your message has been saved in browser.",
+                        "event_id": event["id"],
+                    }
                 )
 
         elif action == "sync":
