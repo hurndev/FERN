@@ -861,24 +861,27 @@ def send(
         parents=tips,
     )
 
-    # Store locally
-    dag.add_event(event)
-
-    # Publish to relays
+    # Publish to relays FIRST - don't add to local DAG until relay accepts
     click.echo(f"Publishing to {len(relays)} relay(s): {', '.join(relays)}")
     results = asyncio.run(publish_to_relays(event, relays))
 
     success = 0
+    accepted_relays = []
     for url, result in results.items():
         if result.get("type") == "ok":
             success += 1
+            accepted_relays.append(url)
         else:
             click.echo(f"  {url}: {result.get('message', 'error')}", err=True)
 
-    if success:
+    if accepted_relays:
+        dag.add_event(event)
         click.echo(f"Sent ({success}/{len(relays)} relays).")
     else:
-        click.echo("Failed to send to any relay.", err=True)
+        click.echo(
+            "Failed to send to any relay. Please try again when a relay is available.",
+            err=True,
+        )
 
 
 @cli.command()

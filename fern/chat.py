@@ -28,6 +28,7 @@ class RelayConnection:
         self._on_log = None
         self._on_sync_complete = None
         self._subscribed = False
+        self._pending_responses: dict[str, asyncio.Future] = {}
 
     async def connect(self, on_event, on_log):
         self._on_event = on_event
@@ -43,7 +44,6 @@ class RelayConnection:
             self._read_task = asyncio.create_task(self._read_loop())
         except Exception as e:
             await on_log("error", f"Failed to connect to {self.relay_url}: {e}")
-            # Connection failed - treat as sync complete with 0 events
             if self._on_sync_complete:
                 await self._on_sync_complete(self.relay_url)
 
@@ -73,6 +73,14 @@ class RelayConnection:
                 elif msg.get("type") == "sync_complete":
                     if self._on_sync_complete:
                         await self._on_sync_complete(self.relay_url)
+                elif msg.get("type") == "ok" and msg.get("id"):
+                    fid = msg["id"]
+                    if fid in self._pending_responses:
+                        self._pending_responses.pop(fid).set_result(msg)
+                elif msg.get("type") == "error" and msg.get("id"):
+                    fid = msg["id"]
+                    if fid in self._pending_responses:
+                        self._pending_responses.pop(fid).set_result(msg)
                 elif msg.get("type") == "ok":
                     await self._on_log("relay", f"OK: {msg.get('id', '?')[:12]}...")
                 elif msg.get("type") == "error":
@@ -84,6 +92,9 @@ class RelayConnection:
                 await self._on_log("error", f"Disconnected from {self.relay_url}: {e}")
         finally:
             self.connected = False
+            for fut in self._pending_responses.values():
+                fut.cancel()
+            self._pending_responses.clear()
 
     def set_on_sync_complete(self, callback):
         """Set callback for sync_complete message."""
@@ -92,9 +103,14 @@ class RelayConnection:
     def is_subscribed(self) -> bool:
         return self._subscribed
 
-    async def publish(self, event: dict):
+    async def publish(self, event: dict) -> dict | None:
+        """Publish an event and wait for relay response. Returns response dict or None."""
         if self.ws and self.connected:
             try:
+                event_id = event["id"]
+                fut = asyncio.Future()
+                self._pending_responses[event_id] = fut
+
                 await self.ws.send(
                     json.dumps(
                         {
@@ -106,8 +122,20 @@ class RelayConnection:
                 await self._on_log(
                     "publish", f"Published {event['type']} to {self.relay_url}"
                 )
+
+                try:
+                    response = await asyncio.wait_for(fut, timeout=5.0)
+                    return response
+                except asyncio.TimeoutError:
+                    await self._on_log(
+                        "error", f"Publish timed out to {self.relay_url}"
+                    )
+                    self._pending_responses.pop(event_id, None)
+                    return None
             except Exception as e:
                 await self._on_log("error", f"Publish failed to {self.relay_url}: {e}")
+                self._pending_responses.pop(event["id"], None)
+        return None
 
     async def sync(self, since: int = 0):
         if self.ws and self.connected:
@@ -199,22 +227,49 @@ class ChatSession:
             if not valid:
                 await self.log("error", f"Event rejected: {reason}")
                 await self.send(
-                    {"type": "error", "message": f"Invalid event: {reason}"}
+                    {
+                        "type": "error",
+                        "message": f"Invalid event: {reason}",
+                        "event_id": event["id"],
+                    }
                 )
                 return
 
-            # Store locally
-            dag = self.storage.get_group_dag(event["group"])
-            dag.add_event(event)
+            # Publish to relay FIRST, only store locally if relay accepts
+            published = False
+            if not self.relay_connections:
+                await self.log("error", "No relay connections")
+                await self.send(
+                    {
+                        "type": "error",
+                        "message": "No relay connected. Your message has been saved in browser.",
+                        "event_id": event["id"],
+                    }
+                )
+                return
 
-            # Publish to specified relay or all
             if relay_url and relay_url in self.relay_connections:
-                await self.relay_connections[relay_url].publish(event)
+                result = await self.relay_connections[relay_url].publish(event)
+                published = result.get("type") == "ok" if result else False
             else:
                 for conn in self.relay_connections.values():
-                    await conn.publish(event)
+                    result = await conn.publish(event)
+                    if result and result.get("type") == "ok":
+                        published = True
+                        break
 
-            await self.send({"type": "ok", "id": event["id"]})
+            if published:
+                dag = self.storage.get_group_dag(event["group"])
+                dag.add_event(event)
+                await self.send({"type": "ok", "id": event["id"]})
+            else:
+                await self.send(
+                        {
+                            "type": "error",
+                            "message": "Failed to publish. Your message has been saved in browser.",
+                            "event_id": event["id"],
+                        }
+                )
 
         elif action == "sync":
             relay_url = msg.get("relay")
