@@ -16,9 +16,9 @@
 
 body {
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-  font-size: 13px;
+  font-size: 14px;
   background: #0a0a0a;
-  color: #b8b8b0;
+  color: #c8c8c0;
   height: 100vh;
   overflow: hidden;
 }
@@ -30,8 +30,9 @@ a:hover { text-decoration: underline; }
 #app {
   display: grid;
   grid-template-columns: 220px 1fr 260px;
-  grid-template-rows: 32px 1fr 38px;
+  grid-template-rows: 32px 1fr auto;
   height: 100vh;
+  align-items: stretch;
 }
 
 /* === Header === */
@@ -46,13 +47,13 @@ a:hover { text-decoration: underline; }
 }
 #header .logo {
   font-weight: bold;
-  font-size: 14px;
+  font-size: 15px;
   color: #d4aa70;
   letter-spacing: 1px;
 }
 #header .identity {
-  font-size: 11px;
-  color: #707060;
+  font-size: 12px;
+  color: #808070;
 }
 #header .identity .pubkey {
   color: #8a8a7a;
@@ -61,7 +62,7 @@ a:hover { text-decoration: underline; }
 #header .identity .pubkey:hover { color: #b8b8b0; }
 #header .status {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 12px;
   display: flex;
   gap: 8px;
   align-items: center;
@@ -81,25 +82,26 @@ a:hover { text-decoration: underline; }
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  grid-row: 2;
+  min-height: 0;
 }
 #sidebar .section-title {
   padding: 8px 10px 4px;
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: #505048;
-  border-bottom: 1px solid #1a1a22;
+  color: #686868;
 }
 #sidebar #identity-display {
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 6px 10px;
-  font-size: 10px;
-  color: #606058;
+  font-size: 12px;
+  color: #707068;
   cursor: pointer;
 }
-#sidebar #identity-display:hover { color: #909088; }
+#sidebar #identity-display:hover { color: #a0a098; }
 #sidebar #identity-display .pubkey {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -110,25 +112,24 @@ a:hover { text-decoration: underline; }
 }
 #sidebar .profile-label {
   padding: 8px 10px 4px;
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: #505048;
+  color: #606060;
 }
 #sidebar .actions {
   padding: 6px 8px;
   display: flex;
   gap: 4px;
-  border-bottom: 1px solid #1a1a22;
 }
 #sidebar .actions button {
   flex: 1;
   background: #1a1a2e;
-  color: #b8b8b0;
+  color: #c0c0b0;
   border: 1px solid #2a2a3a;
-  padding: 3px 6px;
+  padding: 4px 6px;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 #sidebar .actions button:hover { background: #22223a; border-color: #3a3a4a; }
@@ -154,8 +155,8 @@ a:hover { text-decoration: underline; }
 }
 #group-list .group-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #group-list .group-item .count {
-  font-size: 10px;
-  color: #505048;
+  font-size: 11px;
+  color: #606060;
   background: #1a1a22;
   padding: 0 4px;
   min-width: 18px;
@@ -168,6 +169,8 @@ a:hover { text-decoration: underline; }
   flex-direction: column;
   overflow: hidden;
   background: #0e0e12;
+  grid-row: 2;
+  min-height: 0;
 }
 #chat-header {
   padding: 8px 12px;
@@ -175,17 +178,17 @@ a:hover { text-decoration: underline; }
   background: #111118;
 }
 #chat-header .group-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: bold;
   color: #d4d4c8;
 }
 #chat-header .group-desc {
-  font-size: 11px;
-  color: #606058;
+  font-size: 12px;
+  color: #707068;
   margin-top: 2px;
 }
 #chat-header .invite-link {
-  font-size: 11px;
+  font-size: 12px;
   color: #5a7a5a;
   margin-top: 3px;
   cursor: pointer;
@@ -197,7 +200,7 @@ a:hover { text-decoration: underline; }
 #chat-header .invite-link.copied { color: #d4aa70; }
 #chat-header .manage-btn, #chat-header .join-btn, #chat-header .leave-btn {
   background: none; border: 1px solid #2a2a3a; color: #8a8a7a;
-  font-family: inherit; font-size: 10px; padding: 2px 8px;
+  font-family: inherit; font-size: 11px; padding: 3px 10px;
   cursor: pointer; margin-top: 4px; margin-right: 4px;
 }
 #chat-header .manage-btn:hover { color: #d4aa70; border-color: #d4aa70; }
@@ -224,26 +227,26 @@ a:hover { text-decoration: underline; }
   margin: 0 4px;
 }
 #messages .msg .ts {
-  color: #404038;
-  font-size: 11px;
+  color: #585850;
+  font-size: 12px;
   margin-right: 6px;
 }
 #messages .msg .author {
   font-weight: bold;
-  margin-right: 4px;
+  margin-right: 6px;
 }
-#messages .msg .content { color: #b8b8b0; }
+#messages .msg .content { color: #c8c8c0; }
 #messages .msg.system {
-  color: #606058;
+  color: #707068;
   font-style: italic;
-  font-size: 12px;
+  font-size: 13px;
 }
-#messages .msg.system .content { color: #606058; }
+#messages .msg.system .content { color: #707060; }
 #messages .empty {
   padding: 20px;
   text-align: center;
-  color: #404038;
-  font-size: 12px;
+  color: #585850;
+  font-size: 13px;
 }
 
 #input-area {
@@ -252,28 +255,35 @@ a:hover { text-decoration: underline; }
   background: #111118;
   display: flex;
   gap: 6px;
+  align-items: flex-start;
 }
-#input-area input {
+#input-area textarea {
   flex: 1;
   background: #0a0a0e;
   border: 1px solid #2a2a3a;
   color: #d4d4c8;
-  padding: 5px 8px;
+  padding: 7px 10px;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
+  resize: none;
+  min-height: 26px;
+  max-height: 50vh;
+  overflow-y: auto;
 }
-#input-area input:focus { border-color: #d4aa70; }
-#input-area input:disabled { opacity: 0.4; }
+#input-area textarea:focus { border-color: #d4aa70; }
+#input-area textarea:disabled { opacity: 0.4; }
 #input-area button {
+  flex-shrink: 0;
   background: #1a1a2e;
   color: #d4aa70;
   border: 1px solid #2a2a3a;
-  padding: 5px 14px;
+  padding: 7px 16px;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   cursor: pointer;
   font-weight: bold;
+  height: 48px;
 }
 #input-area button:hover { background: #22223a; }
 #input-area button:disabled { opacity: 0.3; cursor: default; }
@@ -285,24 +295,27 @@ a:hover { text-decoration: underline; }
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  grid-column: 3;
+  grid-row: 2;
+  min-height: 0;
 }
 #right-panel .section-title {
   padding: 8px 10px 4px;
-  font-size: 10px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: #505048;
+  color: #686868;
   border-bottom: 1px solid #1a1a22;
 }
 #members {
-  max-height: 35%;
+  max-height: 50%;
   overflow-y: auto;
   border-bottom: 1px solid #2a2a3a;
   padding: 4px 0;
 }
 #members .member {
-  padding: 2px 10px;
-  font-size: 12px;
+  padding: 3px 10px;
+  font-size: 13px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -318,7 +331,7 @@ a:hover { text-decoration: underline; }
 }
 #members .member .name { color: #8a8a7a; }
 #members .member .role {
-  font-size: 10px;
+  font-size: 11px;
   color: #d4aa70;
   margin-left: auto;
 }
@@ -329,27 +342,20 @@ a:hover { text-decoration: underline; }
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
-  font-size: 11px;
+  font-size: 12px;
 }
 #event-log .log-entry {
-  padding: 1px 10px;
-  line-height: 1.4;
+  padding: 2px 10px;
+  line-height: 1.5;
   border-bottom: 1px solid #131318;
 }
-#event-log .log-entry .log-ts { color: #353530; margin-right: 4px; }
+#event-log .log-entry .log-ts { color: #484840; margin-right: 6px; }
 #event-log .log-entry.relay { color: #5a8a5a; }
 #event-log .log-entry.publish { color: #6a9fd8; }
 #event-log .log-entry.sync { color: #8a7aaa; }
 #event-log .log-entry.error { color: #c85a5a; }
 #event-log .log-entry.local { color: #707060; }
-#event-log .log-entry.browser { color: #5080a0; }
-#event-log .clear-log {
-  padding: 4px 10px;
-  cursor: pointer;
-  color: #404038;
-  font-size: 10px;
-}
-#event-log .clear-log:hover { color: #707060; }
+#event-log .log-entry.browser { color: #5a90b0; }
 
 /* === Modals === */
 .modal-overlay {
@@ -379,7 +385,7 @@ a:hover { text-decoration: underline; }
 .modal label {
   display: block;
   font-size: 11px;
-  color: #707060;
+  color: #808070;
   margin-bottom: 3px;
   margin-top: 8px;
 }
@@ -429,15 +435,15 @@ a:hover { text-decoration: underline; }
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #404038;
+  color: #505048;
   gap: 12px;
 }
 #welcome .title {
-  font-size: 24px;
+  font-size: 28px;
   color: #d4aa70;
   letter-spacing: 3px;
 }
-#welcome .subtitle { font-size: 12px; }
+#welcome .subtitle { font-size: 13px; }
 </style>
 </head>
 <body>
@@ -448,7 +454,7 @@ a:hover { text-decoration: underline; }
     <div class="status">
       <span class="dot off" id="ws-dot"></span>
       <span id="ws-status">disconnected</span>
-      <label style="margin-left:12px;font-size:11px"><input type="checkbox" id="auto-subscribe" checked> auto-subscribe</label>
+      <label style="margin-left:12px;font-size:12px"><input type="checkbox" id="auto-subscribe" checked> auto-subscribe</label>
     </div>
   </div>
 
@@ -456,7 +462,7 @@ a:hover { text-decoration: underline; }
     <div id="profile-section">
       <div class="profile-label">You</div>
       <div id="identity-display" title="Click to copy public key">
-        <svg id="self-icon" data-jdenticon-value="" width="16" height="16" style="vertical-align:middle;margin-right:4px"></svg>
+        <svg id="self-icon" data-jdenticon-value="" width="20" height="20" style="vertical-align:middle;margin-right:4px"></svg>
         <span class="pubkey" id="pubkey-display">no identity</span>
       </div>
     </div>
@@ -487,8 +493,8 @@ a:hover { text-decoration: underline; }
       </div>
     </div>
     <div id="input-area">
-      <input type="text" id="msg-input" placeholder="Type a message..." disabled
-             onkeydown="if(event.key==='Enter')sendMessage()">
+      <textarea id="msg-input" placeholder="Type a message..." disabled
+               onkeydown="handleInputKey(event)" oninput="autoResizeInput()"></textarea>
       <button id="send-btn" onclick="sendMessage()" disabled>Send</button>
     </div>
   </div>
@@ -496,9 +502,11 @@ a:hover { text-decoration: underline; }
   <div id="right-panel">
     <div class="section-title">Members</div>
     <div id="members"><div style="padding:8px;color:#404038;font-size:12px">No group selected</div></div>
-    <div class="section-title">Event Log</div>
+    <div class="section-title">
+      Event Log
+      <button onclick="clearLog()" style="float:right;background:none;border:none;color:#606060;font-size:12px;cursor:pointer;padding:0">clear</button>
+    </div>
     <div id="event-log">
-      <div class="clear-log" onclick="clearLog()">clear log</div>
     </div>
   </div>
 </div>
@@ -677,7 +685,7 @@ function clearLog() {
 
 function renderLog() {
   const el = document.getElementById('event-log');
-  let html = '<div class="clear-log" onclick="clearLog()">clear log</div>';
+  let html = '';
   for (const entry of eventLog) {
     html += `<div class="log-entry ${entry.kind}"><span class="log-ts">${entry.ts}</span>${entry.message}</div>`;
   }
@@ -1009,12 +1017,26 @@ async function selectGroup(pubkey) {
   }
 }
 
+function handleInputKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function autoResizeInput() {
+  const input = document.getElementById('msg-input');
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.5) + 'px';
+}
+
 async function sendMessage() {
   if (!keys || !currentGroup) return;
   const input = document.getElementById('msg-input');
   const content = input.value.trim();
   if (!content) return;
   input.value = '';
+  input.style.height = 'auto';
 
   const tips = getTips(events);
 
@@ -1309,6 +1331,8 @@ async function saveGroupRelays() {
 
 // Expose globals
 window.selectGroup = selectGroup;
+window.handleInputKey = handleInputKey;
+window.autoResizeInput = autoResizeInput;
 window.sendMessage = sendMessage;
 window.createGroup = createGroup;
 window.joinGroup = joinGroup;
