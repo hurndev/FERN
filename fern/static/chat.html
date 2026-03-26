@@ -656,6 +656,7 @@ let events = [];
 let eventLog = [];
 let pendingSyncs = new Set();
 let connectedRelays = new Set();
+let pendingMessages = new Map(); // eventId -> { event, status: 'pending'|'failed' }
 
 const USER_COLORS = [
   '#c8a060', '#60a0c8', '#a0c860', '#c860a0', '#60c8a0',
@@ -722,8 +723,25 @@ function connectWS() {
       addLog(msg.kind, msg.message);
     } else if (msg.type === 'error') {
       addLog('error', msg.message);
+      // Check if this is a publish error for a pending message
+      const eventId = msg.event_id || msg.id;
+      if (eventId && pendingMessages.has(eventId)) {
+        const pending = pendingMessages.get(eventId);
+        pending.status = 'failed';
+        pendingMessages.set(eventId, pending);
+        savePendingToStorage();
+        renderMessages();
+      }
     } else if (msg.type === 'ok') {
-      // published successfully
+      // published successfully - check if it's a pending message
+      if (msg.id && pendingMessages.has(msg.id)) {
+        pendingMessages.delete(msg.id);
+        savePendingToStorage();
+        // Reload events from server to get the confirmed message
+        if (currentGroup) {
+          wsSend({ action: 'load_local', group: currentGroup });
+        }
+      }
     } else if (msg.type === 'sync_complete') {
       handleSyncComplete(msg.relay);
     }
@@ -802,26 +820,46 @@ function renderGroups() {
 function renderMessages() {
   const el = document.getElementById('messages');
 
-  if (!events.length) {
+  const allEvents = [...events];
+  
+  // Add pending messages to display
+  for (const [eid, pending] of pendingMessages) {
+    // Don't add if already in events
+    if (!allEvents.find(e => e.id === eid)) {
+      allEvents.push(pending.event);
+    }
+  }
+  
+  // Sort all events
+  allEvents.sort((a, b) => a.ts - b.ts || a.id.localeCompare(b.id));
+
+  if (!allEvents.length) {
     el.innerHTML = '<div class="empty">No messages yet</div>';
     return;
   }
 
   let html = '';
-  for (const event of events) {
+  for (const event of allEvents) {
     const ts = new Date(event.ts * 1000).toLocaleTimeString('en-GB', { hour12: false });
     const author = event.author.slice(0, 12);
     const color = userColor(event.author);
+    const pending = pendingMessages.get(event.id);
+    const isPending = !!pending;
+    const isFailed = pending && pending.status === 'failed';
 
-    if (event.type === 'message') {
-      html += `<div class="msg">
-        <div>
-          <span class="ts">${ts}</span>
-          ${identicon(event.author, 14)}
-          <span class="author" style="color:${color}">${escHtml(author)}</span>
-          <span class="content">${escHtml(event.content)}</span>
-        </div>
-      </div>`;
+        if (event.type === 'message') {
+            const retryBtn = isFailed ? `<button onclick="retryMessage('${event.id}')" style="margin-left:8px;background:#1a1a2e;color:#d4aa70;border:1px solid #d4aa70;padding:2px 8px;font-size:11px;cursor:pointer">Retry</button>` : '';
+            const deleteBtn = isFailed ? `<button onclick="deleteMessage('${event.id}')" style="margin-left:4px;background:#1a1a2e;color:#c85a5a;border:1px solid #c85a5a;padding:2px 8px;font-size:11px;cursor:pointer">Delete</button>` : '';
+            const statusIcon = isFailed ? ' ❌' : (isPending ? ' ⏳' : '');
+            html += `<div class="msg" style="${isFailed ? 'opacity:0.6' : ''}">
+                <div>
+                    <span class="ts">${ts}</span>
+                    ${identicon(event.author, 14)}
+                    <span class="author" style="color:${color}">${escHtml(author)}</span>
+                    <span class="content">${escHtml(event.content)}${statusIcon}</span>
+                    ${retryBtn}${deleteBtn}
+                </div>
+            </div>`;
     } else {
       const desc = describeEvent(event);
       html += `<div class="msg system">
@@ -1044,9 +1082,13 @@ async function sendMessage() {
   const event = await buildEvent('message', currentGroup, keys.pub, keys.priv, tips, content);
 
   addLog('browser', `Event created: ${event.id.slice(0, 12)}...`);
+  
+  // Add to pending messages - don't show as confirmed until relay accepts
+  pendingMessages.set(event.id, { event, status: 'pending' });
+  savePendingToStorage();
+  renderMessages();
+  
   wsSend({ action: 'publish', event });
-
-  handleIncomingEvent(event, 'local');
 }
 
 async function createGroup() {
@@ -1074,6 +1116,55 @@ async function createGroup() {
 
   addLog('browser', `Genesis event: ${genesis.id.slice(0, 12)}...`);
 
+  // Connect to relays first
+  for (const r of relays) {
+    wsSend({ action: 'connect_relay', relay: r, group: groupKeys.pub, subscribe: false });
+  }
+
+  // Wait for connections to establish
+  await new Promise(resolve => setTimeout(resolve, 600));
+
+  // Publish genesis and wait for confirmation from at least one relay
+  addLog('browser', `Publishing genesis to ${relays.length} relay(s)...`);
+
+  let published = false;
+  const originalOnMessage = ws.onmessage;
+
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      if (!published) {
+        addLog('error', 'No relay accepted genesis - group creation failed');
+        ws.onmessage = originalOnMessage;
+        reject(new Error('timeout'));
+      }
+    }, 10000);
+
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === 'ok' && msg.id === genesis.id) {
+        clearTimeout(timeout);
+        ws.onmessage = originalOnMessage;
+        published = true;
+        addLog('relay', `Genesis accepted by relay`);
+        resolve();
+      } else if (msg.type === 'error' && msg.id === genesis.id) {
+        // This specific genesis was rejected - wait for other relays
+        addLog('error', `Relay rejected genesis: ${msg.message}`);
+      }
+      // Pass through to original handler for other messages
+      originalOnMessage(e);
+    };
+
+    // Send publish to all relays
+    for (const r of relays) {
+      wsSend({ action: 'publish', event: genesis, relay: r });
+    }
+  });
+
+  // Only create group locally if at least one relay accepted
+  addLog('browser', `Genesis confirmed - saving group locally...`);
+
   const res = await fetch('/api/groups', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1081,24 +1172,12 @@ async function createGroup() {
   });
 
   if (res.ok) {
-    addLog('local', `Group created locally`);
+    addLog('local', `Group created!`);
     await refreshGroups();
-
-    // Publish genesis to relays first
-    for (const r of relays) {
-      wsSend({ action: 'connect_relay', relay: r, group: groupKeys.pub, subscribe: false });
-    }
-    setTimeout(() => {
-      for (const r of relays) {
-        wsSend({ action: 'publish', event: genesis, relay: r });
-      }
-    }, 500);
-
-    // Then select the group - this will sync and subscribe
     selectGroup(groupKeys.pub);
   } else {
     const err = await res.json();
-    addLog('error', `Failed to create group: ${err.error}`);
+    addLog('error', `Failed to save group locally: ${err.error}`);
   }
 }
 
@@ -1203,6 +1282,81 @@ async function refreshGroups() {
   const res = await fetch('/api/groups');
   groups = await res.json();
   renderGroups();
+}
+
+function savePendingToStorage() {
+  const pending = [];
+  for (const [id, data] of pendingMessages) {
+    pending.push({
+      id: data.event.id,
+      type: data.event.type,
+      group: data.event.group,
+      author: data.event.author,
+      parents: data.event.parents,
+      content: data.event.content,
+      ts: data.event.ts,
+      sig: data.event.sig,
+      status: data.status
+    });
+  }
+  localStorage.setItem('fern_pending', JSON.stringify(pending));
+}
+
+function loadPendingFromStorage() {
+  pendingMessages.clear();
+  try {
+    const stored = localStorage.getItem('fern_pending');
+    if (stored) {
+      const pending = JSON.parse(stored);
+      for (const e of pending) {
+        pendingMessages.set(e.id, { 
+          event: {
+            id: e.id,
+            type: e.type,
+            group: e.group,
+            author: e.author,
+            parents: e.parents || [],
+            content: e.content,
+            ts: e.ts,
+            sig: e.sig
+          },
+          status: e.status || 'failed'
+        });
+      }
+      if (pendingMessages.size > 0) {
+        addLog('browser', `Loaded ${pendingMessages.size} pending message(s) from browser storage`);
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load pending messages:', e);
+  }
+  renderMessages();
+}
+
+async function retryMessage(eventId) {
+  const pending = pendingMessages.get(eventId);
+  if (!pending) return;
+
+  // Recalculate tips and parents
+  const tips = getTips(events);
+
+  // Re-sign the event with current tips
+  addLog('browser', `Retrying message...`);
+  const event = await buildEvent('message', currentGroup, keys.pub, keys.priv, tips, pending.event.content);
+
+  // Remove old pending entry and add new one
+  pendingMessages.delete(eventId);
+  pendingMessages.set(event.id, { event, status: 'pending' });
+  savePendingToStorage();
+
+    renderMessages();
+    wsSend({ action: 'publish', event });
+}
+
+function deleteMessage(eventId) {
+    pendingMessages.delete(eventId);
+    savePendingToStorage();
+    renderMessages();
 }
 
 function showCreateGroup() {
@@ -1345,6 +1499,8 @@ window.saveGroupMetadata = saveGroupMetadata;
 window.saveGroupRelays = saveGroupRelays;
 window.closeModals = closeModals;
 window.clearLog = clearLog;
+window.retryMessage = retryMessage;
+window.deleteMessage = deleteMessage;
 
 // =========================================================================
 // Boot
@@ -1352,6 +1508,7 @@ window.clearLog = clearLog;
 
 await initIdentity();
 await refreshGroups();
+loadPendingFromStorage();
 connectWS();
 addLog('browser', 'FERN Chat ready');
 
