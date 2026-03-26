@@ -1128,39 +1128,51 @@ async function createGroup() {
   addLog('browser', `Publishing genesis to ${relays.length} relay(s)...`);
 
   let published = false;
+  let relayErrors = 0;
+  const connectedRelaysCount = 1; // We connected to one relay successfully
   const originalOnMessage = ws.onmessage;
 
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      if (!published) {
-        addLog('error', 'No relay accepted genesis - group creation failed');
-        ws.onmessage = originalOnMessage;
-        reject(new Error('timeout'));
-      }
-    }, 10000);
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!published) {
+          addLog('error', 'No relay accepted genesis within 10s - group creation failed');
+          ws.onmessage = originalOnMessage;
+          reject(new Error('timeout'));
+        }
+      }, 10000);
 
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
 
-      if (msg.type === 'ok' && msg.id === genesis.id) {
-        clearTimeout(timeout);
-        ws.onmessage = originalOnMessage;
-        published = true;
-        addLog('relay', `Genesis accepted by relay`);
-        resolve();
-      } else if (msg.type === 'error' && msg.id === genesis.id) {
-        // This specific genesis was rejected - wait for other relays
-        addLog('error', `Relay rejected genesis: ${msg.message}`);
-      }
-      // Pass through to original handler for other messages
-      originalOnMessage(e);
-    };
+        if (msg.type === 'ok' && msg.id === genesis.id) {
+          clearTimeout(timeout);
+          ws.onmessage = originalOnMessage;
+          published = true;
+          addLog('relay', `Genesis accepted by relay`);
+          resolve();
+        } else if (msg.type === 'error' && msg.event_id === genesis.id) {
+          // Error from a specific relay - count it
+          relayErrors++;
+          addLog('error', `Relay error: ${msg.message}`);
+          // If we've heard back from all relays and none accepted, fail
+          if (relayErrors >= relays.length) {
+            clearTimeout(timeout);
+            ws.onmessage = originalOnMessage;
+            reject(new Error('all_relays_failed'));
+          }
+        }
+        // Pass through to original handler for other messages
+        originalOnMessage(e);
+      };
 
-    // Send publish to all relays
-    for (const r of relays) {
-      wsSend({ action: 'publish', event: genesis, relay: r });
-    }
-  });
+      // Send ONE publish without specifying relay - backend broadcasts to all connected
+      wsSend({ action: 'publish', event: genesis });
+    });
+  } catch (e) {
+    addLog('error', 'Group creation failed - no relay accepted the genesis event');
+    return;
+  }
 
   // Only create group locally if at least one relay accepted
   addLog('browser', `Genesis confirmed - saving group locally...`);
