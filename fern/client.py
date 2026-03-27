@@ -77,21 +77,16 @@ async def fetch_genesis(relay_url: str, group_pubkey: str) -> dict | None:
                 await ws.send(
                     json.dumps(
                         {
-                            "action": "sync",
+                            "action": "get_genesis",
                             "group": group_pubkey,
-                            "since": 0,
                         }
                     )
                 )
-                async for raw in ws:
-                    msg = json.loads(raw)
-                    if (
-                        msg["type"] == "event"
-                        and msg["event"]["type"] == "group_genesis"
-                    ):
-                        return msg["event"]
-                    elif msg["type"] == "sync_complete":
-                        break
+                msg = json.loads(await ws.recv())
+                if msg["type"] == "event":
+                    return msg["event"]
+                elif msg["type"] == "not_found":
+                    return None
     except asyncio.TimeoutError:
         click.echo(f"    {relay_url}: timeout fetching genesis", err=True)
     except Exception:
