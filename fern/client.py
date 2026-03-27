@@ -580,23 +580,27 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     return summary
 
 
-async def subscribe_group(dag: EventDAG, relay_url: str, callback=None) -> None:
-    """Subscribe to a group on a relay and process incoming events."""
-    try:
-        async with websockets.connect(relay_url) as ws:
-            await ws.send(
-                json.dumps({"action": "subscribe", "group": dag.group_pubkey})
-            )
-            async for raw in ws:
-                msg = json.loads(raw)
-                if msg["type"] == "event":
-                    ok, reason = dag.add_event(msg["event"])
-                    if callback:
-                        callback(msg["event"], ok, reason)
-    except websockets.ConnectionClosed:
-        click.echo("Connection closed.", err=True)
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+async def subscribe_group(dag: EventDAG, relay_urls: list[str], callback=None) -> None:
+    """Subscribe to a group on all relays simultaneously and process incoming events."""
+
+    async def sub_one(relay_url: str) -> None:
+        try:
+            async with websockets.connect(relay_url) as ws:
+                await ws.send(
+                    json.dumps({"action": "subscribe", "group": dag.group_pubkey})
+                )
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    if msg["type"] == "event":
+                        ok, reason = dag.add_event(msg["event"])
+                        if callback:
+                            callback(msg["event"], ok, reason)
+        except websockets.ConnectionClosed:
+            click.echo(f"  {relay_url}: connection closed.", err=True)
+        except Exception as e:
+            click.echo(f"  {relay_url}: {e}", err=True)
+
+    await asyncio.gather(*[sub_one(url) for url in relay_urls])
 
 
 def format_event(event: dict) -> str:
@@ -928,9 +932,9 @@ def subscribe(group_pubkey: str, relay: str | None):
     summary = asyncio.run(sync_and_heal(dag, relays))
     print_heal_summary(summary)
 
-    # Subscribe on the first canonical relay (or specified one)
-    sub_url = relay or relays[0]
-    click.echo(f"Subscribing to {group_pubkey[:12]}... on {sub_url}")
+    # Subscribe on all canonical relays simultaneously
+    sub_relays = [relay] if relay else relays
+    click.echo(f"Subscribing to {group_pubkey[:12]}... on {len(sub_relays)} relay(s)")
     click.echo("Press Ctrl+C to stop.\n")
 
     def on_event(event, ok, reason):
@@ -943,7 +947,7 @@ def subscribe(group_pubkey: str, relay: str | None):
             click.echo(f"[INVALID EVENT: {reason}] {eid}...")
 
     try:
-        asyncio.run(subscribe_group(dag, sub_url, callback=on_event))
+        asyncio.run(subscribe_group(dag, sub_relays, callback=on_event))
     except KeyboardInterrupt:
         click.echo("\nUnsubscribed.")
 
