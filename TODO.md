@@ -1,12 +1,14 @@
 - Don't sync when full history is already stored. Check the number of events on servers and compare latest event hash.
 - When partial history is left on old relay hint, try to continue syncing with newer group relays
 - Relay GC: when a group's DAG grows by N events and an event still has no children, delete it. This removes "zombie" events (e.g. unauthorised kicks) that no honest client ever referenced. Threshold N should be configurable (default 100). Clients must NOT GC from local cache.
+- Force clients to reference valid events that have not been referenced yet to prevent GC on events that are not invalid
 - Optimise initial sync: when client already has partial history, avoid fetching genesis separately then all events - fetch all events once and validate genesis from the first event received. Avoid sync completely if DAG is up-to-date.
 - Graceful handling of closing WS connection
 - sync_and_heal can lose local-only events during group migration: if user creates events offline (never published) then group migrates, the local events in dag.events are cleared at line 328 but not preserved before the clear. Need to preserve all_validated before clearing, or merge local events after migration.
 - Distinguish between adding and joining a group in the chat UI
 - Fix 'thundering herd' problem where many clients try to heal a relay at once
-- Fix fern-test simultaneous send
 - Healing relays from local events - even if all relays loose event history, a client should automatically heal the relays from their local event storage
-- Fix validation of metadata event
+- Basic validation of timestamps, and more robust timestamp-based verification of mod-only events
 - Display members of group on DAG visualiser
+- Resolve message ordering issues in chat UI
+- Fix partial sync not working as intended in chat UI
