@@ -215,6 +215,18 @@ class RelayServer:
         print(f"    not found")
         await ws.send(json.dumps({"type": "not_found", "id": event_id}))
 
+    async def handle_get_genesis(self, ws, group: str) -> None:
+        """Handle request for the genesis event of a group."""
+        print(f"    get_genesis: group={group[:16]}...")
+        if group in self.groups:
+            for event in self.groups[group].values():
+                if event["type"] == "group_genesis":
+                    print(f"    found genesis")
+                    await ws.send(json.dumps({"type": "event", "event": event}))
+                    return
+        print(f"    not found")
+        await ws.send(json.dumps({"type": "not_found", "id": "genesis"}))
+
     async def handle_sync(self, ws, group: str, since: int) -> None:
         """Handle sync request - send all events since a timestamp."""
         print(f"    sync: group={group[:16]}... since={since}")
@@ -289,6 +301,8 @@ class RelayServer:
                         await self.handle_sync(ws, msg["group"], msg.get("since", 0))
                     elif action == "summary":
                         await self.handle_summary(ws, msg["group"])
+                    elif action == "get_genesis":
+                        await self.handle_get_genesis(ws, msg["group"])
                     else:
                         await ws.send(
                             json.dumps(
