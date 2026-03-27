@@ -801,6 +801,8 @@ def send(
     message: str,
 ):
     """Send a message to a group. Use --relay to add an extra relay, --force-relay to use only that relay."""
+    if "@" in group_pubkey:
+        group_pubkey = group_pubkey.split("@", 1)[0]
     storage = get_storage()
 
     # Load user key
