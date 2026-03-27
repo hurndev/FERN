@@ -432,16 +432,16 @@ class ChatSession:
                 await conn.sync(decision.since)
 
     async def _on_relay_event(self, event: dict, relay_url: str):
-        # Store locally
         if self.group_pubkey:
             dag = self.storage.get_group_dag(self.group_pubkey)
             ok, reason = dag.add_event(event)
-            if not ok and reason != "duplicate":
-                eid = event.get("id", "?")[:16]
-                await self.log(
-                    "error", f"Invalid event from {relay_url}: {reason} ({eid}...)"
-                )
-        # Forward to browser
+            if not ok:
+                if reason != "duplicate":
+                    eid = event.get("id", "?")[:16]
+                    await self.log(
+                        "error", f"Invalid event from {relay_url}: {reason} ({eid}...)"
+                    )
+                return
         await self.send(
             {
                 "type": "event",

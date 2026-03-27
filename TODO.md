@@ -11,4 +11,4 @@
 - Basic validation of timestamps, and more robust timestamp-based verification of mod-only events
 - Display members of group on DAG visualiser
 - Resolve message ordering issues in chat UI
-- Fix partial sync not working as intended in chat UI
+- Only check tips in summary
