@@ -579,21 +579,25 @@ async def subscribe_group(dag: EventDAG, relay_urls: list[str], callback=None) -
     """Subscribe to a group on all relays simultaneously and process incoming events."""
 
     async def sub_one(relay_url: str) -> None:
-        try:
-            async with websockets.connect(relay_url) as ws:
-                await ws.send(
-                    json.dumps({"action": "subscribe", "group": dag.group_pubkey})
-                )
-                async for raw in ws:
-                    msg = json.loads(raw)
-                    if msg["type"] == "event":
-                        ok, reason = dag.add_event(msg["event"])
-                        if callback:
-                            callback(msg["event"], ok, reason)
-        except websockets.ConnectionClosed:
-            click.echo(f"  {relay_url}: connection closed.", err=True)
-        except Exception as e:
-            click.echo(f"  {relay_url}: {e}", err=True)
+        while True:
+            try:
+                async with websockets.connect(relay_url) as ws:
+                    click.echo(f"  {relay_url}: connected")
+                    await ws.send(
+                        json.dumps({"action": "subscribe", "group": dag.group_pubkey})
+                    )
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        if msg["type"] == "event":
+                            ok, reason = dag.add_event(msg["event"])
+                            if callback:
+                                callback(msg["event"], ok, reason)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                click.echo(f"  {relay_url}: error: {e}", err=True)
+                click.echo(f"  {relay_url}: retrying in 60s...")
+            await asyncio.sleep(60)
 
     await asyncio.gather(*[sub_one(url) for url in relay_urls])
 

@@ -33,19 +33,29 @@ class RelayConnection:
     async def connect(self, on_event, on_log):
         self._on_event = on_event
         self._on_log = on_log
-        try:
-            import websockets
+        self._retry_task = asyncio.create_task(self._connect_with_retry())
 
-            self.ws = await websockets.connect(self.relay_url)
-            self.connected = True
-            await on_log("relay", f"Connected to {self.relay_url}")
-            if self.subscribe:
-                await self._send_subscribe()
-            self._read_task = asyncio.create_task(self._read_loop())
-        except Exception as e:
-            await on_log("error", f"Failed to connect to {self.relay_url}: {e}")
-            if self._on_sync_complete:
-                await self._on_sync_complete(self.relay_url)
+    async def _connect_with_retry(self):
+        """Connect with automatic retry every 60 seconds if relay is down."""
+        import websockets
+
+        while True:
+            try:
+                self.ws = await websockets.connect(self.relay_url)
+                self.connected = True
+                await self._on_log("relay", f"Connected to {self.relay_url}")
+                if self.subscribe:
+                    await self._send_subscribe()
+                self._read_task = asyncio.create_task(self._read_loop())
+                self._retry_task = None
+                return
+            except Exception as e:
+                await self._on_log(
+                    "error", f"Failed to connect to {self.relay_url}: {e}"
+                )
+                if self._on_sync_complete:
+                    await self._on_sync_complete(self.relay_url)
+            await asyncio.sleep(60)
 
     async def _send_subscribe(self):
         """Send subscribe action to relay."""
@@ -91,10 +101,16 @@ class RelayConnection:
             if self.connected:
                 await self._on_log("error", f"Disconnected from {self.relay_url}: {e}")
         finally:
+            was_connected = self.connected
             self.connected = False
             for fut in self._pending_responses.values():
                 fut.cancel()
             self._pending_responses.clear()
+            if was_connected and self._retry_task is None:
+                await self._on_log(
+                    "relay", f"Reconnecting to {self.relay_url} in 60s..."
+                )
+                self._retry_task = asyncio.create_task(self._connect_with_retry())
 
     def set_on_sync_complete(self, callback):
         """Set callback for sync_complete message."""
@@ -157,10 +173,15 @@ class RelayConnection:
 
     async def close(self):
         self.connected = False
+        if self._retry_task:
+            self._retry_task.cancel()
+            self._retry_task = None
         if self._read_task:
             self._read_task.cancel()
+            self._read_task = None
         if self.ws:
             await self.ws.close()
+            self.ws = None
 
 
 class ChatSession:
