@@ -316,6 +316,8 @@ def create_group_metadata(
     parents: list[str] | None = None,
 ) -> dict:
     """Create a group_metadata event."""
+    if parents is None:
+        raise ValueError("parents is required for group_metadata events")
     content = {}
     if name is not None:
         content["name"] = name
@@ -325,7 +327,7 @@ def create_group_metadata(
         "group_metadata",
         group_hex,
         author_hex,
-        parents=parents or [],
+        parents=parents,
         content=content,
         signer_private_key=author_privkey,
     )
@@ -406,7 +408,6 @@ class GroupState:
                 if len(self.mods) <= 1:
                     return  # cannot remove the last mod
                 self.mods.discard(target)
-                self.mods.discard(content["target"])
         elif etype == "relay_update":
             # Mods can update relay list
             if isinstance(content, dict) and author in self.mods:
