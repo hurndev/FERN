@@ -1495,10 +1495,12 @@ async function saveGroupRelays() {
     }
   }
 
-  // Publish to all relays once (deduplicated)
+  // Publish to all relays once (deduplicated), but only to relays we're actually connected to
   const allRelays = [...new Set([...oldRelays, ...newRelays])];
   for (const r of allRelays) {
-    wsSend({ action: 'publish', event, relay: r });
+    if (connectedRelays.has(r)) {
+      wsSend({ action: 'publish', event, relay: r });
+    }
   }
 
   handleIncomingEvent(event, 'local');
