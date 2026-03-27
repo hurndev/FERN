@@ -44,7 +44,9 @@ class EventDAG:
                     self.children[parent_id] = set()
                 self.children[parent_id].add(eid)
 
-    def add_event(self, event: dict, skip_verify: bool = False) -> tuple[bool, str]:
+    def add_event(
+        self, event: dict, skip_verify: bool = False, skip_save: bool = False
+    ) -> tuple[bool, str]:
         """Add an event to the DAG. Returns (success, reason)."""
         if event["id"] in self.events:
             return False, "duplicate"
@@ -65,7 +67,8 @@ class EventDAG:
                 self.children[parent_id] = set()
             self.children[parent_id].add(event["id"])
 
-        self._save()
+        if not skip_save:
+            self._save()
         return True, "ok"
 
     def get_event(self, event_id: str) -> dict | None:

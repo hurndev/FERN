@@ -447,7 +447,7 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
         # Store events in DAG temporarily to derive group state
         # (We'll re-store them properly after healing)
         for event in all_validated.values():
-            dag.add_event(event, skip_verify=True)
+            dag.add_event(event, skip_verify=True, skip_save=True)
 
         # Derive canonical relays from group state
         state = dag.get_state()
@@ -557,9 +557,11 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
 
     stored = 0
     for event in sorted(all_validated.values(), key=lambda e: (e["ts"], e["id"])):
-        ok, _ = dag.add_event(event, skip_verify=True)
+        ok, _ = dag.add_event(event, skip_verify=True, skip_save=True)
         if ok:
             stored += 1
+
+    dag._save()
 
     click.echo(f"\n  Stored {stored} events locally")
 
