@@ -14,28 +14,30 @@ CLOCK_SKEW_BUFFER = 60
 class SyncDecision:
     action: str  # "skip", "full", "incremental"
     since: int = 0
-    relay_count: int = 0
     relays_agree: bool = True
 
 
 def decide_sync_action(
-    local_count: int,
-    local_tips: set[str],
+    local_event_ids: set[str],
     local_latest_ts: int,
     relay_summaries: dict[str, dict],
 ) -> SyncDecision:
-    """Decide sync strategy based on local state and relay summaries.
+    """Decide sync strategy based on local DAG state and relay summaries.
+
+    Compares relay tips (DAG frontier) against local events. Count is not used
+    because relays store events that clients may reject (e.g. unauthorized
+    events). If the client already knows all relay tips, there is nothing new
+    to fetch.
 
     Args:
-        local_count: Number of events in the local DAG.
-        local_tips: Set of tip event IDs in the local DAG.
+        local_event_ids: Set of all event IDs in the local DAG.
         local_latest_ts: Timestamp of the latest event in the local DAG.
         relay_summaries: Mapping of relay URL -> {"count": int, "tips": [str, ...]}.
 
     Returns:
         SyncDecision indicating what action to take.
     """
-    if local_count == 0:
+    if not local_event_ids:
         return SyncDecision(action="full", since=0)
 
     if not relay_summaries:
@@ -44,43 +46,23 @@ def decide_sync_action(
             since=max(0, local_latest_ts - CLOCK_SKEW_BUFFER),
         )
 
-    first_count = None
-    first_tips = None
+    all_relay_tips: set[str] = set()
+    first_tips: set[str] | None = None
     relays_agree = True
 
     for s in relay_summaries.values():
-        count = s.get("count", 0)
         tips = set(s.get("tips", []))
-        if first_count is None:
-            first_count = count
+        all_relay_tips.update(tips)
+        if first_tips is None:
             first_tips = tips
-        elif count != first_count or tips != first_tips:
+        elif tips != first_tips:
             relays_agree = False
-            break
 
-    if not relays_agree:
-        return SyncDecision(
-            action="incremental",
-            since=max(0, local_latest_ts - CLOCK_SKEW_BUFFER),
-            relay_count=first_count or 0,
-            relays_agree=False,
-        )
-
-    if first_count is not None:
-        if first_count == local_count and first_tips == local_tips:
-            return SyncDecision(
-                action="skip",
-                relay_count=first_count,
-            )
-
-        if first_count <= local_count:
-            return SyncDecision(
-                action="skip",
-                relay_count=first_count,
-            )
+    if all_relay_tips.issubset(local_event_ids):
+        return SyncDecision(action="skip", relays_agree=relays_agree)
 
     return SyncDecision(
         action="incremental",
         since=max(0, local_latest_ts - CLOCK_SKEW_BUFFER),
-        relay_count=first_count or 0,
+        relays_agree=relays_agree,
     )

@@ -295,14 +295,13 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     # =========================================================================
 
     local_latest_ts = 0
-    local_tips: set[str] = set()
     local_count = dag.count
 
     if local_count > 0:
         all_events = dag.get_all_events()
         if all_events:
             local_latest_ts = all_events[-1]["ts"]
-        local_tips = set(dag.get_tips())
+        local_event_ids = set(dag.events.keys())
 
         click.echo(f"  Local state: {local_count} events, latest ts={local_latest_ts}")
         click.echo(f"  Fetching relay summaries to check if sync is needed...")
@@ -319,14 +318,14 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
 
         if relay_summaries:
             decision = decide_sync_action(
-                local_count, local_tips, local_latest_ts, relay_summaries
+                local_event_ids, local_latest_ts, relay_summaries
             )
 
             if decision.action == "skip":
                 summary["skipped"] = True
                 click.echo(
-                    f"  [SKIP] Local state matches relay summaries "
-                    f"({local_count} events, {len(local_tips)} tips)"
+                    f"  [SKIP] All relay tips present in local DAG "
+                    f"({local_count} events)"
                 )
 
                 state = dag.get_state()
@@ -343,16 +342,10 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
 
                 return summary
 
-            if decision.action == "incremental":
-                click.echo(
-                    f"  Relay has {decision.relay_count} events (local has {local_count}) - "
-                    f"need incremental sync"
-                )
-            else:
-                click.echo(
-                    f"  Local has {local_count} events, relays have {decision.relay_count} - "
-                    f"checking if healing needed"
-                )
+            click.echo(
+                f"  Relay has new tips not in local DAG - "
+                f"need {'incremental' if decision.action == 'incremental' else 'full'} sync"
+            )
 
     # =========================================================================
     # PHASE 1: SYNC WITH RELAY DISCOVERY

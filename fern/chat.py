@@ -393,11 +393,8 @@ class ChatSession:
             return
 
         dag = self.storage.get_group_dag(self.group_pubkey)
-        local_count = dag.count
-        local_tips = set(dag.get_tips())
-
-        all_events = dag.get_all_events()
-        local_latest_ts = all_events[-1]["ts"] if all_events else 0
+        local_event_ids = set(dag.events.keys())
+        local_latest_ts = max((e["ts"] for e in dag.events.values()), default=0)
 
         connected = [c for c in self.relay_connections.values() if c.connected]
         if not connected:
@@ -411,9 +408,7 @@ class ChatSession:
             if s is not None:
                 summaries[conn.relay_url] = s
 
-        decision = decide_sync_action(
-            local_count, local_tips, local_latest_ts, summaries
-        )
+        decision = decide_sync_action(local_event_ids, local_latest_ts, summaries)
 
         if decision.action == "full":
             await self.log("sync", "No local events - full sync required")
@@ -422,7 +417,7 @@ class ChatSession:
         elif decision.action == "skip":
             await self.log(
                 "sync",
-                f"Already in sync ({local_count} events, {len(local_tips)} tips) - skipping",
+                f"Already in sync ({len(local_event_ids)} local events) - skipping",
             )
             for url in summaries:
                 await self.send({"type": "sync_complete", "relay": url})
