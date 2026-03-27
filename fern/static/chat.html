@@ -1488,17 +1488,18 @@ async function saveGroupRelays() {
 
   addLog('browser', `Event created: ${event.id.slice(0, 12)}...`);
 
-  for (const r of oldRelays) {
+  // Connect to new relays first
+  for (const r of newRelays) {
+    if (!oldRelays.includes(r)) {
+      wsSend({ action: 'connect_relay', relay: r, group: currentGroup });
+    }
+  }
+
+  // Publish to all relays once (deduplicated)
+  const allRelays = [...new Set([...oldRelays, ...newRelays])];
+  for (const r of allRelays) {
     wsSend({ action: 'publish', event, relay: r });
   }
-  for (const r of newRelays) {
-    wsSend({ action: 'connect_relay', relay: r, group: currentGroup });
-  }
-  setTimeout(() => {
-    for (const r of newRelays) {
-      wsSend({ action: 'publish', event, relay: r });
-    }
-  }, 1000);
 
   handleIncomingEvent(event, 'local');
 }
