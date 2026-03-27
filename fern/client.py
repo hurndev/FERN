@@ -27,6 +27,7 @@ from .events import (
 )
 from .dag import ClientStorage, EventDAG
 from .storage import resolve_fern_dir
+from .sync import decide_sync_action
 
 
 BOOTSTRAP_RELAYS = ["ws://localhost:8787", "ws://localhost:8788"]
@@ -306,7 +307,6 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
         click.echo(f"  Local state: {local_count} events, latest ts={local_latest_ts}")
         click.echo(f"  Fetching relay summaries to check if sync is needed...")
 
-        # Fetch summaries from all hint relays
         summary_tasks = [
             fetch_summary_from_relay(url, dag.group_pubkey) for url in hint_relays
         ]
@@ -318,60 +318,41 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
                 relay_summaries[url] = s
 
         if relay_summaries:
-            # Check if all relays agree and match local state
-            all_match = True
-            first_count = None
-            first_tips = None
+            decision = decide_sync_action(
+                local_count, local_tips, local_latest_ts, relay_summaries
+            )
 
-            for url, s in relay_summaries.items():
-                count = s.get("count", 0)
-                tips = set(s.get("tips", []))
+            if decision.action == "skip":
+                summary["skipped"] = True
+                click.echo(
+                    f"  [SKIP] Local state matches relay summaries "
+                    f"({local_count} events, {len(local_tips)} tips)"
+                )
 
-                if first_count is None:
-                    first_count = count
-                    first_tips = tips
-                elif count != first_count or tips != first_tips:
-                    # Relays disagree with each other - need full sync
-                    all_match = False
-                    break
+                state = dag.get_state()
+                summary["canonical_relays"] = (
+                    state.relays if state.relays else list(hint_relays)
+                )
 
-            if all_match and first_count is not None:
-                if first_count == local_count and first_tips == local_tips:
-                    # Local state matches all relays - we're in sync!
-                    summary["skipped"] = True
-                    click.echo(
-                        f"  [SKIP] Local state matches relay summaries "
-                        f"({local_count} events, {len(local_tips)} tips)"
-                    )
-
-                    # Still need to update canonical relays from group state
-                    state = dag.get_state()
-                    summary["canonical_relays"] = (
-                        state.relays if state.relays else list(hint_relays)
-                    )
-
-                    # Check for gaps
-                    gaps = dag.get_missing_parents()
-                    summary["gaps"] = sorted(gaps)
-                    if gaps:
-                        click.echo(f"  WARNING: {len(gaps)} gap(s) detected")
-                    else:
-                        click.echo("  DAG complete - no gaps")
-
-                    return summary
-                elif first_count <= local_count:
-                    # Relays have same or fewer events than local - our local state
-                    # might be ahead or we have extra events (gap healing needed)
-                    click.echo(
-                        f"  Local has {local_count} events, relays have {first_count} - "
-                        f"checking if healing needed"
-                    )
+                gaps = dag.get_missing_parents()
+                summary["gaps"] = sorted(gaps)
+                if gaps:
+                    click.echo(f"  WARNING: {len(gaps)} gap(s) detected")
                 else:
-                    # Relays have more events - need incremental sync
-                    click.echo(
-                        f"  Relay has {first_count} events (local has {local_count}) - "
-                        f"need incremental sync"
-                    )
+                    click.echo("  DAG complete - no gaps")
+
+                return summary
+
+            if decision.action == "incremental":
+                click.echo(
+                    f"  Relay has {decision.relay_count} events (local has {local_count}) - "
+                    f"need incremental sync"
+                )
+            else:
+                click.echo(
+                    f"  Local has {local_count} events, relays have {decision.relay_count} - "
+                    f"checking if healing needed"
+                )
 
     # =========================================================================
     # PHASE 1: SYNC WITH RELAY DISCOVERY
