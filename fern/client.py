@@ -1260,29 +1260,34 @@ def relay_update(group_pubkey: str, new_relays: tuple[str, ...], relay: str | No
     )
 
     async def seed_relay(url: str) -> dict:
-        """Push all local events to a relay."""
+        """Push all local events to a relay using a single connection."""
         result = {"ok": 0, "error": 0, "dup": 0}
-        for ev in all_local:
-            try:
-                async with websockets.connect(url) as ws:
-                    await ws.send(
-                        json.dumps(
-                            {
-                                "action": "publish",
-                                "event": ev,
-                            }
+        try:
+            async with websockets.connect(url) as ws:
+                for ev in all_local:
+                    try:
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "action": "publish",
+                                    "event": ev,
+                                }
+                            )
                         )
-                    )
-                    resp = json.loads(await ws.recv())
-                    rtype = resp.get("type")
-                    if rtype == "ok":
-                        result["ok"] += 1
-                    elif rtype == "error" and "duplicate" in resp.get("message", ""):
-                        result["dup"] += 1
-                    else:
+                        resp = json.loads(await ws.recv())
+                        rtype = resp.get("type")
+                        if rtype == "ok":
+                            result["ok"] += 1
+                        elif rtype == "error" and "duplicate" in resp.get(
+                            "message", ""
+                        ):
+                            result["dup"] += 1
+                        else:
+                            result["error"] += 1
+                    except Exception:
                         result["error"] += 1
-            except Exception:
-                result["error"] += 1
+        except Exception:
+            result["error"] = len(all_local)
         return result
 
     async def seed_all():

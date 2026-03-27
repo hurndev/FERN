@@ -91,9 +91,9 @@ class EventDAG:
         return sorted(self.events.values(), key=lambda e: (e["ts"], e["id"]))
 
     def get_events_since(self, since_ts: int) -> list[dict]:
-        """Get all events with ts >= since_ts."""
+        """Get all events with ts > since_ts."""
         return sorted(
-            [e for e in self.events.values() if e["ts"] >= since_ts],
+            [e for e in self.events.values() if e["ts"] > since_ts],
             key=lambda e: (e["ts"], e["id"]),
         )
 
