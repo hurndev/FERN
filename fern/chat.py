@@ -43,6 +43,7 @@ class RelayConnection:
             try:
                 self.ws = await websockets.connect(self.relay_url)
                 self.connected = True
+                self._subscribed = False
                 await self._on_log("relay", f"Connected to {self.relay_url}")
                 if self.subscribe:
                     await self._send_subscribe()
@@ -53,8 +54,6 @@ class RelayConnection:
                 await self._on_log(
                     "error", f"Failed to connect to {self.relay_url}: {e}"
                 )
-                if self._on_sync_complete:
-                    await self._on_sync_complete(self.relay_url)
             await asyncio.sleep(60)
 
     async def _send_subscribe(self):
@@ -216,6 +215,8 @@ class ChatSession:
             relay_url = msg["relay"]
             group_pubkey = msg["group"]
             self.group_pubkey = group_pubkey
+            if relay_url in self.relay_connections:
+                await self.relay_connections[relay_url].close()
             conn = RelayConnection(relay_url, group_pubkey, subscribe=False)
             self.relay_connections[relay_url] = conn
 
@@ -290,8 +291,17 @@ class ChatSession:
 
             if published:
                 dag = self.storage.get_group_dag(event["group"])
-                dag.add_event(event)
-                await self.send({"type": "ok", "id": event["id"]})
+                ok, reason = dag.add_event(event)
+                if ok:
+                    await self.send({"type": "ok", "id": event["id"]})
+                else:
+                    await self.send(
+                        {
+                            "type": "error",
+                            "message": f"Failed to store event: {reason}",
+                            "event_id": event["id"],
+                        }
+                    )
             else:
                 await self.send(
                     {
@@ -482,9 +492,13 @@ class ChatApp:
         if not valid:
             return web.json_response({"error": f"Invalid event: {reason}"}, status=400)
 
-        # Store locally
+        # Store locally (may already exist if published via WebSocket)
         dag = self.storage.get_group_dag(event["group"])
-        dag.add_event(event)
+        ok, reason = dag.add_event(event)
+        if not ok and reason != "duplicate":
+            return web.json_response(
+                {"error": f"Failed to store event: {reason}"}, status=400
+            )
 
         return web.json_response({"ok": True, "group": event["group"]})
 

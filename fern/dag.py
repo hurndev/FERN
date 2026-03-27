@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from .events import verify_event, GroupState
+from .events import verify_event, verify_event_authorization, GroupState
 
 
 class EventDAG:
@@ -45,7 +45,11 @@ class EventDAG:
                 self.children[parent_id].add(eid)
 
     def add_event(
-        self, event: dict, skip_verify: bool = False, skip_save: bool = False
+        self,
+        event: dict,
+        skip_verify: bool = False,
+        skip_save: bool = False,
+        skip_auth: bool = False,
     ) -> tuple[bool, str]:
         """Add an event to the DAG. Returns (success, reason)."""
         if event["id"] in self.events:
@@ -58,6 +62,12 @@ class EventDAG:
 
         if event["group"] != self.group_pubkey:
             return False, "group mismatch"
+
+        if not skip_auth:
+            state = self.get_state()
+            authorized, reason = verify_event_authorization(event, state)
+            if not authorized:
+                return False, f"authorization failed: {reason}"
 
         self.events[event["id"]] = event
 
