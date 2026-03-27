@@ -12,6 +12,7 @@ from aiohttp import web, WSMsgType
 from .dag import ClientStorage
 from .events import verify_event
 from .storage import resolve_fern_dir
+from .sync import decide_sync_action
 
 
 class RelayConnection:
@@ -395,19 +396,8 @@ class ChatSession:
         local_count = dag.count
         local_tips = set(dag.get_tips())
 
-        if local_count == 0:
-            await self.log("sync", "No local events - full sync required")
-            for conn in self.relay_connections.values():
-                await conn.wait_connected()
-                await conn.sync(0)
-            return
-
         all_events = dag.get_all_events()
         local_latest_ts = all_events[-1]["ts"] if all_events else 0
-
-        await self.log(
-            "sync", f"Local state: {local_count} events, latest ts={local_latest_ts}"
-        )
 
         connected = [c for c in self.relay_connections.values() if c.connected]
         if not connected:
@@ -421,52 +411,25 @@ class ChatSession:
             if s is not None:
                 summaries[conn.relay_url] = s
 
-        if not summaries:
-            await self.log(
-                "sync", "No relay summaries received - doing incremental sync"
-            )
-            since = max(0, local_latest_ts - 60)
+        decision = decide_sync_action(
+            local_count, local_tips, local_latest_ts, summaries
+        )
+
+        if decision.action == "full":
+            await self.log("sync", "No local events - full sync required")
             for conn in self.relay_connections.values():
-                await conn.sync(since)
-            return
-
-        first_count = None
-        first_tips = None
-        all_match = True
-        for url, s in summaries.items():
-            count = s.get("count", 0)
-            tips = set(s.get("tips", []))
-            if first_count is None:
-                first_count = count
-                first_tips = tips
-            elif count != first_count or tips != first_tips:
-                all_match = False
-                break
-
-        if (
-            all_match
-            and first_count is not None
-            and first_count == local_count
-            and first_tips == local_tips
-        ):
+                await conn.sync(0)
+        elif decision.action == "skip":
             await self.log(
                 "sync",
                 f"Already in sync ({local_count} events, {len(local_tips)} tips) - skipping",
             )
             for url in summaries:
                 await self.send({"type": "sync_complete", "relay": url})
-            return
-
-        if all_match and first_count is not None and first_count <= local_count:
-            await self.log("sync", "Relays have same or fewer events - no sync needed")
-            for url in summaries:
-                await self.send({"type": "sync_complete", "relay": url})
-            return
-
-        since = max(0, local_latest_ts - 60)
-        await self.log("sync", f"Incremental sync since={since}")
-        for conn in self.relay_connections.values():
-            await conn.sync(since)
+        else:
+            await self.log("sync", f"Incremental sync since={decision.since}")
+            for conn in self.relay_connections.values():
+                await conn.sync(decision.since)
 
     async def _on_relay_event(self, event: dict, relay_url: str):
         # Store locally
