@@ -98,6 +98,47 @@ def verify_event(event: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+def verify_event_authorization(event: dict, state: GroupState) -> tuple[bool, str]:
+    """Check if the event author is authorized to post this event type.
+
+    Args:
+        event: The event to verify
+        state: GroupState derived from the DAG BEFORE this event is applied
+
+    Returns:
+        (authorized, reason) - True if authorized, False with reason if not.
+        Returns (True, "ok") for events that don't require authorization.
+    """
+    etype = event.get("type")
+    author = event.get("author", "")
+    content = event.get("content")
+
+    if etype == "group_genesis":
+        return True, "ok"
+
+    if etype in (
+        "group_invite",
+        "group_kick",
+        "mod_add",
+        "mod_remove",
+        "relay_update",
+        "group_metadata",
+    ):
+        if author not in state.mods:
+            return False, f"not authorized: {etype} requires mod status"
+
+    if etype == "group_kick" and isinstance(content, dict):
+        target = content.get("target")
+        if state.genesis and target == state.genesis["content"].get("founder"):
+            return False, "not authorized: cannot kick the founder"
+
+    if etype == "mod_remove" and isinstance(content, dict):
+        if len(state.mods) <= 1:
+            return False, "not authorized: cannot remove the last mod"
+
+    return True, "ok"
+
+
 # --- Event Creation Helpers ---
 
 

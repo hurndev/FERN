@@ -995,10 +995,7 @@ function updateInputState() {
 // Actions
 // =========================================================================
 
-async function selectGroup(pubkey) {
-  if (currentGroup !== pubkey) {
-    events = [];  // Clear events when switching groups
-  }
+function updateGroupUI(pubkey) {
   currentGroup = pubkey;
   const group = groups.find(g => g.pubkey === pubkey);
 
@@ -1027,6 +1024,14 @@ async function selectGroup(pubkey) {
   renderMembers();
   updateInputState();
   updateManageButton();
+}
+
+async function selectGroup(pubkey) {
+  if (currentGroup !== pubkey) {
+    events = [];  // Clear events when switching groups
+  }
+
+  updateGroupUI(pubkey);
 
   // Reset sync tracking
   pendingSyncs = new Set();
@@ -1037,6 +1042,8 @@ async function selectGroup(pubkey) {
   wsSend({ action: 'load_local', group: pubkey });
 
   // 2. Connect to relays (no subscribe yet)
+  const group = groups.find(g => g.pubkey === pubkey);
+  const relays = group?.relays || [];
   if (relays.length) {
     for (const relay of relays) {
       addLog('browser', `Connecting to ${relay}...`);
@@ -1185,8 +1192,9 @@ async function createGroup() {
 
   if (res.ok) {
     addLog('local', `Group created!`);
+    events = [genesis];
     await refreshGroups();
-    selectGroup(groupKeys.pub);
+    updateGroupUI(groupKeys.pub);
   } else {
     const err = await res.json();
     addLog('error', `Failed to save group locally: ${err.error}`);
