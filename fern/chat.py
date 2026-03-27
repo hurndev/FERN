@@ -29,6 +29,8 @@ class RelayConnection:
         self._on_sync_complete = None
         self._subscribed = False
         self._pending_responses: dict[str, asyncio.Future] = {}
+        self._connected_event = asyncio.Event()
+        self._pending_syncs: list[int] = []
 
     async def connect(self, on_event, on_log):
         self._on_event = on_event
@@ -49,6 +51,10 @@ class RelayConnection:
                     await self._send_subscribe()
                 self._read_task = asyncio.create_task(self._read_loop())
                 self._retry_task = None
+                self._connected_event.set()
+                for since in self._pending_syncs:
+                    await self.sync(since)
+                self._pending_syncs.clear()
                 return
             except Exception as e:
                 await self._on_log(
@@ -82,6 +88,10 @@ class RelayConnection:
                 elif msg.get("type") == "sync_complete":
                     if self._on_sync_complete:
                         await self._on_sync_complete(self.relay_url)
+                elif msg.get("type") == "summary":
+                    fid = "__summary__"
+                    if fid in self._pending_responses:
+                        self._pending_responses.pop(fid).set_result(msg)
                 elif msg.get("type") == "ok" and msg.get("id"):
                     fid = msg["id"]
                     if fid in self._pending_responses:
@@ -102,6 +112,7 @@ class RelayConnection:
         finally:
             was_connected = self.connected
             self.connected = False
+            self._connected_event.clear()
             for fut in self._pending_responses.values():
                 fut.cancel()
             self._pending_responses.clear()
@@ -169,6 +180,40 @@ class RelayConnection:
                 )
             except Exception as e:
                 await self._on_log("error", f"Sync failed from {self.relay_url}: {e}")
+        else:
+            self._pending_syncs.append(since)
+
+    async def summary(self) -> dict | None:
+        """Fetch summary (count + tips) from the relay. Returns summary dict or None."""
+        if not (self.ws and self.connected):
+            return None
+        try:
+            fut = asyncio.Future()
+            self._pending_responses["__summary__"] = fut
+            await self.ws.send(
+                json.dumps(
+                    {
+                        "action": "summary",
+                        "group": self.group_pubkey,
+                    }
+                )
+            )
+            msg = await asyncio.wait_for(fut, timeout=3.0)
+            if msg.get("type") == "summary":
+                return msg
+        except Exception as e:
+            await self._on_log("error", f"Summary failed from {self.relay_url}: {e}")
+        finally:
+            self._pending_responses.pop("__summary__", None)
+        return None
+
+    async def wait_connected(self, timeout: float = 10.0) -> bool:
+        """Wait until the relay connection is established. Returns True if connected."""
+        try:
+            await asyncio.wait_for(self._connected_event.wait(), timeout=timeout)
+            return self.connected
+        except asyncio.TimeoutError:
+            return False
 
     async def close(self):
         self.connected = False
@@ -312,13 +357,7 @@ class ChatSession:
                 )
 
         elif action == "sync":
-            relay_url = msg.get("relay")
-            since = msg.get("since", 0)
-            if relay_url and relay_url in self.relay_connections:
-                await self.relay_connections[relay_url].sync(since)
-            else:
-                for conn in self.relay_connections.values():
-                    await conn.sync(since)
+            await self._smart_sync()
 
         elif action == "subscribe":
             relay_url = msg.get("relay")
@@ -341,6 +380,93 @@ class ChatSession:
                     }
                 )
             await self.log("local", f"Loaded {len(events)} events from local cache")
+
+    async def _smart_sync(self):
+        """Decide whether to skip, do incremental, or full sync based on local state and relay summaries."""
+        if not self.group_pubkey:
+            await self.log("error", "No group selected")
+            return
+
+        if not self.relay_connections:
+            await self.log("error", "No relay connections")
+            return
+
+        dag = self.storage.get_group_dag(self.group_pubkey)
+        local_count = dag.count
+        local_tips = set(dag.get_tips())
+
+        if local_count == 0:
+            await self.log("sync", "No local events - full sync required")
+            for conn in self.relay_connections.values():
+                await conn.wait_connected()
+                await conn.sync(0)
+            return
+
+        all_events = dag.get_all_events()
+        local_latest_ts = all_events[-1]["ts"] if all_events else 0
+
+        await self.log(
+            "sync", f"Local state: {local_count} events, latest ts={local_latest_ts}"
+        )
+
+        connected = [c for c in self.relay_connections.values() if c.connected]
+        if not connected:
+            for conn in self.relay_connections.values():
+                await conn.wait_connected()
+            connected = list(self.relay_connections.values())
+
+        summaries: dict[str, dict] = {}
+        for conn in connected:
+            s = await conn.summary()
+            if s is not None:
+                summaries[conn.relay_url] = s
+
+        if not summaries:
+            await self.log(
+                "sync", "No relay summaries received - doing incremental sync"
+            )
+            since = max(0, local_latest_ts - 60)
+            for conn in self.relay_connections.values():
+                await conn.sync(since)
+            return
+
+        first_count = None
+        first_tips = None
+        all_match = True
+        for url, s in summaries.items():
+            count = s.get("count", 0)
+            tips = set(s.get("tips", []))
+            if first_count is None:
+                first_count = count
+                first_tips = tips
+            elif count != first_count or tips != first_tips:
+                all_match = False
+                break
+
+        if (
+            all_match
+            and first_count is not None
+            and first_count == local_count
+            and first_tips == local_tips
+        ):
+            await self.log(
+                "sync",
+                f"Already in sync ({local_count} events, {len(local_tips)} tips) - skipping",
+            )
+            for url in summaries:
+                await self.send({"type": "sync_complete", "relay": url})
+            return
+
+        if all_match and first_count is not None and first_count <= local_count:
+            await self.log("sync", "Relays have same or fewer events - no sync needed")
+            for url in summaries:
+                await self.send({"type": "sync_complete", "relay": url})
+            return
+
+        since = max(0, local_latest_ts - 60)
+        await self.log("sync", f"Incremental sync since={since}")
+        for conn in self.relay_connections.values():
+            await conn.sync(since)
 
     async def _on_relay_event(self, event: dict, relay_url: str):
         # Store locally

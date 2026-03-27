@@ -1052,11 +1052,9 @@ async function selectGroup(pubkey) {
       connectedRelays.add(relay);
     }
 
-    // 3. After a brief connection delay, send sync to all relays
-    setTimeout(() => {
-      addLog('sync', `Syncing from ${connectedRelays.size} relay(s)...`);
-      wsSend({ action: 'sync', since: 0 });
-    }, 100);
+    // 3. Send sync (backend decides since value from local DAG state)
+    addLog('sync', `Syncing from ${connectedRelays.size} relay(s)...`);
+    wsSend({ action: 'sync' });
   } else {
     addLog('error', 'No relays configured for this group');
   }
@@ -1230,11 +1228,9 @@ async function joinGroup() {
     connectedRelays.add(r);
   }
 
-  // Send sync after brief connection delay
-  setTimeout(() => {
-    addLog('sync', `Syncing from ${connectedRelays.size} relay(s)...`);
-    wsSend({ action: 'sync', since: 0 });
-  }, 100);
+  // Send sync (backend decides since value)
+  addLog('sync', `Syncing from ${connectedRelays.size} relay(s)...`);
+  wsSend({ action: 'sync' });
 
   // Set up to call selectGroup when all syncs complete
   const originalHandleSyncComplete = window._pendingSelectGroup;
