@@ -15,6 +15,8 @@ class EventDAG:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.events: dict[str, dict] = {}  # id -> event
         self.children: dict[str, set[str]] = {}  # id -> set of child ids
+        self._state_cache: GroupState | None = None
+        self._state_event_count: int = 0
         self._load()
 
     @property
@@ -23,6 +25,7 @@ class EventDAG:
 
     def _load(self) -> None:
         """Load events from disk."""
+        self._invalidate_state_cache()
         if self.db_path.exists():
             with open(self.db_path, "r") as f:
                 data = json.load(f)
@@ -43,6 +46,11 @@ class EventDAG:
                 if parent_id not in self.children:
                     self.children[parent_id] = set()
                 self.children[parent_id].add(eid)
+
+    def _invalidate_state_cache(self) -> None:
+        """Invalidate the cached GroupState."""
+        self._state_cache = None
+        self._state_event_count = 0
 
     def add_event(
         self,
@@ -76,6 +84,11 @@ class EventDAG:
             if parent_id not in self.children:
                 self.children[parent_id] = set()
             self.children[parent_id].add(event["id"])
+
+        # Incrementally update cached state
+        if self._state_cache is not None:
+            self._state_cache._apply_one(event)
+            self._state_event_count = len(self.events)
 
         if not skip_save:
             self._save()
@@ -111,9 +124,15 @@ class EventDAG:
         )
 
     def get_state(self) -> GroupState:
-        """Derive current group state from the DAG."""
+        """Derive current group state from the DAG, using cache when valid."""
+        if self._state_cache is not None and self._state_event_count == len(
+            self.events
+        ):
+            return self._state_cache
         state = GroupState()
         state.apply(self.get_all_events())
+        self._state_cache = state
+        self._state_event_count = len(self.events)
         return state
 
     @property
