@@ -6,14 +6,14 @@ import os
 from collections import defaultdict
 
 import click
-import websockets
 
 from .events import verify_event_id, verify_event_signature
 from .dag import EventDAG
+from .relay import RelayClient
+from .config import BOOTSTRAP_RELAYS
 
 
 DEFAULT_STORAGE = "~/.fern"
-BOOTSTRAP_RELAYS = ["ws://localhost:8787", "ws://localhost:8788"]
 
 
 @click.group()
@@ -174,50 +174,16 @@ def compare_relays(group_pubkey: str, relay: tuple[str, ...]):
     if not relay:
         relay = tuple(BOOTSTRAP_RELAYS)
 
-    async def get_summary(url: str) -> dict:
-        try:
-            async with websockets.connect(url) as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "action": "summary",
-                            "group": group_pubkey,
-                        }
-                    )
-                )
-                return json.loads(await ws.recv())
-        except Exception as e:
-            return {"type": "error", "message": str(e)}
-
     async def get_all_event_ids(url: str) -> set[str]:
-        ids = set()
-        try:
-            async with websockets.connect(url) as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "action": "sync",
-                            "group": group_pubkey,
-                            "since": 0,
-                        }
-                    )
-                )
-                async for raw in ws:
-                    msg = json.loads(raw)
-                    if msg["type"] == "event":
-                        ids.add(msg["event"]["id"])
-                    elif msg["type"] == "sync_complete":
-                        break
-        except Exception as e:
-            click.echo(f"  Error fetching from {url}: {e}", err=True)
-        return ids
+        events = await RelayClient.fetch_events(url, group_pubkey, since=0)
+        return {e["id"] for e in events}
 
     async def run():
         summaries = {}
         event_ids = {}
 
         for url in relay:
-            summaries[url] = await get_summary(url)
+            summaries[url] = await RelayClient.fetch_summary(url, group_pubkey)
             event_ids[url] = await get_all_event_ids(url)
 
         click.echo(f"Group: {group_pubkey[:16]}...\n")
@@ -428,21 +394,11 @@ def relay_get(event_id: str, relay: str, group_pubkey: str | None):
 
     async def run():
         try:
-            async with websockets.connect(relay) as ws:
-                msg = {"action": "get", "id": event_id}
-                if group_pubkey:
-                    msg["group"] = group_pubkey
-                await ws.send(json.dumps(msg))
-                response = json.loads(await ws.recv())
-
-                if response.get("type") == "event":
-                    click.echo(json.dumps(response["event"], indent=2))
-                elif response.get("type") == "not_found":
-                    click.echo(
-                        f"Event {event_id[:16]}... not found on {relay}", err=True
-                    )
-                else:
-                    click.echo(f"Error: {response.get('message', 'unknown')}", err=True)
+            event = await RelayClient.fetch_event(relay, event_id)
+            if event:
+                click.echo(json.dumps(event, indent=2))
+            else:
+                click.echo(f"Event {event_id[:16]}... not found on {relay}", err=True)
         except Exception as e:
             click.echo(f"Connection failed: {e}", err=True)
 
@@ -457,19 +413,19 @@ def relay_summary(group_pubkey: str, relay: str):
 
     async def run():
         try:
-            async with websockets.connect(relay) as ws:
-                await ws.send(json.dumps({"action": "summary", "group": group_pubkey}))
-                response = json.loads(await ws.recv())
-
-                if response.get("type") == "summary":
-                    click.echo(f"Relay: {relay}")
-                    click.echo(f"Group: {group_pubkey[:16]}...")
-                    click.echo(f"Events: {response['count']}")
-                    click.echo(f"Tips: {len(response['tips'])}")
-                    for tip in response["tips"]:
-                        click.echo(f"  {tip[:16]}...")
-                else:
-                    click.echo(f"Error: {response.get('message', 'unknown')}", err=True)
+            response = await RelayClient.fetch_summary(relay, group_pubkey)
+            if response and response.get("type") == "summary":
+                click.echo(f"Relay: {relay}")
+                click.echo(f"Group: {group_pubkey[:16]}...")
+                click.echo(f"Events: {response['count']}")
+                click.echo(f"Tips: {len(response['tips'])}")
+                for tip in response["tips"]:
+                    click.echo(f"  {tip[:16]}...")
+            else:
+                click.echo(
+                    f"Error: {response.get('message', 'unknown') if response else 'no response'}",
+                    err=True,
+                )
         except Exception as e:
             click.echo(f"Connection failed: {e}", err=True)
 
@@ -518,18 +474,13 @@ def publish_raw(relay: str, event_json: str):
 
     async def run():
         try:
-            async with websockets.connect(relay) as ws:
-                await ws.send(json.dumps({"action": "publish", "event": event}))
-                response = json.loads(await ws.recv())
-
-                if response.get("type") == "ok":
-                    click.echo(f"Published: {response.get('id', '?')[:16]}...")
-                elif response.get("type") == "error":
-                    click.echo(
-                        f"Rejected: {response.get('message', 'unknown')}", err=True
-                    )
-                else:
-                    click.echo(f"Unexpected: {response}", err=True)
+            response = await RelayClient.publish(relay, event)
+            if response and response.get("type") == "ok":
+                click.echo(f"Published: {response.get('id', '?')[:16]}...")
+            elif response and response.get("type") == "error":
+                click.echo(f"Rejected: {response.get('message', 'unknown')}", err=True)
+            else:
+                click.echo(f"Unexpected: {response}", err=True)
         except Exception as e:
             click.echo(f"Connection failed: {e}", err=True)
 

@@ -26,11 +26,11 @@ from .events import (
     verify_event_signature,
 )
 from .dag import ClientStorage, EventDAG
+from .relay import RelayClient
 from .storage import resolve_fern_dir
+from .config import BOOTSTRAP_RELAYS
 from .sync import decide_sync_action
 
-
-BOOTSTRAP_RELAYS = ["ws://localhost:8787", "ws://localhost:8788"]
 
 _fern_home: str | None = None
 
@@ -52,70 +52,6 @@ def get_canonical_relays(
     if env_relay:
         return [env_relay]
     return list(BOOTSTRAP_RELAYS)
-
-
-async def publish_to_relays(event: dict, relay_urls: list[str]) -> dict:
-    """Publish an event to multiple relays in parallel. Returns {url: response}."""
-    results = {}
-
-    async def pub_one(url: str) -> None:
-        try:
-            async with websockets.connect(url) as ws:
-                await ws.send(json.dumps({"action": "publish", "event": event}))
-                results[url] = json.loads(await ws.recv())
-        except Exception as e:
-            results[url] = {"type": "error", "message": str(e)}
-
-    await asyncio.gather(*(pub_one(url) for url in relay_urls))
-    return results
-
-
-async def fetch_genesis(relay_url: str, group_pubkey: str) -> dict | None:
-    """Fetch the genesis event from a relay. Returns event or None."""
-    try:
-        async with asyncio.timeout(1.5):
-            async with websockets.connect(relay_url) as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "action": "get_genesis",
-                            "group": group_pubkey,
-                        }
-                    )
-                )
-                msg = json.loads(await ws.recv())
-                if msg["type"] == "event":
-                    return msg["event"]
-                elif msg["type"] == "not_found":
-                    return None
-    except asyncio.TimeoutError:
-        click.echo(f"    {relay_url}: timeout fetching genesis", err=True)
-    except Exception:
-        pass
-    return None
-
-
-async def fetch_summary_from_relay(relay_url: str, group_pubkey: str) -> dict | None:
-    """Fetch a summary (event count and tips) from a relay. Returns summary or None."""
-    try:
-        async with asyncio.timeout(1.5):
-            async with websockets.connect(relay_url) as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "action": "summary",
-                            "group": group_pubkey,
-                        }
-                    )
-                )
-                msg = json.loads(await ws.recv())
-                if msg.get("type") == "summary":
-                    return msg
-    except asyncio.TimeoutError:
-        click.echo(f"    {relay_url}: timeout fetching summary", err=True)
-    except Exception:
-        pass
-    return None
 
 
 def validate_genesis(event: dict) -> tuple[bool, str]:
@@ -154,33 +90,6 @@ def validate_genesis(event: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-async def fetch_events_from_relay(
-    relay_url: str, group_pubkey: str, since: int = 0
-) -> list[dict]:
-    """Fetch events from a relay since a timestamp. Returns list of raw events."""
-    events = []
-    try:
-        async with websockets.connect(relay_url) as ws:
-            await ws.send(
-                json.dumps(
-                    {
-                        "action": "sync",
-                        "group": group_pubkey,
-                        "since": since,
-                    }
-                )
-            )
-            async for raw in ws:
-                msg = json.loads(raw)
-                if msg["type"] == "event":
-                    events.append(msg["event"])
-                elif msg["type"] == "sync_complete":
-                    break
-    except Exception as e:
-        click.echo(f"  Error fetching from {relay_url}: {e}", err=True)
-    return events
-
-
 async def fetch_and_validate_events(
     relay_urls: list[str],
     group_pubkey: str,
@@ -212,7 +121,9 @@ async def fetch_and_validate_events(
         good_relays = list(relay_urls)
         valid_genesis = None
     else:
-        genesis_tasks = [fetch_genesis(url, group_pubkey) for url in relay_urls]
+        genesis_tasks = [
+            RelayClient.fetch_genesis(url, group_pubkey) for url in relay_urls
+        ]
         genesis_results = await asyncio.gather(*genesis_tasks)
 
         valid_genesis = None
@@ -238,7 +149,7 @@ async def fetch_and_validate_events(
 
     # Fetch events from good relays (using since parameter for incremental sync)
     fetch_tasks = [
-        fetch_events_from_relay(url, group_pubkey, since) for url in good_relays
+        RelayClient.fetch_events(url, group_pubkey, since) for url in good_relays
     ]
     fetch_results = await asyncio.gather(*fetch_tasks)
 
@@ -307,7 +218,7 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
         click.echo(f"  Fetching relay summaries to check if sync is needed...")
 
         summary_tasks = [
-            fetch_summary_from_relay(url, dag.group_pubkey) for url in hint_relays
+            RelayClient.fetch_summary(url, dag.group_pubkey) for url in hint_relays
         ]
         summary_results = await asyncio.gather(*summary_tasks)
 
@@ -480,7 +391,7 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
             canonical_event_ids[url] = relay_event_ids[url]
         else:
             # Fetch from this relay if we haven't already (with same since parameter)
-            events = await fetch_events_from_relay(
+            events = await RelayClient.fetch_events(
                 url, dag.group_pubkey, since=sync_since
             )
             ids = set()
@@ -507,8 +418,8 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
             click.echo(f"    {url}: missing {len(missing)} event(s), pushing...")
             for event_id in missing:
                 event = all_validated[event_id]
-                results = await publish_to_relays(event, [url])
-                if results.get(url, {}).get("type") == "ok":
+                result = await RelayClient.publish(url, event)
+                if result and result.get("type") == "ok":
                     healed += 1
         else:
             click.echo(f"    {url}: up to date")
@@ -737,10 +648,19 @@ def create_group(
 
     # Publish to relays
     click.echo(f"Publishing genesis to {len(relay_list)} relay(s)...")
-    results = asyncio.run(publish_to_relays(genesis, relay_list))
+
+    async def _pub_all():
+        async def pub_one(url):
+            return (url, await RelayClient.publish(url, genesis))
+
+        return dict(await asyncio.gather(*[pub_one(url) for url in relay_list]))
+
+    results = asyncio.run(_pub_all())
 
     for url, result in results.items():
-        if result.get("type") == "ok":
+        if result is None:
+            click.echo(f"  {url}: connection failed", err=True)
+        elif result.get("type") == "ok":
             click.echo(f"  {url}: OK")
         else:
             click.echo(f"  {url}: {result.get('message', 'unknown error')}", err=True)
@@ -844,12 +764,21 @@ def send(
 
     # Publish to relays FIRST - don't add to local DAG until relay accepts
     click.echo(f"Publishing to {len(relays)} relay(s): {', '.join(relays)}")
-    results = asyncio.run(publish_to_relays(event, relays))
+
+    async def _pub_all():
+        async def pub_one(url):
+            return (url, await RelayClient.publish(url, event))
+
+        return dict(await asyncio.gather(*[pub_one(url) for url in relays]))
+
+    results = asyncio.run(_pub_all())
 
     success = 0
     accepted_relays = []
     for url, result in results.items():
-        if result.get("type") == "ok":
+        if result is None:
+            click.echo(f"  {url}: connection failed", err=True)
+        elif result.get("type") == "ok":
             success += 1
             accepted_relays.append(url)
         else:
@@ -991,7 +920,14 @@ def join(address: str):
             parents=tips,
         )
         dag.add_event(event)
-        asyncio.run(publish_to_relays(event, relays))
+
+        async def _pub_all():
+            async def pub_one(url):
+                await RelayClient.publish(url, event)
+
+            await asyncio.gather(*[pub_one(url) for url in relays])
+
+        asyncio.run(_pub_all())
         click.echo("Joined! You can now post messages.")
 
 
@@ -1027,7 +963,14 @@ def leave(group_pubkey: str, relay: str | None):
     )
 
     dag.add_event(event)
-    asyncio.run(publish_to_relays(event, relays))
+
+    async def _pub_all():
+        async def pub_one(url):
+            await RelayClient.publish(url, event)
+
+        await asyncio.gather(*[pub_one(url) for url in relays])
+
+    asyncio.run(_pub_all())
     click.echo(f"Left group {group_pubkey[:12]}...")
 
 
@@ -1069,7 +1012,14 @@ def invite(group_pubkey: str, invitee_pubkey: str, relay: str | None):
     )
 
     dag.add_event(event)
-    results = asyncio.run(publish_to_relays(event, relays))
+
+    async def _pub_all():
+        async def pub_one(url):
+            await RelayClient.publish(url, event)
+
+        await asyncio.gather(*[pub_one(url) for url in relays])
+
+    asyncio.run(_pub_all())
     click.echo(f"Invited {invitee_pubkey[:12]}... to group.")
 
 
@@ -1106,7 +1056,14 @@ def kick(group_pubkey: str, target_pubkey: str, relay: str | None):
     )
 
     dag.add_event(event)
-    asyncio.run(publish_to_relays(event, relays))
+
+    async def _pub_all():
+        async def pub_one(url):
+            await RelayClient.publish(url, event)
+
+        await asyncio.gather(*[pub_one(url) for url in relays])
+
+    asyncio.run(_pub_all())
     click.echo(f"Kicked {target_pubkey[:12]}... from group.")
 
 
@@ -1143,7 +1100,14 @@ def mod_add(group_pubkey: str, target_pubkey: str, relay: str | None):
     )
 
     dag.add_event(event)
-    asyncio.run(publish_to_relays(event, relays))
+
+    async def _pub_all():
+        async def pub_one(url):
+            await RelayClient.publish(url, event)
+
+        await asyncio.gather(*[pub_one(url) for url in relays])
+
+    asyncio.run(_pub_all())
     click.echo(f"Promoted {target_pubkey[:12]}... to mod.")
 
 
@@ -1180,7 +1144,14 @@ def mod_remove(group_pubkey: str, target_pubkey: str, relay: str | None):
     )
 
     dag.add_event(event)
-    asyncio.run(publish_to_relays(event, relays))
+
+    async def _pub_all():
+        async def pub_one(url):
+            await RelayClient.publish(url, event)
+
+        await asyncio.gather(*[pub_one(url) for url in relays])
+
+    asyncio.run(_pub_all())
     click.echo(f"Demoted {target_pubkey[:12]}... from mod.")
 
 
@@ -1231,7 +1202,14 @@ def relay_update(group_pubkey: str, new_relays: tuple[str, ...], relay: str | No
 
     # Publish update to ALL current relays
     click.echo(f"Publishing relay_update to {len(old_relays)} current relay(s)...")
-    asyncio.run(publish_to_relays(event, old_relays))
+
+    async def _pub_all():
+        async def pub_one(url):
+            await RelayClient.publish(url, event)
+
+        await asyncio.gather(*[pub_one(url) for url in old_relays])
+
+    asyncio.run(_pub_all())
     click.echo(f"Updated relays to: {', '.join(new_relay_list)}")
 
     # Seed new relays with full local history
