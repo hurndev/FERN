@@ -160,6 +160,10 @@ async def fetch_and_validate_events(
             ok, reason = verify_event(event)
             if not ok:
                 invalid_count += 1
+                eid = event.get("id", "?")[:16]
+                click.echo(
+                    f"    {url}: invalid {event.get('type', '?')} {eid}... ({reason})"
+                )
                 continue
             ids.add(event["id"])
             if event["id"] not in all_validated:
@@ -409,14 +413,22 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     # =========================================================================
 
     new_added = 0
+    rejected = 0
     for event in sorted(all_validated.values(), key=lambda e: (e["ts"], e["id"])):
-        ok, _ = dag.add_event(event, skip_verify=True)
+        ok, reason = dag.add_event(event, skip_verify=True)
         if ok:
             new_added += 1
+        elif reason != "duplicate":
+            eid = event.get("id", "?")[:16]
+            click.echo(f"    [REJECTED] {event['type']} {eid}... ({reason})")
+            rejected += 1
 
     dag._save()
 
-    click.echo(f"\n  Added {new_added} new events locally ({dag.count} total)")
+    msg = f"\n  Added {new_added} new events locally ({dag.count} total)"
+    if rejected:
+        msg += f", {rejected} rejected"
+    click.echo(msg)
 
     gaps = dag.get_missing_parents()
     summary["gaps"] = sorted(gaps)
