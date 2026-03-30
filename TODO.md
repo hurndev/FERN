@@ -14,3 +14,5 @@
 - When downloading event history from multiple relays, only download full event from one and request the hash from the others
 - Investigate parent choosing logic
 - What happens when client adds a event locally but doesn't publish it?
+- State derivation sequential?
+- Prevent events with missing parents from being added to DAG or referenced in new events

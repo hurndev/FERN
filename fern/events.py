@@ -377,6 +377,17 @@ def create_group_metadata(
 # --- Group State Derivation ---
 
 
+def derive_group_state(events: list[dict]) -> GroupState:
+    """Derive group state from an iterable of events.
+
+    Same logic as EventDAG.get_state() but works on any iterable.
+    Events are sorted by (ts, id) before applying.
+    """
+    state = GroupState()
+    state.apply(sorted(events, key=lambda e: (e["ts"], e["id"])))
+    return state
+
+
 class GroupState:
     """Derives group state by replaying events in DAG order."""
 

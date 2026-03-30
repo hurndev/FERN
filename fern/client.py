@@ -21,6 +21,7 @@ from .events import (
     create_mod_add,
     create_mod_remove,
     create_relay_update,
+    derive_group_state,
     verify_event,
     verify_event_id,
     verify_event_signature,
@@ -198,6 +199,10 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     if not hint_relays:
         return summary
 
+    # Snapshot local events - these are the persistent working set
+    local_events: dict[str, dict] = dict(dag.events)
+    local_event_ids_snapshot = set(local_events.keys())
+
     # =========================================================================
     # PHASE 0: CHECK IF SYNC IS NEEDED (incremental sync optimization)
     # =========================================================================
@@ -206,13 +211,15 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     # =========================================================================
 
     local_latest_ts = 0
-    local_count = dag.count
+    local_count = len(local_events)
 
     if local_count > 0:
-        all_events = dag.get_all_events()
-        if all_events:
-            local_latest_ts = all_events[-1]["ts"]
-        local_event_ids = set(dag.events.keys())
+        all_local_events = sorted(
+            local_events.values(), key=lambda e: (e["ts"], e["id"])
+        )
+        if all_local_events:
+            local_latest_ts = all_local_events[-1]["ts"]
+        local_event_ids = set(local_events.keys())
 
         click.echo(f"  Local state: {local_count} events, latest ts={local_latest_ts}")
         click.echo(f"  Fetching relay summaries to check if sync is needed...")
@@ -239,7 +246,7 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
                     f"({local_count} events)"
                 )
 
-                state = dag.get_state()
+                state = derive_group_state(local_events.values())
                 summary["canonical_relays"] = (
                     state.relays if state.relays else list(hint_relays)
                 )
@@ -267,9 +274,9 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     # =========================================================================
 
     current_relays = list(hint_relays)
-    all_validated: dict[str, dict] = {}
+    all_validated: dict[str, dict] = dict(local_events)
     seen_relays: set[str] = set()
-    event_ids_before_sync = set(dag.events.keys())
+    all_relay_event_ids: dict[str, set[str]] = {}
 
     while current_relays:
         summary["sync_rounds"] += 1
@@ -279,18 +286,15 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
             f"  [Sync round {round_num}] Using relays: {', '.join(current_relays)}"
         )
 
-        # Track which relays we've already used (to detect stability)
         used_this_round = frozenset(current_relays)
         seen_relays.update(current_relays)
 
-        # Determine sync mode: incremental if we have local events, full otherwise
         sync_since = local_latest_ts if local_latest_ts > 0 else 0
         skip_genesis = local_latest_ts > 0
 
         if sync_since > 0:
             click.echo(f"    Incremental sync since ts={sync_since}")
 
-        # Fetch and validate events from current relays
         (
             events,
             relay_event_ids,
@@ -305,7 +309,6 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
 
         summary["invalid_events"] += invalid_count
 
-        # Merge new events into our validated set
         new_events = 0
         for eid, event in events.items():
             if eid not in all_validated:
@@ -316,7 +319,6 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
             f"    Fetched {len(events)} events ({new_events} new, {invalid_count} invalid)"
         )
 
-        # Track bad relays
         bad_this_round = [r for r in current_relays if r not in good_relays]
         summary["bad_relays"].extend(bad_this_round)
 
@@ -324,44 +326,32 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
             click.echo("    No working relays found.", err=True)
             break
 
-        # Store events in DAG temporarily to derive group state
-        # (We'll re-store them properly after healing)
-        for event in all_validated.values():
-            dag.add_event(event, skip_verify=True, skip_save=True, skip_auth=True)
+        # Accumulate relay event IDs for cross-relay healing
+        for url, ids in relay_event_ids.items():
+            all_relay_event_ids[url] = ids
 
         # Derive canonical relays from group state
-        state = dag.get_state()
+        state = derive_group_state(all_validated.values())
         derived_relays = state.relays if state.relays else []
 
         click.echo(
             f"    Derived canonical relays: {derived_relays or '(none in group state)'}"
         )
 
-        # Check if relay list has stabilised
         derived_set = frozenset(derived_relays)
         if derived_set == used_this_round or not derived_relays:
-            # Relays match what we just used, or no relays defined in group
             click.echo("    Relay list stable - sync complete")
             break
 
-        # Group has migrated - switch to new canonical relays
         new_relays = [r for r in derived_relays if r not in seen_relays]
         if not new_relays:
-            # All derived relays already used, we're stable
             click.echo("    All derived relays already synced - sync complete")
             break
 
         click.echo(f"    Group migrated - switching to canonical relays")
         current_relays = derived_relays
 
-        # Clear DAG for re-derivation with new events
-        dag.events.clear()
-        dag.children.clear()
-
     summary["total_events"] = len(all_validated)
-
-    # Compute events received during this sync (for incremental sync healing)
-    new_event_ids = set(all_validated.keys()) - event_ids_before_sync
 
     # =========================================================================
     # PHASE 2: HEAL CANONICAL RELAYS
@@ -370,27 +360,17 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     # we heal any divergence between them by cross-referencing event sets.
     # =========================================================================
 
-    # Merge local events into all_validated BEFORE healing
-    # (local events are in dag.events but may not be in all_validated yet)
-    for eid, event in dag.events.items():
-        if eid not in all_validated:
-            all_validated[eid] = event
-
-    # Determine final canonical relays from group state
-    state = dag.get_state()
+    state = derive_group_state(all_validated.values())
     canonical_relays = state.relays if state.relays else list(seen_relays)
     summary["canonical_relays"] = canonical_relays
 
     click.echo(f"\n  [Healing] Canonical relays: {', '.join(canonical_relays)}")
 
-    # Fetch event IDs from all canonical relays to compare
-    # Use same `since` parameter for consistency - we only need to heal recent events
     canonical_event_ids: dict[str, set[str]] = {}
     for url in canonical_relays:
-        if url in relay_event_ids:
-            canonical_event_ids[url] = relay_event_ids[url]
+        if url in all_relay_event_ids:
+            canonical_event_ids[url] = all_relay_event_ids[url]
         else:
-            # Fetch from this relay if we haven't already (with same since parameter)
             events = await RelayClient.fetch_events(
                 url, dag.group_pubkey, since=sync_since
             )
@@ -403,9 +383,7 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
                         all_validated[event["id"]] = event
             canonical_event_ids[url] = ids
 
-    # Heal: push missing events to relays that don't have them
-    # For full sync: heal all events (we have complete picture from all relays)
-    # For incremental sync: only heal the new events we received in this sync
+    new_event_ids = set(all_validated.keys()) - local_event_ids_snapshot
     events_to_heal = set(all_validated.keys()) if sync_since == 0 else new_event_ids
     healed = 0
 
@@ -430,22 +408,16 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
     # PHASE 3: FINALISE LOCAL STORAGE
     # =========================================================================
 
-    # Clear and re-store all events in proper order
-    dag.events.clear()
-    dag.children.clear()
-    dag._rebuild_children()
-
-    stored = 0
+    new_added = 0
     for event in sorted(all_validated.values(), key=lambda e: (e["ts"], e["id"])):
-        ok, _ = dag.add_event(event, skip_verify=True, skip_save=True)
+        ok, _ = dag.add_event(event, skip_verify=True)
         if ok:
-            stored += 1
+            new_added += 1
 
     dag._save()
 
-    click.echo(f"\n  Stored {stored} events locally")
+    click.echo(f"\n  Added {new_added} new events locally ({dag.count} total)")
 
-    # Check for gaps in the DAG
     gaps = dag.get_missing_parents()
     summary["gaps"] = sorted(gaps)
     if gaps:
