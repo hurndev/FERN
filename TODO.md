@@ -11,4 +11,6 @@
 - Basic validation of timestamps, and more robust timestamp-based verification of mod-only events
 - Display members of group on DAG visualiser
 - Resolve message ordering issues in chat UI
-- Only check tips in summary
+- When downloading event history from multiple relays, only download full event from one and request the hash from the others
+- Investigate parent choosing logic
+- What happens when client adds a event locally but doesn't publish it?

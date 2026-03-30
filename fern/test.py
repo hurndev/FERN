@@ -15,9 +15,8 @@ from pathlib import Path
 import click
 
 from . import crypto
-
-
-BOOTSTRAP_RELAYS = ["ws://localhost:8787", "ws://localhost:8788"]
+from .relay import RelayClient
+from .config import BOOTSTRAP_RELAYS
 
 
 # =============================================================================
@@ -158,8 +157,6 @@ def multi_send(
     Example:
         fern test multi-send <group> alice bob carol --concurrent --count 5
     """
-    import websockets
-
     if not relay:
         relay = BOOTSTRAP_RELAYS[0]
 
@@ -192,14 +189,12 @@ def multi_send(
         )
 
         try:
-            async with websockets.connect(relay) as ws:
-                await ws.send(json.dumps({"action": "publish", "event": event}))
-                resp = json.loads(await ws.recv())
-                return {
-                    "user": user_name,
-                    "success": resp.get("type") == "ok",
-                    "event_id": event["id"],
-                }
+            resp = await RelayClient.publish(relay, event)
+            return {
+                "user": user_name,
+                "success": resp.get("type") == "ok" if resp else False,
+                "event_id": event["id"],
+            }
         except Exception as e:
             return {"user": user_name, "success": False, "error": str(e)}
 

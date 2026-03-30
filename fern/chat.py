@@ -11,222 +11,9 @@ from aiohttp import web, WSMsgType
 
 from .dag import ClientStorage
 from .events import verify_event
+from .relay import RelayClient
 from .storage import resolve_fern_dir
 from .sync import decide_sync_action
-
-
-class RelayConnection:
-    """Manages a WebSocket connection to a relay for a specific group."""
-
-    def __init__(self, relay_url: str, group_pubkey: str, subscribe: bool = True):
-        self.relay_url = relay_url
-        self.group_pubkey = group_pubkey
-        self.subscribe = subscribe
-        self.ws = None
-        self.connected = False
-        self._read_task = None
-        self._on_event = None
-        self._on_log = None
-        self._on_sync_complete = None
-        self._subscribed = False
-        self._pending_responses: dict[str, asyncio.Future] = {}
-        self._connected_event = asyncio.Event()
-        self._pending_syncs: list[int] = []
-
-    async def connect(self, on_event, on_log):
-        self._on_event = on_event
-        self._on_log = on_log
-        self._retry_task = asyncio.create_task(self._connect_with_retry())
-
-    async def _connect_with_retry(self):
-        """Connect with automatic retry every 60 seconds if relay is down."""
-        import websockets
-
-        while True:
-            try:
-                self.ws = await websockets.connect(self.relay_url)
-                self.connected = True
-                self._subscribed = False
-                await self._on_log("relay", f"Connected to {self.relay_url}")
-                if self.subscribe:
-                    await self._send_subscribe()
-                self._read_task = asyncio.create_task(self._read_loop())
-                self._retry_task = None
-                self._connected_event.set()
-                for since in self._pending_syncs:
-                    await self.sync(since)
-                self._pending_syncs.clear()
-                return
-            except Exception as e:
-                await self._on_log(
-                    "error", f"Failed to connect to {self.relay_url}: {e}"
-                )
-            await asyncio.sleep(60)
-
-    async def _send_subscribe(self):
-        """Send subscribe action to relay."""
-        if self.ws and self.connected and not self._subscribed:
-            await self.ws.send(
-                json.dumps(
-                    {
-                        "action": "subscribe",
-                        "group": self.group_pubkey,
-                    }
-                )
-            )
-            self._subscribed = True
-            await self._on_log(
-                "relay",
-                f"Subscribed to {self.group_pubkey[:12]}... on {self.relay_url}",
-            )
-
-    async def _read_loop(self):
-        try:
-            async for raw in self.ws:
-                msg = json.loads(raw)
-                if msg.get("type") == "event" and self._on_event:
-                    await self._on_event(msg["event"], self.relay_url)
-                elif msg.get("type") == "sync_complete":
-                    if self._on_sync_complete:
-                        await self._on_sync_complete(self.relay_url)
-                elif msg.get("type") == "summary":
-                    fid = "__summary__"
-                    if fid in self._pending_responses:
-                        self._pending_responses.pop(fid).set_result(msg)
-                elif msg.get("type") == "ok" and msg.get("id"):
-                    fid = msg["id"]
-                    if fid in self._pending_responses:
-                        self._pending_responses.pop(fid).set_result(msg)
-                elif msg.get("type") == "error" and msg.get("id"):
-                    fid = msg["id"]
-                    if fid in self._pending_responses:
-                        self._pending_responses.pop(fid).set_result(msg)
-                elif msg.get("type") == "ok":
-                    await self._on_log("relay", f"OK: {msg.get('id', '?')[:12]}...")
-                elif msg.get("type") == "error":
-                    await self._on_log(
-                        "error", f"Relay error: {msg.get('message', '?')}"
-                    )
-        except Exception as e:
-            if self.connected:
-                await self._on_log("error", f"Disconnected from {self.relay_url}: {e}")
-        finally:
-            was_connected = self.connected
-            self.connected = False
-            self._connected_event.clear()
-            for fut in self._pending_responses.values():
-                fut.cancel()
-            self._pending_responses.clear()
-            if was_connected and self._retry_task is None:
-                await self._on_log(
-                    "relay", f"Reconnecting to {self.relay_url} in 60s..."
-                )
-                self._retry_task = asyncio.create_task(self._connect_with_retry())
-
-    def set_on_sync_complete(self, callback):
-        """Set callback for sync_complete message."""
-        self._on_sync_complete = callback
-
-    def is_subscribed(self) -> bool:
-        return self._subscribed
-
-    async def publish(self, event: dict) -> dict | None:
-        """Publish an event and wait for relay response. Returns response dict or None."""
-        if self.ws and self.connected:
-            try:
-                event_id = event["id"]
-                fut = asyncio.Future()
-                self._pending_responses[event_id] = fut
-
-                await self.ws.send(
-                    json.dumps(
-                        {
-                            "action": "publish",
-                            "event": event,
-                        }
-                    )
-                )
-                await self._on_log(
-                    "publish", f"Published {event['type']} to {self.relay_url}"
-                )
-
-                try:
-                    response = await asyncio.wait_for(fut, timeout=5.0)
-                    return response
-                except asyncio.TimeoutError:
-                    await self._on_log(
-                        "error", f"Publish timed out to {self.relay_url}"
-                    )
-                    self._pending_responses.pop(event_id, None)
-                    return None
-            except Exception as e:
-                await self._on_log("error", f"Publish failed to {self.relay_url}: {e}")
-                self._pending_responses.pop(event["id"], None)
-        return None
-
-    async def sync(self, since: int = 0):
-        if self.ws and self.connected:
-            try:
-                await self.ws.send(
-                    json.dumps(
-                        {
-                            "action": "sync",
-                            "group": self.group_pubkey,
-                            "since": since,
-                        }
-                    )
-                )
-                await self._on_log(
-                    "sync", f"Requested sync from {self.relay_url} (since={since})"
-                )
-            except Exception as e:
-                await self._on_log("error", f"Sync failed from {self.relay_url}: {e}")
-        else:
-            self._pending_syncs.append(since)
-
-    async def summary(self) -> dict | None:
-        """Fetch summary (count + tips) from the relay. Returns summary dict or None."""
-        if not (self.ws and self.connected):
-            return None
-        try:
-            fut = asyncio.Future()
-            self._pending_responses["__summary__"] = fut
-            await self.ws.send(
-                json.dumps(
-                    {
-                        "action": "summary",
-                        "group": self.group_pubkey,
-                    }
-                )
-            )
-            msg = await asyncio.wait_for(fut, timeout=3.0)
-            if msg.get("type") == "summary":
-                return msg
-        except Exception as e:
-            await self._on_log("error", f"Summary failed from {self.relay_url}: {e}")
-        finally:
-            self._pending_responses.pop("__summary__", None)
-        return None
-
-    async def wait_connected(self, timeout: float = 10.0) -> bool:
-        """Wait until the relay connection is established. Returns True if connected."""
-        try:
-            await asyncio.wait_for(self._connected_event.wait(), timeout=timeout)
-            return self.connected
-        except asyncio.TimeoutError:
-            return False
-
-    async def close(self):
-        self.connected = False
-        if self._retry_task:
-            self._retry_task.cancel()
-            self._retry_task = None
-        if self._read_task:
-            self._read_task.cancel()
-            self._read_task = None
-        if self.ws:
-            await self.ws.close()
-            self.ws = None
 
 
 class ChatSession:
@@ -235,7 +22,7 @@ class ChatSession:
     def __init__(self, ws: web.WebSocketResponse, storage: ClientStorage):
         self.ws = ws
         self.storage = storage
-        self.relay_connections: dict[str, RelayConnection] = {}
+        self.relay_connections: dict[str, RelayClient] = {}
         self.group_pubkey: str | None = None
 
     async def send(self, data: dict):
@@ -263,7 +50,7 @@ class ChatSession:
             self.group_pubkey = group_pubkey
             if relay_url in self.relay_connections:
                 await self.relay_connections[relay_url].close()
-            conn = RelayConnection(relay_url, group_pubkey, subscribe=False)
+            conn = RelayClient(relay_url, group_pubkey)
             self.relay_connections[relay_url] = conn
 
             async def on_sync_complete(url):
