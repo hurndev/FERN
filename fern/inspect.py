@@ -9,11 +9,11 @@ import click
 from aiohttp import web, WSMsgType
 
 from .dag import EventDAG
-from .events import verify_event_id, verify_event_signature
+from .events import Event, verify_event_id, verify_event_signature
 from .storage import resolve_fern_dir
 
 
-def verify_event_full(event: dict) -> dict:
+def verify_event_full(event: Event) -> dict:
     """Returns verification dict."""
     id_ok = verify_event_id(event)
     signer = event["group"] if event["type"] == "group_genesis" else event["author"]
@@ -21,7 +21,7 @@ def verify_event_full(event: dict) -> dict:
     return {"id_valid": id_ok, "sig_valid": sig_ok, "valid": id_ok and sig_ok}
 
 
-def event_to_dict(event: dict) -> dict:
+def event_to_dict(event: Event) -> dict:
     """Sanitize event for JSON serialization."""
     return {
         "id": event["id"],

@@ -3,7 +3,19 @@
 import hashlib
 import json
 import time
-from typing import Any
+from typing import Any, TypedDict
+
+
+class Event(TypedDict):
+    id: str
+    type: str
+    group: str
+    author: str
+    parents: list[str]
+    content: str | dict
+    ts: int
+    sig: str
+
 
 from . import crypto
 
@@ -40,7 +52,7 @@ def sign_event(canonical: bytes, private_key_hex: str) -> str:
     return crypto.sign(private_key_hex, canonical_hash)
 
 
-def verify_event_signature(event: dict, signer_pubkey: str) -> bool:
+def verify_event_signature(event: Event, signer_pubkey: str) -> bool:
     """Verify an event's signature against a given public key."""
     canonical = canonical_serialise(
         event["type"],
@@ -54,7 +66,7 @@ def verify_event_signature(event: dict, signer_pubkey: str) -> bool:
     return crypto.verify(signer_pubkey, event["sig"], canonical_hash)
 
 
-def verify_event_id(event: dict) -> bool:
+def verify_event_id(event: Event) -> bool:
     """Verify that an event's id matches its canonical serialisation hash."""
     canonical = canonical_serialise(
         event["type"],
@@ -67,7 +79,7 @@ def verify_event_id(event: dict) -> bool:
     return compute_event_id(canonical) == event["id"]
 
 
-def _verify_event_integrity(event: dict) -> tuple[bool, str]:
+def _verify_event_integrity(event: Event) -> tuple[bool, str]:
     """Serialize once and verify both ID and signature. Internal helper."""
     canonical = canonical_serialise(
         event["type"],
@@ -88,7 +100,7 @@ def _verify_event_integrity(event: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-def verify_event(event: dict) -> tuple[bool, str]:
+def verify_event(event: Event) -> tuple[bool, str]:
     """Full event verification. Returns (valid, reason)."""
     required = [
         "id",
@@ -107,7 +119,7 @@ def verify_event(event: dict) -> tuple[bool, str]:
     return _verify_event_integrity(event)
 
 
-def verify_event_authorization(event: dict, state: GroupState) -> tuple[bool, str]:
+def verify_event_authorization(event: Event, state: GroupState) -> tuple[bool, str]:
     """Check if the event author is authorized to post this event type.
 
     Args:
@@ -159,7 +171,7 @@ def _build_event(
     content: Any,
     signer_private_key: str,
     ts: int | None = None,
-) -> dict:
+) -> Event:
     """Build, sign, and return a complete event dict."""
     if ts is None:
         ts = int(time.time())
@@ -189,7 +201,7 @@ def create_group_genesis(
     description: str = "",
     public: bool = True,
     relays: list[str] | None = None,
-) -> dict:
+) -> Event:
     """Create a group_genesis event. Signed with group private key."""
     group_pubkey = crypto.public_key_from_private(group_privkey)
     content = {
@@ -216,7 +228,7 @@ def create_message(
     author_privkey: str,
     content: str,
     parents: list[str],
-) -> dict:
+) -> Event:
     """Create a message event."""
     return _build_event(
         "message",
@@ -234,7 +246,7 @@ def create_group_invite(
     author_privkey: str,
     invitee: str,
     parents: list[str],
-) -> dict:
+) -> Event:
     """Create a group_invite event."""
     content = {"invitee": invitee, "role": "member"}
     return _build_event(
@@ -252,7 +264,7 @@ def create_group_join(
     author_hex: str,
     author_privkey: str,
     parents: list[str],
-) -> dict:
+) -> Event:
     """Create a group_join event. Signed by the user themselves."""
     return _build_event(
         "group_join",
@@ -269,7 +281,7 @@ def create_group_leave(
     author_hex: str,
     author_privkey: str,
     parents: list[str],
-) -> dict:
+) -> Event:
     """Create a group_leave event. Signed by the user themselves."""
     return _build_event(
         "group_leave",
@@ -287,7 +299,7 @@ def create_group_kick(
     author_privkey: str,
     target: str,
     parents: list[str],
-) -> dict:
+) -> Event:
     """Create a group_kick event."""
     content = {"target": target}
     return _build_event(
@@ -306,7 +318,7 @@ def create_mod_add(
     author_privkey: str,
     target: str,
     parents: list[str],
-) -> dict:
+) -> Event:
     """Create a mod_add event."""
     content = {"target": target}
     return _build_event(
@@ -325,7 +337,7 @@ def create_mod_remove(
     author_privkey: str,
     target: str,
     parents: list[str],
-) -> dict:
+) -> Event:
     """Create a mod_remove event."""
     content = {"target": target}
     return _build_event(
