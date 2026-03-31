@@ -9,8 +9,7 @@ from pathlib import Path
 import websockets
 import click
 
-from .crypto import verify as verify_sig
-from .events import canonical_serialise, verify_event_id
+from .events import _verify_event_integrity
 
 
 def display_event(event: dict, count: int) -> None:
@@ -113,22 +112,14 @@ class RelayServer:
 
     def store_event(self, event: dict) -> tuple[bool, str]:
         """Validate and store an event. Returns (success, reason)."""
-        if not verify_event_id(event):
-            return False, "invalid event id"
+        required = ["id", "type", "group", "author", "parents", "content", "ts", "sig"]
+        for field in required:
+            if field not in event:
+                return False, f"missing field: {field}"
 
-        # Genesis is signed with group key, all others with author key
-        signer = event["group"] if event["type"] == "group_genesis" else event["author"]
-
-        canonical = canonical_serialise(
-            event["type"],
-            event["group"],
-            event["author"],
-            event["parents"],
-            event["content"],
-            event["ts"],
-        )
-        if not verify_sig(signer, event["sig"], canonical):
-            return False, "invalid signature"
+        ok, reason = _verify_event_integrity(event)
+        if not ok:
+            return False, reason
 
         # Non-genesis events must have at least one parent
         if event["type"] != "group_genesis":
