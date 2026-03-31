@@ -9,7 +9,7 @@ from pathlib import Path
 import websockets
 import click
 
-from .events import _verify_event_integrity
+from .events import Event, _verify_event_integrity
 
 
 def display_event(event: dict, count: int) -> None:
@@ -110,7 +110,7 @@ class RelayServer:
         with open(events_file, "w") as f:
             json.dump(events, f, indent=2)
 
-    def store_event(self, event: dict) -> tuple[bool, str]:
+    def store_event(self, event: Event) -> tuple[bool, str]:
         """Validate and store an event. Returns (success, reason)."""
         required = ["id", "type", "group", "author", "parents", "content", "ts", "sig"]
         for field in required:

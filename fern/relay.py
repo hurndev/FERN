@@ -11,6 +11,8 @@ from typing import Callable
 
 import websockets
 
+from .events import Event
+
 
 class RelayClient:
     """WebSocket client for a single relay URL.
@@ -228,7 +230,7 @@ class RelayClient:
                     )
         return []
 
-    async def publish(self, event: dict) -> dict | None:
+    async def publish(self, event: Event) -> dict | None:
         """Publish an event and wait for relay response. Returns response dict or None."""
         if self.ws and self.connected:
             try:
@@ -358,7 +360,7 @@ class RelayClient:
     @classmethod
     async def fetch_events(
         cls, relay_url: str, group_pubkey: str, since: int = 0
-    ) -> list[dict]:
+    ) -> list[Event]:
         """Fetch all events from a relay since timestamp. Returns list of events."""
         events = []
         try:
@@ -383,7 +385,7 @@ class RelayClient:
         return events
 
     @classmethod
-    async def publish(cls, relay_url: str, event: dict) -> dict | None:
+    async def publish(cls, relay_url: str, event: Event) -> dict | None:
         """Publish an event to a relay. Returns response dict or None."""
         try:
             async with asyncio.timeout(1.5):

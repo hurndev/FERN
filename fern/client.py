@@ -12,6 +12,7 @@ import websockets
 
 from . import crypto
 from .events import (
+    Event,
     create_group_genesis,
     create_message,
     create_group_invite,
@@ -55,7 +56,7 @@ def get_canonical_relays(
     return list(BOOTSTRAP_RELAYS)
 
 
-def validate_genesis(event: dict) -> tuple[bool, str]:
+def validate_genesis(event: Event) -> tuple[bool, str]:
     """Validate a genesis event. Returns (valid, reason)."""
     if not event:
         return False, "no event"
@@ -96,7 +97,7 @@ async def fetch_and_validate_events(
     group_pubkey: str,
     since: int = 0,
     skip_genesis_validation: bool = False,
-) -> tuple[dict[str, dict], dict[str, set[str]], list[str], int]:
+) -> tuple[dict[str, Event], dict[str, set[str]], list[str], int]:
     """Fetch events from multiple relays in parallel and validate them.
 
     Args:
@@ -111,7 +112,7 @@ async def fetch_and_validate_events(
         - good_relays: list of relays that returned valid genesis
         - invalid_count: number of invalid events discarded
     """
-    all_validated: dict[str, dict] = {}
+    all_validated: dict[str, Event] = {}
     relay_event_ids: dict[str, set[str]] = {}
     good_relays: list[str] = []
     invalid_count = 0
@@ -471,7 +472,7 @@ async def subscribe_group(dag: EventDAG, relay_urls: list[str], callback=None) -
     await asyncio.gather(*[sub_one(url) for url in relay_urls])
 
 
-def format_event(event: dict) -> str:
+def format_event(event: Event) -> str:
     """Format an event for display."""
     etype = event["type"]
     author = event["author"][:12]

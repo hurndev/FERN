@@ -10,6 +10,7 @@ import click
 from aiohttp import web, WSMsgType
 
 from .dag import ClientStorage
+from .events import Event
 from .events import verify_event
 from .relay import RelayClient
 from .storage import resolve_fern_dir
@@ -209,7 +210,7 @@ class ChatSession:
             for conn in self.relay_connections.values():
                 await conn.sync(decision.since)
 
-    async def _on_relay_event(self, event: dict, relay_url: str):
+    async def _on_relay_event(self, event: Event, relay_url: str):
         if self.group_pubkey:
             dag = self.storage.get_group_dag(self.group_pubkey)
             ok, reason = dag.add_event(event)

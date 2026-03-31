@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from .events import verify_event, verify_event_authorization, GroupState
+from .events import Event, verify_event, verify_event_authorization, GroupState
 
 
 class EventDAG:
@@ -13,7 +13,7 @@ class EventDAG:
         self.group_pubkey = group_pubkey
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.events: dict[str, dict] = {}  # id -> event
+        self.events: dict[str, Event] = {}  # id -> event
         self.children: dict[str, set[str]] = {}  # id -> set of child ids
         self._state_cache: GroupState | None = None
         self._state_event_count: int = 0
@@ -54,7 +54,7 @@ class EventDAG:
 
     def add_event(
         self,
-        event: dict,
+        event: Event,
         skip_verify: bool = False,
         skip_save: bool = False,
         skip_auth: bool = False,
@@ -94,7 +94,7 @@ class EventDAG:
             self._save()
         return True, "ok"
 
-    def get_event(self, event_id: str) -> dict | None:
+    def get_event(self, event_id: str) -> Event | None:
         return self.events.get(event_id)
 
     def get_tips(self) -> list[str]:
@@ -112,11 +112,11 @@ class EventDAG:
             referenced.update(event.get("parents", []))
         return referenced - set(self.events.keys())
 
-    def get_all_events(self) -> list[dict]:
+    def get_all_events(self) -> list[Event]:
         """Get all events sorted by timestamp then id."""
         return sorted(self.events.values(), key=lambda e: (e["ts"], e["id"]))
 
-    def get_events_since(self, since_ts: int) -> list[dict]:
+    def get_events_since(self, since_ts: int) -> list[Event]:
         """Get all events with ts > since_ts."""
         return sorted(
             [e for e in self.events.values() if e["ts"] > since_ts],
