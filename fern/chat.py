@@ -107,20 +107,16 @@ class ChatSession:
                 result = await self.relay_connections[relay_url].publish(event)
                 published = result.get("type") == "ok" if result else False
             elif relay_url:
-                # Specific relay requested but not connected - this is a definite failure
                 published = False
             else:
-                # No specific relay - publish to all and count successes
-                success_count = 0
-                fail_count = 0
-                for conn in self.relay_connections.values():
-                    result = await conn.publish(event)
-                    if result and result.get("type") == "ok":
-                        success_count += 1
-                    else:
-                        fail_count += 1
-                # Consider it a success if at least one relay accepted
-                published = success_count > 0
+                results = await asyncio.gather(
+                    *(conn.publish(event) for conn in self.relay_connections.values()),
+                    return_exceptions=True,
+                )
+                published = any(
+                    r and not isinstance(r, Exception) and r.get("type") == "ok"
+                    for r in results
+                )
 
             if published:
                 dag = self.storage.get_group_dag(event["group"])
