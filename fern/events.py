@@ -67,9 +67,29 @@ def verify_event_id(event: dict) -> bool:
     return compute_event_id(canonical) == event["id"]
 
 
+def _verify_event_integrity(event: dict) -> tuple[bool, str]:
+    """Serialize once and verify both ID and signature. Internal helper."""
+    canonical = canonical_serialise(
+        event["type"],
+        event["group"],
+        event["author"],
+        event["parents"],
+        event["content"],
+        event["ts"],
+    )
+    if compute_event_id(canonical) != event["id"]:
+        return False, "id mismatch"
+
+    signer = event["group"] if event["type"] == "group_genesis" else event["author"]
+    canonical_hash = hashlib.sha256(canonical).digest()
+    if not crypto.verify(signer, event["sig"], canonical_hash):
+        return False, "invalid signature"
+
+    return True, "ok"
+
+
 def verify_event(event: dict) -> tuple[bool, str]:
     """Full event verification. Returns (valid, reason)."""
-    # Check required fields
     required = [
         "id",
         "type",
@@ -84,21 +104,7 @@ def verify_event(event: dict) -> tuple[bool, str]:
         if field not in event:
             return False, f"missing field: {field}"
 
-    # Verify ID
-    if not verify_event_id(event):
-        return False, "id mismatch"
-
-    # Determine signer pubkey
-    if event["type"] == "group_genesis":
-        signer = event["group"]
-    else:
-        signer = event["author"]
-
-    # Verify signature
-    if not verify_event_signature(event, signer):
-        return False, "invalid signature"
-
-    return True, "ok"
+    return _verify_event_integrity(event)
 
 
 def verify_event_authorization(event: dict, state: GroupState) -> tuple[bool, str]:
