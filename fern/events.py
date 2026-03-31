@@ -1,5 +1,6 @@
 """Event creation, canonical serialisation, and group state derivation for FERN protocol."""
 
+import hashlib
 import json
 import time
 from typing import Any
@@ -34,8 +35,9 @@ def compute_event_id(canonical: bytes) -> str:
 
 
 def sign_event(canonical: bytes, private_key_hex: str) -> str:
-    """Sign canonical serialisation with Ed25519 private key."""
-    return crypto.sign(private_key_hex, canonical)
+    """Sign SHA-256 hash of canonical serialisation with Ed25519 private key."""
+    canonical_hash = hashlib.sha256(canonical).digest()
+    return crypto.sign(private_key_hex, canonical_hash)
 
 
 def verify_event_signature(event: dict, signer_pubkey: str) -> bool:
@@ -48,7 +50,8 @@ def verify_event_signature(event: dict, signer_pubkey: str) -> bool:
         event["content"],
         event["ts"],
     )
-    return crypto.verify(signer_pubkey, event["sig"], canonical)
+    canonical_hash = hashlib.sha256(canonical).digest()
+    return crypto.verify(signer_pubkey, event["sig"], canonical_hash)
 
 
 def verify_event_id(event: dict) -> bool:

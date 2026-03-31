@@ -583,11 +583,6 @@ function bytesToHex(bytes) {
 
 function utf8Encode(str) { return new TextEncoder().encode(str); }
 
-async function sha256Hex(data) {
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return bytesToHex(new Uint8Array(hash));
-}
-
 async function generateKeypair() {
   const priv = ed.utils.randomPrivateKey();
   const pub = await ed.getPublicKey(priv);
@@ -639,8 +634,9 @@ function canonicalSerialise(eventType, group, author, parents, content, ts) {
 async function buildEvent(eventType, groupHex, authorHex, privHex, parents, content, ts) {
   if (!ts) ts = Math.floor(Date.now() / 1000);
   const canonical = canonicalSerialise(eventType, groupHex, authorHex, parents, content, ts);
-  const id = await sha256Hex(canonical);
-  const sig = await signMessage(privHex, canonical);
+  const hashBytes = await crypto.subtle.digest('SHA-256', canonical);
+  const id = bytesToHex(new Uint8Array(hashBytes));
+  const sig = await signMessage(privHex, new Uint8Array(hashBytes));
   return { id, type: eventType, group: groupHex, author: authorHex, parents: [...parents].sort(), content, ts, sig };
 }
 
