@@ -9,7 +9,7 @@ import click
 
 from .events import verify_event_id, verify_event_signature
 from .dag import EventDAG
-from .relay import fetch_event, fetch_events, fetch_publish, fetch_summary
+from .relay import fetch_event, fetch_events, publish as fetch_publish, fetch_summary
 from .config import BOOTSTRAP_RELAYS
 
 

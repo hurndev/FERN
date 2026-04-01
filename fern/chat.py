@@ -97,13 +97,26 @@ class ChatSession:
     async def _handle_publish(self, msg: dict):
         event = msg["event"]
         target_relay = msg.get("relay")
+        mode = msg.get("mode", "both")
         await self.log(
-            "publish", f"Publishing {event['type']} (id={event['id'][:12]}...)"
+            "publish",
+            f"Publishing {event['type']} (id={event['id'][:12]}..., mode={mode})",
         )
 
         valid, reason = verify_event(event)
         if not valid:
             await self.error(f"Event rejected: {reason}", event["id"])
+            return
+
+        if mode == "local_only":
+            dag = self.storage.get_group_dag(event["group"])
+            ok, reason = dag.add_event(event)
+            if ok:
+                await self.send({"type": "ok", "id": event["id"]})
+            else:
+                await self.error(
+                    f"Failed to store event locally: {reason}", event["id"]
+                )
             return
 
         relay_urls = [target_relay] if target_relay else self.relay_urls
@@ -128,10 +141,17 @@ class ChatSession:
 
         published = any(isinstance(r, dict) and r.get("type") == "ok" for r in results)
 
+        if mode == "relay_only":
+            if published:
+                await self.send({"type": "ok", "id": event["id"]})
+            else:
+                await self.error("Failed to publish.", event["id"])
+            return
+
         if published:
             dag = self.storage.get_group_dag(event["group"])
             ok, reason = dag.add_event(event)
-            if ok:
+            if ok or reason == "duplicate":
                 await self.send({"type": "ok", "id": event["id"]})
             else:
                 await self.error(f"Failed to store event: {reason}", event["id"])
