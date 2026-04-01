@@ -389,7 +389,7 @@ a:hover { text-decoration: underline; }
   margin-bottom: 3px;
   margin-top: 8px;
 }
-.modal input, .modal textarea {
+.modal input, .modal textarea, .modal select {
   width: 100%;
   background: #0a0a0e;
   border: 1px solid #2a2a3a;
@@ -399,6 +399,8 @@ a:hover { text-decoration: underline; }
   font-size: 12px;
   outline: none;
 }
+.modal select { cursor: pointer; }
+.modal select option { background: #0a0a0e; }
 .modal input:focus, .modal textarea:focus { border-color: #d4aa70; }
 .modal textarea { resize: vertical; min-height: 40px; }
 .modal .modal-actions {
@@ -483,6 +485,7 @@ a:hover { text-decoration: underline; }
         <button class="join-btn" id="join-btn" onclick="joinCurrentGroup()" style="display:none">Join Group</button>
         <button class="leave-btn" id="leave-btn" onclick="leaveCurrentGroup()" style="display:none">Leave Group</button>
         <button class="manage-btn" id="manage-btn" onclick="showManageGroup()">Manage Group</button>
+        <button class="manage-btn" onclick="showCustomEvent()">Custom Event</button>
       </div>
     </div>
     <div id="messages">
@@ -560,6 +563,58 @@ ws://localhost:8788</textarea>
       <button onclick="closeModals()">Cancel</button>
       <button class="primary" onclick="saveGroupMetadata()">Save Name/Desc</button>
       <button class="primary" onclick="saveGroupRelays()">Save Relays</button>
+    </div>
+  </div>
+</div>
+
+<!-- Custom Event Modal -->
+<div class="modal-overlay hidden" id="modal-custom-event">
+  <div class="modal" style="max-width:540px">
+    <h3>Custom Event (Testing)</h3>
+
+    <label>Event Type</label>
+    <select id="custom-type" onchange="updateCustomFields()">
+      <option value="message">message</option>
+      <option value="group_genesis">group_genesis</option>
+      <option value="group_invite">group_invite</option>
+      <option value="group_join">group_join</option>
+      <option value="group_leave">group_leave</option>
+      <option value="group_kick">group_kick</option>
+      <option value="mod_add">mod_add</option>
+      <option value="mod_remove">mod_remove</option>
+      <option value="relay_update">relay_update</option>
+      <option value="group_metadata">group_metadata</option>
+    </select>
+
+    <label>Parents</label>
+    <select id="custom-parents-mode" onchange="toggleCustomParents()" style="width:auto;display:inline-block">
+      <option value="auto">Auto (current tips)</option>
+      <option value="none">None (empty parents)</option>
+      <option value="custom">Custom IDs</option>
+    </select>
+    <textarea id="custom-parents" rows="2" placeholder="Comma-separated event IDs" style="display:none;margin-top:4px"></textarea>
+
+    <label>Timestamp</label>
+    <div style="display:flex;gap:6px;align-items:center">
+      <select id="custom-ts-mode" onchange="toggleCustomTs()" style="width:auto;flex-shrink:0">
+        <option value="now">Now</option>
+        <option value="custom">Custom</option>
+      </select>
+      <input type="number" id="custom-ts" placeholder="Unix timestamp (e.g. 0 or 9999999999)" style="display:none">
+    </div>
+
+    <label>Content (JSON or plain string for message)</label>
+    <textarea id="custom-content" rows="4" placeholder='{}'></textarea>
+
+    <label style="margin-bottom:0">Mode</label>
+    <div style="font-size:11px;color:#606060;margin-bottom:4px">
+      Publish+Local = relay+disk &nbsp;|&nbsp; Publish Only = relay, skip disk &nbsp;|&nbsp; Local Only = disk, skip relay
+    </div>
+    <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
+      <button onclick="closeModals()">Cancel</button>
+      <button class="primary" onclick="sendCustomEvent('both')">Publish + Local</button>
+      <button class="primary" onclick="sendCustomEvent('relay_only')">Publish Only</button>
+      <button class="primary" onclick="sendCustomEvent('local_only')">Local Only</button>
     </div>
   </div>
 </div>
@@ -731,6 +786,7 @@ function connectWS() {
       if (msg.id && pendingMessages.has(msg.id)) {
         pendingMessages.delete(msg.id);
         savePendingToStorage();
+        renderMessages();
       }
     } else if (msg.type === 'sync_complete') {
       handleSyncComplete(msg.relay);
@@ -1461,6 +1517,106 @@ async function saveGroupRelays() {
   handleIncomingEvent(event, 'local');
 }
 
+// =========================================================================
+// Custom Event Builder (Testing)
+// =========================================================================
+
+function showCustomEvent() {
+  if (!keys) { addLog('error', 'Generate an identity first'); return; }
+  const type = document.getElementById('custom-type').value;
+  if (type !== 'group_genesis' && !currentGroup) { addLog('error', 'Select a group first'); return; }
+  document.getElementById('modal-custom-event').classList.remove('hidden');
+  updateCustomFields();
+}
+
+function updateCustomFields() {
+  const type = document.getElementById('custom-type').value;
+  const contentEl = document.getElementById('custom-content');
+  const pub = keys ? keys.pub : '<pubkey>';
+  const templates = {
+    'message': '"hello"',
+    'group_genesis': `{"name":"Test","description":"","public":true,"founder":"${pub}","mods":["${pub}"],"relays":["ws://localhost:8787"]}`,
+    'group_invite': `{"invitee":"<pubkey>","role":"member"}`,
+    'group_join': '{}',
+    'group_leave': '{}',
+    'group_kick': '{"target":"<pubkey>"}',
+    'mod_add': '{"target":"<pubkey>"}',
+    'mod_remove': '{"target":"<pubkey>"}',
+    'relay_update': '{"relays":["ws://localhost:8787"]}',
+    'group_metadata': '{"name":"New Name","description":"New desc"}',
+  };
+  contentEl.value = templates[type] || '{}';
+}
+
+function toggleCustomParents() {
+  const mode = document.getElementById('custom-parents-mode').value;
+  document.getElementById('custom-parents').style.display = mode === 'custom' ? '' : 'none';
+}
+
+function toggleCustomTs() {
+  const mode = document.getElementById('custom-ts-mode').value;
+  document.getElementById('custom-ts').style.display = mode === 'custom' ? '' : 'none';
+}
+
+async function sendCustomEvent(mode) {
+  if (!keys) return;
+  const type = document.getElementById('custom-type').value;
+  if (type !== 'group_genesis' && !currentGroup) return;
+  closeModals();
+
+  const parentsMode = document.getElementById('custom-parents-mode').value;
+  const tsMode = document.getElementById('custom-ts-mode').value;
+  const contentStr = document.getElementById('custom-content').value.trim();
+
+  let parents = [];
+  if (parentsMode === 'auto') {
+    parents = getTips(events);
+  } else if (parentsMode === 'custom') {
+    parents = document.getElementById('custom-parents').value.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  let ts = null;
+  if (tsMode === 'custom') {
+    ts = parseInt(document.getElementById('custom-ts').value) || 0;
+  }
+
+  let content;
+  if (type === 'message') {
+    try { content = JSON.parse(contentStr); } catch { content = contentStr || ''; }
+  } else {
+    try { content = JSON.parse(contentStr); } catch {
+      addLog('error', 'Invalid JSON content');
+      return;
+    }
+  }
+
+  addLog('browser', `Building custom ${type} event (mode: ${mode})...`);
+
+  let event;
+  if (type === 'group_genesis') {
+    const groupKeys = await generateKeypair();
+    event = await buildEvent('group_genesis', groupKeys.pub, keys.pub, groupKeys.priv, parents, content, ts);
+    addLog('browser', `Genesis group key: ${groupKeys.pub.slice(0, 16)}...`);
+  } else {
+    event = await buildEvent(type, currentGroup, keys.pub, keys.priv, parents, content, ts);
+  }
+
+  addLog('browser', `Custom event created: ${event.id.slice(0, 12)}...`);
+
+  if (mode === 'relay_only') {
+    addLog('browser', `Publishing to relay only (not storing locally)`);
+    wsSend({ action: 'publish', event, mode: 'relay_only' });
+  } else if (mode === 'local_only') {
+    addLog('browser', `Storing locally only (not publishing to relay)`);
+    wsSend({ action: 'publish', event, mode: 'local_only' });
+    handleIncomingEvent(event, 'local');
+  } else {
+    addLog('browser', `Publishing to relay + storing locally`);
+    wsSend({ action: 'publish', event, mode: 'both' });
+    handleIncomingEvent(event, 'local');
+  }
+}
+
 // Expose globals
 window.selectGroup = selectGroup;
 window.handleInputKey = handleInputKey;
@@ -1479,6 +1635,11 @@ window.closeModals = closeModals;
 window.clearLog = clearLog;
 window.retryMessage = retryMessage;
 window.deleteMessage = deleteMessage;
+window.showCustomEvent = showCustomEvent;
+window.updateCustomFields = updateCustomFields;
+window.toggleCustomParents = toggleCustomParents;
+window.toggleCustomTs = toggleCustomTs;
+window.sendCustomEvent = sendCustomEvent;
 
 // =========================================================================
 // Boot

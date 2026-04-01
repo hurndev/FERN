@@ -15,8 +15,9 @@ from pathlib import Path
 import click
 
 from . import crypto
-from .relay import fetch_publish
+from .relay import publish as relay_publish
 from .config import BOOTSTRAP_RELAYS
+from .events import _build_event
 
 
 # =============================================================================
@@ -189,7 +190,7 @@ def multi_send(
         )
 
         try:
-            resp = await fetch_publish(relay, event)
+            resp = await relay_publish(relay, event)
             return {
                 "user": user_name,
                 "success": resp.get("type") == "ok" if resp else False,
@@ -321,6 +322,196 @@ def watch(group_pubkey: str, relay: str):
             click.echo("\nStopped.")
         except Exception as e:
             click.echo(f"Error: {e}", err=True)
+
+    asyncio.run(run())
+
+
+# =============================================================================
+# Custom event builder
+# =============================================================================
+
+
+EVENT_TYPES = [
+    "message",
+    "group_genesis",
+    "group_invite",
+    "group_join",
+    "group_leave",
+    "group_kick",
+    "mod_add",
+    "mod_remove",
+    "relay_update",
+    "group_metadata",
+]
+
+
+@test_cli.command(name="custom-event")
+@click.argument("group_pubkey")
+@click.option(
+    "--type",
+    "event_type",
+    type=click.Choice(EVENT_TYPES),
+    required=True,
+    help="Event type",
+)
+@click.option(
+    "--content",
+    default=None,
+    help='Event content as JSON (e.g. \'{"target":"abc..."}\') or plain string for message type',
+)
+@click.option(
+    "--target",
+    default=None,
+    help='Shorthand: sets content to {"target": VALUE} for kick/mod_add/mod_remove or {"invitee": VALUE} for invite',
+)
+@click.option(
+    "--parents",
+    default="auto",
+    help="Parents: 'auto' (current tips), 'none' (empty), or comma-separated event IDs",
+)
+@click.option(
+    "--ts", default=None, type=int, help="Custom Unix timestamp (default: now)"
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["both", "relay-only", "local-only"]),
+    default="both",
+    help="Publish mode: both=relay+local, relay-only=skip local DAG, local-only=skip relay",
+)
+@click.option(
+    "--relay", default=None, help="Relay URL (default: first bootstrap relay)"
+)
+@click.option(
+    "--user", default=None, help="Test user name (looks up key in /tmp/<name>/.fern)"
+)
+def custom_event(
+    group_pubkey: str,
+    event_type: str,
+    content: str | None,
+    target: str | None,
+    parents: str,
+    ts: int | None,
+    mode: str,
+    relay: str | None,
+    user: str | None,
+):
+    """Build and publish a custom event with full control over all fields.
+
+    Useful for testing edge cases: missing parents, bogus timestamps,
+    events published to relay only (not stored locally), etc.
+
+    Uses the test user's keypair from FERN_TEST_HOME or --user.
+
+    Examples:
+
+        # Normal message, auto parents and timestamp
+        fern test custom-event <group> --type message --content "hello"
+
+        # Kick a user without adding to local DAG
+        fern test custom-event <group> --type group_kick --target <pubkey> --mode relay-only
+
+        # Message with timestamp=0 to test conflict resolution
+        fern test custom-event <group> --type message --content "first!" --ts 0
+
+        # Event with no parents (creates DAG branch)
+        fern test custom-event <group> --type message --content "orphan" --parents none
+
+        # Custom parents by ID
+        fern test custom-event <group> --type message --content "merge" --parents id1,id2,id3
+    """
+    from .dag import EventDAG
+
+    if not relay:
+        relay = BOOTSTRAP_RELAYS[0]
+
+    user_home = os.environ.get("FERN_TEST_HOME", "")
+    if user:
+        user_home = str(Path("/tmp") / user)
+    if not user_home or not Path(user_home).exists():
+        click.echo("Error: No test user. Set FERN_TEST_HOME or use --user.", err=True)
+        return
+
+    fern_dir = Path(user_home) / ".fern"
+    key_path = fern_dir / "keys" / "user.pem"
+    if not key_path.exists():
+        click.echo(f"Error: No keypair at {key_path}", err=True)
+        return
+
+    privkey = crypto.load_private_key(str(key_path))
+    pubkey = crypto.public_key_from_private(privkey)
+
+    storage_dir = fern_dir / "groups"
+    dag = EventDAG(group_pubkey, str(storage_dir))
+
+    if content is None and target is not None:
+        if event_type == "group_invite":
+            content = json.dumps({"invitee": target, "role": "member"})
+        else:
+            content = json.dumps({"target": target})
+
+    if content is None:
+        if event_type == "message":
+            content = "test message"
+        else:
+            content = "{}"
+
+    try:
+        parsed_content = json.loads(content)
+    except json.JSONDecodeError:
+        parsed_content = content
+
+    if parents == "auto":
+        parent_ids = dag.get_tips()
+    elif parents == "none":
+        parent_ids = []
+    else:
+        parent_ids = [p.strip() for p in parents.split(",") if p.strip()]
+
+    event = _build_event(
+        event_type=event_type,
+        group_hex=group_pubkey,
+        author_hex=pubkey,
+        parents=parent_ids,
+        content=parsed_content,
+        signer_private_key=privkey,
+        ts=ts,
+    )
+
+    click.echo(f"Event ID:    {event['id']}")
+    click.echo(f"Type:        {event['type']}")
+    click.echo(f"Author:      {event['author'][:24]}...")
+    click.echo(f"Parents:     {event['parents']}")
+    click.echo(f"Timestamp:   {event['ts']}")
+    click.echo(f"Content:     {json.dumps(event['content'])[:80]}")
+    click.echo(f"Mode:        {mode}")
+
+    async def run():
+        relay_ok = False
+
+        if mode in ("both", "relay-only"):
+            try:
+                resp = await relay_publish(relay, event)
+                if resp and resp.get("type") == "ok":
+                    click.echo(f"Relay:       published to {relay}")
+                    relay_ok = True
+                else:
+                    click.echo(f"Relay:       FAILED ({resp})", err=True)
+            except Exception as e:
+                click.echo(f"Relay:       ERROR ({e})", err=True)
+
+        if mode in ("both", "local-only"):
+            ok, reason = dag.add_event(event)
+            if ok:
+                click.echo(f"Local DAG:   stored ({dag.count} events)")
+            else:
+                click.echo(f"Local DAG:   FAILED ({reason})", err=True)
+
+        if mode == "relay-only":
+            click.echo(f"Local DAG:   skipped (relay-only mode)")
+        if mode == "local-only":
+            click.echo(f"Relay:       skipped (local-only mode)")
+
+        click.echo(f"Sig:         {event['sig'][:24]}...")
 
     asyncio.run(run())
 

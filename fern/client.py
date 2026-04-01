@@ -31,7 +31,7 @@ from .dag import ClientStorage, EventDAG
 from .relay import (
     fetch_events,
     fetch_genesis,
-    fetch_publish,
+    publish as fetch_publish,
     fetch_summary,
     subscribe,
 )
