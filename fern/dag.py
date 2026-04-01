@@ -150,9 +150,12 @@ class ClientStorage:
         self.groups_dir.mkdir(exist_ok=True)
         self.keys_dir = self.base_dir / "keys"
         self.keys_dir.mkdir(exist_ok=True)
+        self._dag_cache: dict[str, EventDAG] = {}
 
     def get_group_dag(self, group_pubkey: str) -> EventDAG:
-        return EventDAG(group_pubkey, str(self.groups_dir))
+        if group_pubkey not in self._dag_cache:
+            self._dag_cache[group_pubkey] = EventDAG(group_pubkey, str(self.groups_dir))
+        return self._dag_cache[group_pubkey]
 
     def list_groups(self) -> list[str]:
         """List all group pubkeys we have local data for."""
