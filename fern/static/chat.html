@@ -728,14 +728,9 @@ function connectWS() {
         renderMessages();
       }
     } else if (msg.type === 'ok') {
-      // published successfully - check if it's a pending message
       if (msg.id && pendingMessages.has(msg.id)) {
         pendingMessages.delete(msg.id);
         savePendingToStorage();
-        // Reload events from server to get the confirmed message
-        if (currentGroup) {
-          wsSend({ action: 'load_local', group: currentGroup });
-        }
       }
     } else if (msg.type === 'sync_complete') {
       handleSyncComplete(msg.relay);
