@@ -16,7 +16,10 @@ logger = logging.getLogger(__name__)
 from .dag import ClientStorage
 from .events import Event
 from .events import verify_event
-from .relay import RelayClient
+from .relay import fetch_events
+from .relay import fetch_summary
+from .relay import publish as relay_publish
+from .relay import subscribe as relay_subscribe
 from .storage import resolve_fern_dir
 from .sync import decide_sync_action
 
@@ -27,8 +30,9 @@ class ChatSession:
     def __init__(self, ws: web.WebSocketResponse, storage: ClientStorage):
         self.ws = ws
         self.storage = storage
-        self.relay_connections: dict[str, RelayClient] = {}
+        self.relay_urls: list[str] = []
         self.group_pubkey: str | None = None
+        self._subscribe_tasks: list[asyncio.Task] = []
 
     async def send(self, data: dict):
         try:
@@ -62,111 +66,19 @@ class ChatSession:
     async def handle_message(self, msg: dict):
         action = msg.get("action")
 
-        if action == "connect_relay":
-            relay_url = msg["relay"]
-            group_pubkey = msg["group"]
-            self.group_pubkey = group_pubkey
-            if relay_url in self.relay_connections:
-                await self.relay_connections[relay_url].close()
-            conn = RelayClient(relay_url, group_pubkey)
-            self.relay_connections[relay_url] = conn
-
-            async def on_sync_complete(url):
-                await self.log("sync", f"Sync complete from {url}")
-                await self.send({"type": "sync_complete", "relay": url})
-
-            conn.set_on_sync_complete(on_sync_complete)
-            await conn.connect(
-                on_event=self._on_relay_event,
-                on_log=self.log,
-                subscribe=msg.get("subscribe", True),
-            )
-
-        elif action == "disconnect_relay":
-            relay_url = msg["relay"]
-            if relay_url in self.relay_connections:
-                await self.relay_connections[relay_url].close()
-                del self.relay_connections[relay_url]
-                await self.log("relay", f"Disconnected from {relay_url}")
+        if action == "set_relays":
+            self.relay_urls = msg["relays"]
+            self.group_pubkey = msg.get("group")
+            await self.log("relay", f"Relays set: {', '.join(self.relay_urls)}")
 
         elif action == "publish":
-            event = msg["event"]
-            relay_url = msg.get("relay")
-            await self.log(
-                "publish", f"Publishing {event['type']} (id={event['id'][:12]}...)"
-            )
-
-            valid, reason = verify_event(event)
-            if not valid:
-                await self.error(f"Event rejected: {reason}", event["id"])
-                return
-
-            if not self.relay_connections:
-                await self.error(
-                    "No relay connected. Your message has been saved in browser.",
-                    event["id"],
-                )
-                return
-
-            if relay_url and relay_url in self.relay_connections:
-                try:
-                    result = await self.relay_connections[relay_url].publish(event)
-                    published = result.get("type") == "ok" if result else False
-                    if not result:
-                        await self.log(
-                            "error",
-                            f"publish({relay_url}) returned None — connection may be down",
-                        )
-                except Exception as e:
-                    await self.log(
-                        "error",
-                        f"publish({relay_url}) raised {type(e).__name__}: {e}",
-                    )
-                    published = False
-            elif relay_url:
-                await self.log(
-                    "error",
-                    f"Requested relay {relay_url} not in connections (have: {list(self.relay_connections.keys())})",
-                )
-                published = False
-            else:
-                results = await asyncio.gather(
-                    *(conn.publish(event) for conn in self.relay_connections.values()),
-                    return_exceptions=True,
-                )
-                for conn, r in zip(self.relay_connections.values(), results):
-                    if isinstance(r, Exception):
-                        await self.log(
-                            "error",
-                            f"publish({conn.relay_url}) raised {type(r).__name__}: {r}",
-                        )
-                published = any(
-                    isinstance(r, dict) and r.get("type") == "ok" for r in results
-                )
-
-            if published:
-                dag = self.storage.get_group_dag(event["group"])
-                ok, reason = dag.add_event(event)
-                if ok:
-                    await self.send({"type": "ok", "id": event["id"]})
-                else:
-                    await self.error(f"Failed to store event: {reason}", event["id"])
-            else:
-                await self.error(
-                    "Failed to publish. Your message has been saved in browser.",
-                    event["id"],
-                )
+            await self._handle_publish(msg)
 
         elif action == "sync":
             await self._smart_sync()
 
         elif action == "subscribe":
-            relay_url = msg.get("relay")
-            if relay_url and relay_url in self.relay_connections:
-                await self.relay_connections[relay_url]._send_subscribe()
-            else:
-                for conn in self.relay_connections.values():
-                    await conn._send_subscribe()
+            await self._start_subscriptions()
 
         elif action == "load_local":
             group_pubkey = msg["group"]
@@ -182,41 +94,81 @@ class ChatSession:
                 )
             await self.log("local", f"Loaded {len(events)} events from local cache")
 
-    async def _smart_sync(self):
-        """Decide whether to skip, do incremental, or full sync based on local state and relay summaries."""
-        if not self.group_pubkey:
-            await self.log("error", "No group selected")
+    async def _handle_publish(self, msg: dict):
+        event = msg["event"]
+        target_relay = msg.get("relay")
+        await self.log(
+            "publish", f"Publishing {event['type']} (id={event['id'][:12]}...)"
+        )
+
+        valid, reason = verify_event(event)
+        if not valid:
+            await self.error(f"Event rejected: {reason}", event["id"])
             return
 
-        if not self.relay_connections:
-            await self.log("error", "No relay connections")
+        relay_urls = [target_relay] if target_relay else self.relay_urls
+        if not relay_urls:
+            await self.error(
+                "No relays configured. Your message has been saved in browser.",
+                event["id"],
+            )
+            return
+
+        results = await asyncio.gather(
+            *(relay_publish(url, event) for url in relay_urls),
+            return_exceptions=True,
+        )
+
+        for url, r in zip(relay_urls, results):
+            if isinstance(r, Exception):
+                await self.log(
+                    "error",
+                    f"publish({url}) raised {type(r).__name__}: {r}",
+                )
+
+        published = any(isinstance(r, dict) and r.get("type") == "ok" for r in results)
+
+        if published:
+            dag = self.storage.get_group_dag(event["group"])
+            ok, reason = dag.add_event(event)
+            if ok:
+                await self.send({"type": "ok", "id": event["id"]})
+            else:
+                await self.error(f"Failed to store event: {reason}", event["id"])
+        else:
+            await self.error(
+                "Failed to publish. Your message has been saved in browser.",
+                event["id"],
+            )
+
+    async def _smart_sync(self):
+        if not self.group_pubkey:
+            await self.error("No group selected")
+            return
+
+        if not self.relay_urls:
+            await self.error("No relays configured")
             return
 
         dag = self.storage.get_group_dag(self.group_pubkey)
         local_event_ids = set(dag.events.keys())
         local_latest_ts = max((e["ts"] for e in dag.events.values()), default=0)
 
-        connected = [c for c in self.relay_connections.values() if c.connected]
-        if not connected:
-            wait_tasks = [
-                asyncio.create_task(conn.wait_connected(timeout=2.0))
-                for conn in self.relay_connections.values()
-            ]
-            await asyncio.gather(*wait_tasks)
-            connected = [c for c in self.relay_connections.values() if c.connected]
-
         summaries: dict[str, dict] = {}
-        for conn in connected:
-            s = await conn.summary()
-            if s is not None:
-                summaries[conn.relay_url] = s
+        summary_results = await asyncio.gather(
+            *(fetch_summary(url, self.group_pubkey) for url in self.relay_urls),
+            return_exceptions=True,
+        )
+        for url, s in zip(self.relay_urls, summary_results):
+            if isinstance(s, dict):
+                summaries[url] = s
 
         decision = decide_sync_action(local_event_ids, local_latest_ts, summaries)
 
         if decision.action == "full":
             await self.log("sync", "No local events - full sync required")
-            for conn in self.relay_connections.values():
-                await conn.sync(0)
+            for url in self.relay_urls:
+                await self._sync_one(url, 0)
         elif decision.action == "skip":
             await self.log(
                 "sync",
@@ -226,8 +178,57 @@ class ChatSession:
                 await self.send({"type": "sync_complete", "relay": url})
         else:
             await self.log("sync", f"Incremental sync since={decision.since}")
-            for conn in self.relay_connections.values():
-                await conn.sync(decision.since)
+            for url in self.relay_urls:
+                await self._sync_one(url, decision.since)
+
+    async def _sync_one(self, relay_url: str, since: int):
+        try:
+            events = await fetch_events(relay_url, self.group_pubkey, since)
+            new_count = 0
+            if self.group_pubkey:
+                dag = self.storage.get_group_dag(self.group_pubkey)
+                for event in events:
+                    ok, reason = dag.add_event(event)
+                    if ok:
+                        new_count += 1
+                        await self.send(
+                            {"type": "event", "event": event, "relay": relay_url}
+                        )
+            await self.log("sync", f"Synced {new_count} new events from {relay_url}")
+            await self.send({"type": "sync_complete", "relay": relay_url})
+        except Exception as e:
+            await self.log(
+                "error", f"Sync failed from {relay_url}: {type(e).__name__}: {e}"
+            )
+
+    async def _start_subscriptions(self):
+        for task in self._subscribe_tasks:
+            task.cancel()
+        self._subscribe_tasks.clear()
+
+        if not self.group_pubkey:
+            await self.error("No group selected")
+            return
+
+        for url in self.relay_urls:
+            task = asyncio.create_task(self._subscribe_with_retry(url))
+            self._subscribe_tasks.append(task)
+
+    async def _subscribe_with_retry(self, relay_url: str):
+        while True:
+            try:
+                await relay_subscribe(
+                    relay_url, self.group_pubkey, self._on_relay_event
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                await self.log(
+                    "error",
+                    f"Subscription to {relay_url} disconnected: {type(e).__name__}: {e}",
+                )
+            await self.log("relay", f"Reconnecting to {relay_url} in 60s...")
+            await asyncio.sleep(60)
 
     async def _on_relay_event(self, event: Event, relay_url: str):
         if self.group_pubkey:
@@ -237,7 +238,8 @@ class ChatSession:
                 if reason != "duplicate":
                     eid = event.get("id", "?")[:16]
                     await self.log(
-                        "error", f"Invalid event from {relay_url}: {reason} ({eid}...)"
+                        "error",
+                        f"Invalid event from {relay_url}: {reason} ({eid}...)",
                     )
                 return
         await self.send(
@@ -249,9 +251,11 @@ class ChatSession:
         )
 
     async def close(self):
-        for conn in self.relay_connections.values():
-            await conn.close()
-        self.relay_connections.clear()
+        for task in self._subscribe_tasks:
+            task.cancel()
+        if self._subscribe_tasks:
+            await asyncio.gather(*self._subscribe_tasks, return_exceptions=True)
+        self._subscribe_tasks.clear()
 
 
 async def _safe_handle(session: ChatSession, data: dict):
@@ -325,7 +329,6 @@ class ChatApp:
         return web.json_response(result)
 
     async def handle_get_keys(self, request: web.Request) -> web.Response:
-        """Get or generate user keypair. Returns {pub, priv} or just {pub} if existing."""
         from . import crypto
 
         key_path = self.storage.get_user_key_path()
@@ -339,7 +342,6 @@ class ChatApp:
         return web.json_response({"pub": pubkey, "priv": privkey})
 
     async def handle_post_keys(self, request: web.Request) -> web.Response:
-        """Import a private key from PEM. Body: {priv: pem_string}."""
         from . import crypto
 
         try:
@@ -391,12 +393,10 @@ class ChatApp:
         if not event:
             return web.json_response({"error": "No event provided"}, status=400)
 
-        # Verify the genesis event
         valid, reason = verify_event(event)
         if not valid:
             return web.json_response({"error": f"Invalid event: {reason}"}, status=400)
 
-        # Store locally (may already exist if published via WebSocket)
         dag = self.storage.get_group_dag(event["group"])
         ok, reason = dag.add_event(event)
         if not ok and reason != "duplicate":

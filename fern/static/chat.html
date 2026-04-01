@@ -651,8 +651,7 @@ let groups = [];
 let events = [];
 let eventLog = [];
 let pendingSyncs = new Set();
-let connectedRelays = new Set();
-let pendingMessages = new Map(); // eventId -> { event, status: 'pending'|'failed' }
+let pendingMessages = new Map();
 
 const USER_COLORS = [
   '#c8a060', '#60a0c8', '#a0c860', '#c860a0', '#60c8a0',
@@ -1029,27 +1028,20 @@ async function selectGroup(pubkey) {
 
   updateGroupUI(pubkey);
 
-  // Reset sync tracking
   pendingSyncs = new Set();
-  connectedRelays = new Set();
 
-  // 1. Load local cache immediately for instant display
   addLog('local', `Loading local events...`);
   wsSend({ action: 'load_local', group: pubkey });
 
-  // 2. Connect to relays (no subscribe yet)
   const group = groups.find(g => g.pubkey === pubkey);
   const relays = group?.relays || [];
   if (relays.length) {
+    wsSend({ action: 'set_relays', relays, group: pubkey });
     for (const relay of relays) {
-      addLog('browser', `Connecting to ${relay}...`);
-      wsSend({ action: 'connect_relay', relay, group: pubkey, subscribe: false });
       pendingSyncs.add(relay);
-      connectedRelays.add(relay);
     }
 
-    // 3. Send sync (backend decides since value from local DAG state)
-    addLog('sync', `Syncing from ${connectedRelays.size} relay(s)...`);
+    addLog('sync', `Syncing from ${relays.length} relay(s)...`);
     wsSend({ action: 'sync' });
   } else {
     addLog('error', 'No relays configured for this group');
@@ -1117,20 +1109,12 @@ async function createGroup() {
 
   addLog('browser', `Genesis event: ${genesis.id.slice(0, 12)}...`);
 
-  // Connect to relays first
-  for (const r of relays) {
-    wsSend({ action: 'connect_relay', relay: r, group: groupKeys.pub, subscribe: false });
-  }
+  wsSend({ action: 'set_relays', relays, group: groupKeys.pub });
 
-  // Wait for connections to establish
-  await new Promise(resolve => setTimeout(resolve, 600));
-
-  // Publish genesis and wait for confirmation from at least one relay
   addLog('browser', `Publishing genesis to ${relays.length} relay(s)...`);
 
   let published = false;
   let relayErrors = 0;
-  const connectedRelaysCount = 1; // We connected to one relay successfully
   const originalOnMessage = ws.onmessage;
 
   try {
@@ -1213,19 +1197,14 @@ async function joinGroup() {
 
   addLog('browser', `Joining group ${groupPubkey.slice(0, 12)}...`);
 
-  // Reset sync tracking for the join
   pendingSyncs = new Set();
-  connectedRelays = new Set();
 
-  // Connect to relays (subscribe will happen after sync via selectGroup's handleSyncComplete)
+  wsSend({ action: 'set_relays', relays, group: groupPubkey });
   for (const r of relays) {
-    wsSend({ action: 'connect_relay', relay: r, group: groupPubkey, subscribe: false });
     pendingSyncs.add(r);
-    connectedRelays.add(r);
   }
 
-  // Send sync (backend decides since value)
-  addLog('sync', `Syncing from ${connectedRelays.size} relay(s)...`);
+  addLog('sync', `Syncing from ${relays.length} relay(s)...`);
   wsSend({ action: 'sync' });
 
   // Set up to call selectGroup when all syncs complete
@@ -1480,20 +1459,9 @@ async function saveGroupRelays() {
 
   addLog('browser', `Event created: ${event.id.slice(0, 12)}...`);
 
-  // Connect to new relays first
-  for (const r of newRelays) {
-    if (!oldRelays.includes(r)) {
-      wsSend({ action: 'connect_relay', relay: r, group: currentGroup });
-    }
-  }
+  wsSend({ action: 'set_relays', relays: newRelays, group: currentGroup });
 
-  // Publish to all relays once (deduplicated), but only to relays we're actually connected to
-  const allRelays = [...new Set([...oldRelays, ...newRelays])];
-  for (const r of allRelays) {
-    if (connectedRelays.has(r)) {
-      wsSend({ action: 'publish', event, relay: r });
-    }
-  }
+  wsSend({ action: 'publish', event });
 
   handleIncomingEvent(event, 'local');
 }
