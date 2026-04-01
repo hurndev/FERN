@@ -22,7 +22,7 @@ These modules implement the protocol itself. Both clients and the relay server i
 | `events.py` | Canonical serialization, event creation helpers, `GroupState` derivation, event verification |
 | `dag.py` | `EventDAG` (local per-group event store + children index), `ClientStorage` (multi-group manager) |
 | `sync.py` | Shared sync decision logic. `decide_sync_action()` — pure function that decides skip/incremental/full based on local DAG state and relay summaries. Used by both `client.py` and `chat.py`. |
-| `relay.py` | Unified WebSocket client for FERN protocol. `RelayClient` class with one-shot classmethods for CLI and persistent instance connections for chat. |
+| `relay.py` | Plain async functions for relay communication. One-shot: `fetch_summary`, `fetch_events`, `publish`, `fetch_event`, `fetch_genesis`. Persistent: `subscribe` (streams events until cancelled). |
 | `config.py` | Shared configuration values. `BOOTSTRAP_RELAYS` — default relay URLs used by CLI, debug, and test tools. |
 | `storage.py` | Resolves storage paths (`~/.fern`, `FERN_TEST_USER`, `--home`) |
 
@@ -56,7 +56,7 @@ These modules implement the protocol itself. Both clients and the relay server i
 
 | | CLI (`client.py`) | Chat (`chat.py`) |
 |---|---|---|
-| **Connections** | Short-lived. Opens a WebSocket per action, then closes. | Persistent. `RelayClient` objects stay connected via `ChatSession`. |
+| **Connections** | Short-lived. Opens a WebSocket per action, then closes. | Short-lived. One-shot calls for publish/sync, plus background `subscribe()` tasks for real-time events. |
 | **Where sync logic lives** | `sync_and_heal()` — called inline before every action | `_smart_sync()` — called from `ChatSession.handle_message` when browser sends `{action: "sync"}` |
 | **Relay healing** | Yes. Cross-references relays, pushes missing events. | No. |
 | **Relay migration** | Yes. Follows migration chain across multiple sync rounds. | No. |
@@ -90,27 +90,31 @@ Browser                          chat.py (Python)                    Relay
   │  events from local EventDAG       │                                │
   │ <─────────────────────────────────│                                │
   │                                   │                                │
-  │  {action: "connect_relay", ...}   │                                │
-  │ ─────────────────────────────────>│──── connect ─────────────────>│
-  │                                   │<─── connected ────────────────│
+  │  {action: "set_relays", relays}   │                                │
+  │ ─────────────────────────────────>│  stores relay URL list         │
   │                                   │                                │
   │  {action: "sync"}                 │                                │
   │ ─────────────────────────────────>│                                │
   │                                   │  _smart_sync():                │
   │                                   │    check local DAG             │
-  │                                   │    fetch summaries             │
+  │                                   │    fetch summaries (one-shot)  │
   │                                   │    decide: skip/incr/full      │
-  │                                   │──── sync(since) ──────────────>│
-  │                                   │<─── events + sync_complete ───│
+  │                                   │──── fetch_events(since) ──────>│
+  │                                   │<─── events ───────────────────│
   │  events forwarded to browser      │                                │
   │ <─────────────────────────────────│                                │
   │  {type: "sync_complete"}          │                                │
   │ <─────────────────────────────────│                                │
   │                                   │                                │
   │  {action: "publish", event}       │                                │
-  │ ─────────────────────────────────>│──── publish ──────────────────>│
+  │ ─────────────────────────────────>│──── publish (one-shot) ───────>│
   │                                   │<─── ok/error ─────────────────│
   │  {type: "ok"} or {type: "error"}  │                                │
+  │ <─────────────────────────────────│                                │
+  │                                   │                                │
+  │  {action: "subscribe"}            │                                │
+  │ ─────────────────────────────────>│──── subscribe (persistent) ──>│
+  │  events streamed in background    │<─── events ───────────────────│
   │ <─────────────────────────────────│                                │
 ```
 
@@ -144,23 +148,19 @@ Events are sorted by `(ts, id)` — timestamp first, then event ID as tiebreaker
 
 ## Maintenance Notes
 
-### Sync logic divergence
-
-The summary-check + incremental-sync decision logic lives in `sync.py:decide_sync_action()`. Both `client.py` and `chat.py` call this shared function — the decision logic cannot diverge. Each client still executes the decision differently (short-lived connections vs persistent), but the "skip vs incremental vs full" logic is shared.
-
-### Chat browser state
-
-The browser maintains its own `events` array separate from the backend's `EventDAG`. The backend is the source of truth for local storage. The browser's array is ephemeral — it's populated by `load_local` and relay events, and cleared when switching groups.
-
-### RelayClient queuing
-
-`RelayClient` in `chat.py` queues sync requests if the connection isn't established yet. When the connection completes, queued syncs are drained. This replaced a fragile `setTimeout(100ms)` that the browser used to guess when connections were ready.
-
 ### Where signing happens
 
 - CLI: signing happens in Python (`events.py` helpers called from `client.py`)
 - Chat: signing happens in the browser (`chat.html` using `@noble/ed25519`). The backend only verifies and forwards.
 - Both produce identical events (same canonical serialization, same Ed25519 signatures).
+
+### Relay communication
+
+Both clients use the same plain async functions from `relay.py`:
+- One-shot: `publish()`, `fetch_events()`, `fetch_summary()`, `fetch_event()`, `fetch_genesis()` — open a WebSocket, send, receive, close.
+- Persistent: `subscribe()` — opens a WebSocket, subscribes, streams events until the connection drops. Callers handle retry.
+
+The CLI wraps `subscribe()` in its own retry loop (`subscribe_group()`). The chat backend does the same in `ChatSession._subscribe_with_retry()`.
 
 ## Entry Points
 

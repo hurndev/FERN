@@ -4,7 +4,7 @@
 - Force clients to reference valid events that have not been referenced yet to prevent GC on events that are not invalid
 - Optimise initial sync: when client already has partial history, avoid fetching genesis separately then all events - fetch all events once and validate genesis from the first event received. Avoid sync completely if DAG is up-to-date.
 - Graceful handling of closing WS connection
-- sync_and_heal can lose local-only events during group migration: if user creates events offline (never published) then group migrates, the local events in dag.events are cleared at line 328 but not preserved before the clear. Need to preserve all_validated before clearing, or merge local events after migration.
+- sync_and_heal can lose local-only events during group migration: if user creates events offline (never published) then group migrates, the local events in dag.events are cleared but not preserved before the clear. Need to preserve all_validated before clearing, or merge local events after migration.
 - Distinguish between adding and joining a group in the chat UI
 - Fix 'thundering herd' problem where many clients try to heal a relay at once
 - Healing relays from local events - even if all relays loose event history, a client should automatically heal the relays from their local event storage
@@ -17,4 +17,3 @@
 - State derivation must be sequential?
 - Prevent events with missing parents from being added to DAG or referenced in new events
 - Better relay on logging, show loaded events
-- Share more connection code between chat UI and cli
