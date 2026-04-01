@@ -401,7 +401,7 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
             click.echo(f"    {url}: missing {len(missing)} event(s), pushing...")
             for event_id in missing:
                 event = all_validated[event_id]
-                result = await RelayClient.publish(url, event)
+                result = await RelayClient.fetch_publish(url, event)
                 if result and result.get("type") == "ok":
                     healed += 1
         else:
@@ -636,7 +636,7 @@ def create_group(
 
     async def _pub_all():
         async def pub_one(url):
-            return (url, await RelayClient.publish(url, genesis))
+            return (url, await RelayClient.fetch_publish(url, genesis))
 
         return dict(await asyncio.gather(*[pub_one(url) for url in relay_list]))
 
@@ -752,7 +752,7 @@ def send(
 
     async def _pub_all():
         async def pub_one(url):
-            return (url, await RelayClient.publish(url, event))
+            return (url, await RelayClient.fetch_publish(url, event))
 
         return dict(await asyncio.gather(*[pub_one(url) for url in relays]))
 
@@ -908,7 +908,7 @@ def join(address: str):
 
         async def _pub_all():
             async def pub_one(url):
-                await RelayClient.publish(url, event)
+                await RelayClient.fetch_publish(url, event)
 
             await asyncio.gather(*[pub_one(url) for url in relays])
 
@@ -951,7 +951,7 @@ def leave(group_pubkey: str, relay: str | None):
 
     async def _pub_all():
         async def pub_one(url):
-            await RelayClient.publish(url, event)
+            await RelayClient.fetch_publish(url, event)
 
         await asyncio.gather(*[pub_one(url) for url in relays])
 
@@ -1000,7 +1000,7 @@ def invite(group_pubkey: str, invitee_pubkey: str, relay: str | None):
 
     async def _pub_all():
         async def pub_one(url):
-            await RelayClient.publish(url, event)
+            await RelayClient.fetch_publish(url, event)
 
         await asyncio.gather(*[pub_one(url) for url in relays])
 
@@ -1044,7 +1044,7 @@ def kick(group_pubkey: str, target_pubkey: str, relay: str | None):
 
     async def _pub_all():
         async def pub_one(url):
-            await RelayClient.publish(url, event)
+            await RelayClient.fetch_publish(url, event)
 
         await asyncio.gather(*[pub_one(url) for url in relays])
 
@@ -1088,7 +1088,7 @@ def mod_add(group_pubkey: str, target_pubkey: str, relay: str | None):
 
     async def _pub_all():
         async def pub_one(url):
-            await RelayClient.publish(url, event)
+            await RelayClient.fetch_publish(url, event)
 
         await asyncio.gather(*[pub_one(url) for url in relays])
 
@@ -1132,7 +1132,7 @@ def mod_remove(group_pubkey: str, target_pubkey: str, relay: str | None):
 
     async def _pub_all():
         async def pub_one(url):
-            await RelayClient.publish(url, event)
+            await RelayClient.fetch_publish(url, event)
 
         await asyncio.gather(*[pub_one(url) for url in relays])
 
@@ -1190,7 +1190,7 @@ def relay_update(group_pubkey: str, new_relays: tuple[str, ...], relay: str | No
 
     async def _pub_all():
         async def pub_one(url):
-            await RelayClient.publish(url, event)
+            await RelayClient.fetch_publish(url, event)
 
         await asyncio.gather(*[pub_one(url) for url in old_relays])
 

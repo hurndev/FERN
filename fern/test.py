@@ -189,7 +189,7 @@ def multi_send(
         )
 
         try:
-            resp = await RelayClient.publish(relay, event)
+            resp = await RelayClient.fetch_publish(relay, event)
             return {
                 "user": user_name,
                 "success": resp.get("type") == "ok" if resp else False,
