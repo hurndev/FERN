@@ -261,11 +261,7 @@ class RelayClient:
                         )
                     self._pending.pop(event_id, None)
                     return None
-            except Exception as e:
-                if self._on_log:
-                    await self._on_log(
-                        "error", f"Publish failed to {self.relay_url}: {e}"
-                    )
+            except (Exception, asyncio.CancelledError):
                 self._pending.pop(event["id"], None)
         return None
 
@@ -385,8 +381,8 @@ class RelayClient:
         return events
 
     @classmethod
-    async def publish(cls, relay_url: str, event: Event) -> dict | None:
-        """Publish an event to a relay. Returns response dict or None."""
+    async def fetch_publish(cls, relay_url: str, event: Event) -> dict | None:
+        """Publish an event to a relay (one-shot). Returns response dict or None."""
         try:
             async with asyncio.timeout(1.5):
                 async with websockets.connect(relay_url) as ws:

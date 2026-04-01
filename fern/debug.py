@@ -474,7 +474,7 @@ def publish_raw(relay: str, event_json: str):
 
     async def run():
         try:
-            response = await RelayClient.publish(relay, event)
+            response = await RelayClient.fetch_publish(relay, event)
             if response and response.get("type") == "ok":
                 click.echo(f"Published: {response.get('id', '?')[:16]}...")
             elif response and response.get("type") == "error":

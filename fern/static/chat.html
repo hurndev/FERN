@@ -719,7 +719,7 @@ function connectWS() {
       addLog(msg.kind, msg.message);
     } else if (msg.type === 'error') {
       addLog('error', msg.message);
-      // Check if this is a publish error for a pending message
+      console.error('[fern backend]', msg.message);
       const eventId = msg.event_id || msg.id;
       if (eventId && pendingMessages.has(eventId)) {
         const pending = pendingMessages.get(eventId);
@@ -1084,11 +1084,11 @@ async function sendMessage() {
 
   addLog('browser', `Event created: ${event.id.slice(0, 12)}...`);
   
-  // Add to pending messages - don't show as confirmed until relay accepts
   pendingMessages.set(event.id, { event, status: 'pending' });
   savePendingToStorage();
   renderMessages();
   
+  addLog('browser', `Sending publish to backend...`);
   wsSend({ action: 'publish', event });
 }
 

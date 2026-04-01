@@ -2,12 +2,16 @@
 
 import asyncio
 import json
+import logging
 import os
 import time
+import traceback
 from pathlib import Path
 
 import click
 from aiohttp import web, WSMsgType
+
+logger = logging.getLogger(__name__)
 
 from .dag import ClientStorage
 from .events import Event
@@ -30,9 +34,12 @@ class ChatSession:
         try:
             await self.ws.send_json(data)
         except Exception:
-            pass
+            logger.debug(
+                "Failed to send to browser (connection closed?)", exc_info=True
+            )
 
     async def log(self, kind: str, message: str):
+        logger.info("[%s] %s", kind, message)
         await self.send(
             {
                 "type": "log",
@@ -41,6 +48,16 @@ class ChatSession:
                 "ts": int(time.time()),
             }
         )
+
+    async def error(self, message: str, event_id: str | None = None):
+        logger.error("[error] %s (event_id=%s)", message, event_id)
+        payload: dict = {
+            "type": "error",
+            "message": message,
+        }
+        if event_id:
+            payload["event_id"] = event_id
+        await self.send(payload)
 
     async def handle_message(self, msg: dict):
         action = msg.get("action")
@@ -62,6 +79,7 @@ class ChatSession:
             await conn.connect(
                 on_event=self._on_relay_event,
                 on_log=self.log,
+                subscribe=msg.get("subscribe", True),
             )
 
         elif action == "disconnect_relay":
@@ -78,45 +96,52 @@ class ChatSession:
                 "publish", f"Publishing {event['type']} (id={event['id'][:12]}...)"
             )
 
-            # Verify before publishing
             valid, reason = verify_event(event)
             if not valid:
-                await self.log("error", f"Event rejected: {reason}")
-                await self.send(
-                    {
-                        "type": "error",
-                        "message": f"Invalid event: {reason}",
-                        "event_id": event["id"],
-                    }
-                )
+                await self.error(f"Event rejected: {reason}", event["id"])
                 return
 
-            # Publish to relay FIRST, only store locally if relay accepts
-            published = False
             if not self.relay_connections:
-                await self.log("error", "No relay connections")
-                await self.send(
-                    {
-                        "type": "error",
-                        "message": "No relay connected. Your message has been saved in browser.",
-                        "event_id": event["id"],
-                    }
+                await self.error(
+                    "No relay connected. Your message has been saved in browser.",
+                    event["id"],
                 )
                 return
 
             if relay_url and relay_url in self.relay_connections:
-                result = await self.relay_connections[relay_url].publish(event)
-                published = result.get("type") == "ok" if result else False
+                try:
+                    result = await self.relay_connections[relay_url].publish(event)
+                    published = result.get("type") == "ok" if result else False
+                    if not result:
+                        await self.log(
+                            "error",
+                            f"publish({relay_url}) returned None — connection may be down",
+                        )
+                except Exception as e:
+                    await self.log(
+                        "error",
+                        f"publish({relay_url}) raised {type(e).__name__}: {e}",
+                    )
+                    published = False
             elif relay_url:
+                await self.log(
+                    "error",
+                    f"Requested relay {relay_url} not in connections (have: {list(self.relay_connections.keys())})",
+                )
                 published = False
             else:
                 results = await asyncio.gather(
                     *(conn.publish(event) for conn in self.relay_connections.values()),
                     return_exceptions=True,
                 )
+                for conn, r in zip(self.relay_connections.values(), results):
+                    if isinstance(r, Exception):
+                        await self.log(
+                            "error",
+                            f"publish({conn.relay_url}) raised {type(r).__name__}: {r}",
+                        )
                 published = any(
-                    r and not isinstance(r, Exception) and r.get("type") == "ok"
-                    for r in results
+                    isinstance(r, dict) and r.get("type") == "ok" for r in results
                 )
 
             if published:
@@ -125,20 +150,11 @@ class ChatSession:
                 if ok:
                     await self.send({"type": "ok", "id": event["id"]})
                 else:
-                    await self.send(
-                        {
-                            "type": "error",
-                            "message": f"Failed to store event: {reason}",
-                            "event_id": event["id"],
-                        }
-                    )
+                    await self.error(f"Failed to store event: {reason}", event["id"])
             else:
-                await self.send(
-                    {
-                        "type": "error",
-                        "message": "Failed to publish. Your message has been saved in browser.",
-                        "event_id": event["id"],
-                    }
+                await self.error(
+                    "Failed to publish. Your message has been saved in browser.",
+                    event["id"],
                 )
 
         elif action == "sync":
@@ -182,9 +198,12 @@ class ChatSession:
 
         connected = [c for c in self.relay_connections.values() if c.connected]
         if not connected:
-            for conn in self.relay_connections.values():
-                await conn.wait_connected()
-            connected = list(self.relay_connections.values())
+            wait_tasks = [
+                asyncio.create_task(conn.wait_connected(timeout=2.0))
+                for conn in self.relay_connections.values()
+            ]
+            await asyncio.gather(*wait_tasks)
+            connected = [c for c in self.relay_connections.values() if c.connected]
 
         summaries: dict[str, dict] = {}
         for conn in connected:
@@ -233,6 +252,23 @@ class ChatSession:
         for conn in self.relay_connections.values():
             await conn.close()
         self.relay_connections.clear()
+
+
+async def _safe_handle(session: ChatSession, data: dict):
+    action = data.get("action", "?")
+    try:
+        await session.handle_message(data)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error("Unhandled error handling '%s': %s\n%s", action, e, tb)
+        await session.send(
+            {
+                "type": "error",
+                "message": f"Internal error handling '{action}': {type(e).__name__}: {e}",
+            }
+        )
 
 
 class ChatApp:
@@ -376,21 +412,31 @@ class ChatApp:
 
         session = ChatSession(ws, self.storage)
         self.sessions.append(session)
+        tasks: set[asyncio.Task] = set()
 
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     data = json.loads(msg.data)
-                    await session.handle_message(data)
+                    task = asyncio.create_task(_safe_handle(session, data))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
                 elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
+                    if msg.type == WSMsgType.ERROR:
+                        logger.warning(
+                            "WebSocket error from %s: %s",
+                            request.remote,
+                            ws.exception(),
+                        )
                     break
         except Exception:
-            pass
+            logger.error("WebSocket loop error", exc_info=True)
         finally:
+            for t in tasks:
+                t.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             await session.close()
-            self.sessions.discard(session) if hasattr(
-                self.sessions, "discard"
-            ) else None
             if session in self.sessions:
                 self.sessions.remove(session)
 
@@ -427,6 +473,11 @@ def main(home: str | None, host: str, port: int):
     instead. Use --home to specify a custom home directory.
     """
     fern_dir = resolve_fern_dir(home)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
     app = ChatApp(str(fern_dir), host=host, port=port)
     asyncio.run(app.start())
 
