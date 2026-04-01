@@ -15,7 +15,7 @@ from pathlib import Path
 import click
 
 from . import crypto
-from .relay import RelayClient
+from .relay import fetch_publish
 from .config import BOOTSTRAP_RELAYS
 
 
@@ -189,7 +189,7 @@ def multi_send(
         )
 
         try:
-            resp = await RelayClient.fetch_publish(relay, event)
+            resp = await fetch_publish(relay, event)
             return {
                 "user": user_name,
                 "success": resp.get("type") == "ok" if resp else False,

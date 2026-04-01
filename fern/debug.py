@@ -9,7 +9,7 @@ import click
 
 from .events import verify_event_id, verify_event_signature
 from .dag import EventDAG
-from .relay import RelayClient
+from .relay import fetch_event, fetch_events, fetch_publish, fetch_summary
 from .config import BOOTSTRAP_RELAYS
 
 
@@ -175,7 +175,7 @@ def compare_relays(group_pubkey: str, relay: tuple[str, ...]):
         relay = tuple(BOOTSTRAP_RELAYS)
 
     async def get_all_event_ids(url: str) -> set[str]:
-        events = await RelayClient.fetch_events(url, group_pubkey, since=0)
+        events = await fetch_events(url, group_pubkey, since=0)
         return {e["id"] for e in events}
 
     async def run():
@@ -183,7 +183,7 @@ def compare_relays(group_pubkey: str, relay: tuple[str, ...]):
         event_ids = {}
 
         for url in relay:
-            summaries[url] = await RelayClient.fetch_summary(url, group_pubkey)
+            summaries[url] = await fetch_summary(url, group_pubkey)
             event_ids[url] = await get_all_event_ids(url)
 
         click.echo(f"Group: {group_pubkey[:16]}...\n")
@@ -394,7 +394,7 @@ def relay_get(event_id: str, relay: str, group_pubkey: str | None):
 
     async def run():
         try:
-            event = await RelayClient.fetch_event(relay, event_id)
+            event = await fetch_event(relay, event_id)
             if event:
                 click.echo(json.dumps(event, indent=2))
             else:
@@ -413,7 +413,7 @@ def relay_summary(group_pubkey: str, relay: str):
 
     async def run():
         try:
-            response = await RelayClient.fetch_summary(relay, group_pubkey)
+            response = await fetch_summary(relay, group_pubkey)
             if response and response.get("type") == "summary":
                 click.echo(f"Relay: {relay}")
                 click.echo(f"Group: {group_pubkey[:16]}...")
@@ -474,7 +474,7 @@ def publish_raw(relay: str, event_json: str):
 
     async def run():
         try:
-            response = await RelayClient.fetch_publish(relay, event)
+            response = await fetch_publish(relay, event)
             if response and response.get("type") == "ok":
                 click.echo(f"Published: {response.get('id', '?')[:16]}...")
             elif response and response.get("type") == "error":
