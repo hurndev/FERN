@@ -12,7 +12,7 @@ The full protocol specification (WIP) can be found in [FERN-protocol-spec.md](FE
 
 ## Current State
 
-This repository contains a CLI client, relay server, chat webapp, DAG inspector, and some basic testing utilities. The implementation is primerally vibe-coded and has not been thoroughly tested. The core protocol is implemented, but has not been properly tested yet and is NOT ready for real use. For now I recommend only testing this locally.
+This repository contains a CLI client, relay server, chat webapp, DAG inspector, debug tools, and testing utilities. The core protocol is implemented but has not been thoroughly tested and is NOT ready for production use. For now, only test locally.
 
 ## Quick Start
 
@@ -26,8 +26,8 @@ pip3 install -e .
 
 All tools store data in a `.fern` directory. By default this is `~/.fern`. You can customise the location:
 
-- ** `--home <path>` ** - Specify a custom `.fern` parent directory (e.g. `fern --home /tmp/me chat`)
-- ** `FERN_TEST_USER` env var** - Set to any value to use `/tmp/<your-username>/.fern` instead
+- `--home <path>` — specify a custom `.fern` parent directory
+- `FERN_TEST_USER` env var — set to any value to use `/tmp/<your-username>/.fern` instead
 
 Priority order: `--home` > `FERN_TEST_USER` > `~/.fern`
 
@@ -65,7 +65,7 @@ Most commands perform a sync first to get the latest event history.
 fern-chat
 ```
 
-Opens the chat webapp.
+Opens the chat webapp at `http://127.0.0.1:8080`. Signing happens client-side in the browser — your private key never leaves your machine. You'll need at least one relay running to create or join groups.
 
 ### DAG Inspector (`fern-inspect`)
 
@@ -74,3 +74,24 @@ fern-inspect
 ```
 
 Opens a visualizer showing the event DAG structure. You can specify a home directory with `--home <path>`.
+
+### Debug Tools (`fern-debug`)
+
+```bash
+fern-debug relay summary <group_pubkey> --relay ws://localhost:8787  # Check relay state
+fern-debug dag-tree <group_pubkey>                                    # Print DAG as text tree
+fern-debug state <group_pubkey>                                       # Show derived group state
+fern-debug gaps <group_pubkey>                                        # List missing events
+fern-debug compare-relays <group_pubkey> --relay ws://localhost:8787  # Compare relays
+fern-debug publish-raw <relay> '{"id":"...","type":"message",...}'    # Inject raw events
+```
+
+### Test Harness (`fern-test`)
+
+```bash
+fern-test spawn-user alice          # Create test user in /tmp/alice
+fern-test multi-send <group> alice bob --concurrent  # Send from multiple users
+fern-test watch <group_pubkey>      # Watch events on a relay in real-time
+```
+
+See [TESTING_TOOLS.md](TESTING_TOOLS.md) for a full testing guide.
