@@ -115,3 +115,44 @@ async def subscribe(
             msg = json.loads(raw)
             if msg.get("type") == "event":
                 await on_event(msg["event"], relay_url)
+
+
+async def publish_to_all(
+    relay_urls: list[str],
+    event: Event,
+) -> dict[str, dict | None | Exception]:
+    """Publish an event to all relays in parallel. Returns {url: response}."""
+    results = await asyncio.gather(
+        *(publish(url, event) for url in relay_urls),
+        return_exceptions=True,
+    )
+    return dict(zip(relay_urls, results))
+
+
+async def subscribe_with_retry(
+    relay_url: str,
+    group_pubkey: str,
+    on_event,
+    on_error=None,
+    on_connect=None,
+    on_reconnect=None,
+    retry_delay: float = 60.0,
+) -> None:
+    """Subscribe with automatic reconnection. Runs until cancelled."""
+    first = True
+    while True:
+        try:
+            if first:
+                if on_connect is not None:
+                    on_connect(relay_url)
+                first = False
+            else:
+                if on_reconnect is not None:
+                    on_reconnect(relay_url)
+            await subscribe(relay_url, group_pubkey, on_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if on_error is not None:
+                on_error(relay_url, e)
+        await asyncio.sleep(retry_delay)

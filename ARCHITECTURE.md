@@ -22,7 +22,7 @@ These modules implement the protocol itself. Both clients and the relay server i
 | `events.py` | Canonical serialization, event creation helpers, `GroupState` derivation, event verification |
 | `dag.py` | `EventDAG` (local per-group event store + children index), `ClientStorage` (multi-group manager) |
 | `sync.py` | Shared sync decision logic. `decide_sync_action()` — pure function that decides skip/incremental/full based on local DAG state and relay summaries. Used by both `client.py` and `chat.py`. |
-| `relay.py` | Plain async functions for relay communication. One-shot: `fetch_summary`, `fetch_events`, `publish`, `fetch_event`, `fetch_genesis`. Persistent: `subscribe` (streams events until cancelled). |
+| `relay.py` | Plain async functions for relay communication. One-shot: `fetch_summary`, `fetch_events`, `publish`, `fetch_event`, `fetch_genesis`, `publish_to_all`. Persistent: `subscribe` (streams events until cancelled), `subscribe_with_retry` (auto-reconnects on disconnect). |
 | `config.py` | Shared configuration values. `BOOTSTRAP_RELAYS` — default relay URLs used by CLI, debug, and test tools. |
 | `storage.py` | Resolves storage paths (`~/.fern`, `FERN_TEST_USER`, `--home`) |
 
