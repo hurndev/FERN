@@ -18,8 +18,8 @@ from .events import Event
 from .events import verify_event
 from .relay import fetch_events
 from .relay import fetch_summary
-from .relay import publish as relay_publish
-from .relay import subscribe as relay_subscribe
+from .relay import publish_to_all
+from .relay import subscribe_with_retry
 from .storage import resolve_fern_dir
 from .sync import decide_sync_action
 
@@ -127,19 +127,18 @@ class ChatSession:
             )
             return
 
-        results = await asyncio.gather(
-            *(relay_publish(url, event) for url in relay_urls),
-            return_exceptions=True,
-        )
+        results = await publish_to_all(relay_urls, event)
 
-        for url, r in zip(relay_urls, results):
+        for url, r in results.items():
             if isinstance(r, Exception):
                 await self.log(
                     "error",
                     f"publish({url}) raised {type(r).__name__}: {r}",
                 )
 
-        published = any(isinstance(r, dict) and r.get("type") == "ok" for r in results)
+        published = any(
+            isinstance(r, dict) and r.get("type") == "ok" for r in results.values()
+        )
 
         if mode == "relay_only":
             if published:
@@ -152,6 +151,7 @@ class ChatSession:
             dag = self.storage.get_group_dag(event["group"])
             ok, reason = dag.add_event(event)
             if ok or reason == "duplicate":
+                await self.send({"type": "event", "event": event, "relay": "local"})
                 await self.send({"type": "ok", "id": event["id"]})
             else:
                 await self.error(f"Failed to store event: {reason}", event["id"])
@@ -194,7 +194,7 @@ class ChatSession:
                 "sync",
                 f"Already in sync ({len(local_event_ids)} local events) - skipping",
             )
-            for url in summaries:
+            for url in self.relay_urls:
                 await self.send({"type": "sync_complete", "relay": url})
         else:
             await self.log("sync", f"Incremental sync since={decision.since}")
@@ -230,25 +230,33 @@ class ChatSession:
             await self.error("No group selected")
             return
 
-        for url in self.relay_urls:
-            task = asyncio.create_task(self._subscribe_with_retry(url))
-            self._subscribe_tasks.append(task)
-
-    async def _subscribe_with_retry(self, relay_url: str):
-        while True:
-            try:
-                await relay_subscribe(
-                    relay_url, self.group_pubkey, self._on_relay_event
-                )
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                await self.log(
+        def on_error(url, exc):
+            task = asyncio.create_task(
+                self.log(
                     "error",
-                    f"Subscription to {relay_url} disconnected: {type(e).__name__}: {e}",
+                    f"Subscription to {url} disconnected: {type(exc).__name__}: {exc}",
                 )
-            await self.log("relay", f"Reconnecting to {relay_url} in 60s...")
-            await asyncio.sleep(60)
+            )
+            task.add_done_callback(
+                lambda t: t.exception() if not t.cancelled() else None
+            )
+
+        def on_reconnect(url):
+            asyncio.create_task(
+                self.log("relay", f"Reconnecting to {url} in 60s...")
+            ).add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        for url in self.relay_urls:
+            task = asyncio.create_task(
+                subscribe_with_retry(
+                    url,
+                    self.group_pubkey,
+                    self._on_relay_event,
+                    on_error=on_error,
+                    on_reconnect=on_reconnect,
+                )
+            )
+            self._subscribe_tasks.append(task)
 
     async def _on_relay_event(self, event: Event, relay_url: str):
         if self.group_pubkey:

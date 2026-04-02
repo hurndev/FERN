@@ -33,7 +33,8 @@ from .relay import (
     fetch_genesis,
     publish as fetch_publish,
     fetch_summary,
-    subscribe,
+    publish_to_all,
+    subscribe_with_retry,
 )
 from .storage import resolve_fern_dir
 from .config import BOOTSTRAP_RELAYS
@@ -446,25 +447,29 @@ async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
 async def subscribe_group(dag: EventDAG, relay_urls: list[str], callback=None) -> None:
     """Subscribe to a group on all relays simultaneously and process incoming events."""
 
-    async def sub_one(relay_url: str) -> None:
-        while True:
-            try:
-                click.echo(f"  {relay_url}: connected")
+    async def on_event(event, url):
+        ok, reason = dag.add_event(event)
+        if callback:
+            callback(event, ok, reason)
 
-                async def on_event(event, url):
-                    ok, reason = dag.add_event(event)
-                    if callback:
-                        callback(event, ok, reason)
+    def on_error(url, exc):
+        click.echo(f"  {url}: error: {exc}", err=True)
 
-                await subscribe(relay_url, dag.group_pubkey, on_event)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                click.echo(f"  {relay_url}: error: {e}", err=True)
-                click.echo(f"  {relay_url}: retrying in 60s...")
-            await asyncio.sleep(60)
+    def on_connect(url):
+        click.echo(f"  {url}: connected")
 
-    await asyncio.gather(*[sub_one(url) for url in relay_urls])
+    await asyncio.gather(
+        *[
+            subscribe_with_retry(
+                url,
+                dag.group_pubkey,
+                on_event,
+                on_error=on_error,
+                on_connect=on_connect,
+            )
+            for url in relay_urls
+        ]
+    )
 
 
 def format_event(event: Event) -> str:
@@ -510,6 +515,56 @@ def print_heal_summary(summary: dict) -> None:
         click.echo(f"  Discarded {len(summary['bad_relays'])} unreliable relay(s).")
     if summary.get("canonical_relays"):
         click.echo(f"  Canonical relays: {', '.join(summary['canonical_relays'])}")
+
+
+def _sync_and_publish(
+    group_pubkey: str,
+    relay: str | None,
+    create_event: callable,
+    check_perm: callable,
+    tips_guard: callable = None,
+    success_msg: str = "",
+) -> tuple[EventDAG, list[str]]:
+    """Shared pipeline for CLI actions that sync, check perms, create, and publish.
+
+    Returns (dag, relays) for callers that need follow-up work after publishing.
+
+    Args:
+        create_event: (group_hex, author_hex, author_privkey, tips) -> Event
+        check_perm: (state, user_pubkey) -> None; raises SystemExit if unauthorized
+        tips_guard: optional (tips) -> str | None; returns error message if invalid, None if valid
+        success_msg: printed on success
+    """
+    storage = get_storage()
+    fallback = [relay] if relay else BOOTSTRAP_RELAYS
+
+    user_privkey = crypto.load_private_key(storage.get_user_key_path())
+    user_pubkey = crypto.public_key_from_private(user_privkey)
+
+    dag = storage.get_group_dag(group_pubkey)
+
+    relays = get_canonical_relays(dag, fallback)
+    asyncio.run(sync_and_heal(dag, relays))
+    relays = get_canonical_relays(dag, fallback)
+
+    state = dag.get_state()
+    check_perm(state, user_pubkey)
+
+    tips = dag.get_tips()
+    if tips_guard is not None:
+        guard_msg = tips_guard(tips)
+        if guard_msg is not None:
+            click.echo(guard_msg, err=True)
+            sys.exit(1)
+
+    event = create_event(group_pubkey, user_pubkey, user_privkey, tips)
+    dag.add_event(event)
+
+    asyncio.run(publish_to_all(relays, event))
+    if success_msg:
+        click.echo(success_msg)
+
+    return dag, relays
 
 
 # --- CLI ---
@@ -629,17 +684,13 @@ def create_group(
     # Publish to relays
     click.echo(f"Publishing genesis to {len(relay_list)} relay(s)...")
 
-    async def _pub_all():
-        async def pub_one(url):
-            return (url, await fetch_publish(url, genesis))
-
-        return dict(await asyncio.gather(*[pub_one(url) for url in relay_list]))
-
-    results = asyncio.run(_pub_all())
+    results = asyncio.run(publish_to_all(relay_list, genesis))
 
     for url, result in results.items():
         if result is None:
             click.echo(f"  {url}: connection failed", err=True)
+        elif isinstance(result, Exception):
+            click.echo(f"  {url}: {type(result).__name__}: {result}", err=True)
         elif result.get("type") == "ok":
             click.echo(f"  {url}: OK")
         else:
@@ -745,19 +796,15 @@ def send(
     # Publish to relays FIRST - don't add to local DAG until relay accepts
     click.echo(f"Publishing to {len(relays)} relay(s): {', '.join(relays)}")
 
-    async def _pub_all():
-        async def pub_one(url):
-            return (url, await fetch_publish(url, event))
-
-        return dict(await asyncio.gather(*[pub_one(url) for url in relays]))
-
-    results = asyncio.run(_pub_all())
+    results = asyncio.run(publish_to_all(relays, event))
 
     success = 0
     accepted_relays = []
     for url, result in results.items():
         if result is None:
             click.echo(f"  {url}: connection failed", err=True)
+        elif isinstance(result, Exception):
+            click.echo(f"  {url}: {type(result).__name__}: {result}", err=True)
         elif result.get("type") == "ok":
             success += 1
             accepted_relays.append(url)
@@ -901,13 +948,7 @@ def join(address: str):
         )
         dag.add_event(event)
 
-        async def _pub_all():
-            async def pub_one(url):
-                await fetch_publish(url, event)
-
-            await asyncio.gather(*[pub_one(url) for url in relays])
-
-        asyncio.run(_pub_all())
+        asyncio.run(publish_to_all(relays, event))
         click.echo("Joined! You can now post messages.")
 
 
@@ -916,42 +957,22 @@ def join(address: str):
 @click.option("--relay", default=None, help="Relay URL")
 def leave(group_pubkey: str, relay: str | None):
     """Leave a group. You will no longer be able to post messages."""
-    storage = get_storage()
-    fallback = [relay] if relay else BOOTSTRAP_RELAYS
 
-    user_privkey = crypto.load_private_key(storage.get_user_key_path())
-    user_pubkey = crypto.public_key_from_private(user_privkey)
+    def check_perm(state, user):
+        if not state.is_joined(user):
+            click.echo("You are not a member of this group.")
+            raise SystemExit(0)
 
-    dag = storage.get_group_dag(group_pubkey)
+    def make_event(group, author, privkey, tips):
+        return create_group_leave(group, author, privkey, tips)
 
-    # Sync and heal
-    relays = get_canonical_relays(dag, fallback)
-    asyncio.run(sync_and_heal(dag, relays))
-    relays = get_canonical_relays(dag, fallback)
-
-    state = dag.get_state()
-    if not state.is_joined(user_pubkey):
-        click.echo("You are not a member of this group.")
-        return
-
-    tips = dag.get_tips()
-    event = create_group_leave(
-        group_hex=group_pubkey,
-        author_hex=user_pubkey,
-        author_privkey=user_privkey,
-        parents=tips,
+    _sync_and_publish(
+        group_pubkey,
+        relay,
+        make_event,
+        check_perm,
+        success_msg=f"Left group {group_pubkey[:12]}...",
     )
-
-    dag.add_event(event)
-
-    async def _pub_all():
-        async def pub_one(url):
-            await fetch_publish(url, event)
-
-        await asyncio.gather(*[pub_one(url) for url in relays])
-
-    asyncio.run(_pub_all())
-    click.echo(f"Left group {group_pubkey[:12]}...")
 
 
 @cli.command()
@@ -960,47 +981,28 @@ def leave(group_pubkey: str, relay: str | None):
 @click.option("--relay", default=None, help="Relay URL")
 def invite(group_pubkey: str, invitee_pubkey: str, relay: str | None):
     """Invite a user to a group (mod only)."""
-    storage = get_storage()
-    fallback = [relay] if relay else BOOTSTRAP_RELAYS
 
-    user_privkey = crypto.load_private_key(storage.get_user_key_path())
-    user_pubkey = crypto.public_key_from_private(user_privkey)
+    def check_perm(state, user):
+        if not state.is_mod(user):
+            click.echo("Error: You must be a mod to invite users.", err=True)
+            raise SystemExit(1)
 
-    dag = storage.get_group_dag(group_pubkey)
+    def tips_guard(tips):
+        if not tips:
+            return "Error: No events in group."
+        return None
 
-    # Sync and heal
-    relays = get_canonical_relays(dag, fallback)
-    asyncio.run(sync_and_heal(dag, relays))
-    relays = get_canonical_relays(dag, fallback)
+    def make_event(group, author, privkey, tips):
+        return create_group_invite(group, author, privkey, invitee_pubkey, tips)
 
-    state = dag.get_state()
-    if not state.is_mod(user_pubkey):
-        click.echo("Error: You must be a mod to invite users.", err=True)
-        sys.exit(1)
-
-    tips = dag.get_tips()
-    if not tips:
-        click.echo("Error: No events in group.", err=True)
-        sys.exit(1)
-
-    event = create_group_invite(
-        group_hex=group_pubkey,
-        author_hex=user_pubkey,
-        author_privkey=user_privkey,
-        invitee=invitee_pubkey,
-        parents=tips,
+    _sync_and_publish(
+        group_pubkey,
+        relay,
+        make_event,
+        check_perm,
+        tips_guard=tips_guard,
+        success_msg=f"Invited {invitee_pubkey[:12]}... to group.",
     )
-
-    dag.add_event(event)
-
-    async def _pub_all():
-        async def pub_one(url):
-            await fetch_publish(url, event)
-
-        await asyncio.gather(*[pub_one(url) for url in relays])
-
-    asyncio.run(_pub_all())
-    click.echo(f"Invited {invitee_pubkey[:12]}... to group.")
 
 
 @cli.command()
@@ -1009,42 +1011,22 @@ def invite(group_pubkey: str, invitee_pubkey: str, relay: str | None):
 @click.option("--relay", default=None, help="Relay URL")
 def kick(group_pubkey: str, target_pubkey: str, relay: str | None):
     """Kick a user from a group (mod only)."""
-    storage = get_storage()
-    fallback = [relay] if relay else BOOTSTRAP_RELAYS
 
-    user_privkey = crypto.load_private_key(storage.get_user_key_path())
-    user_pubkey = crypto.public_key_from_private(user_privkey)
+    def check_perm(state, user):
+        if not state.is_mod(user):
+            click.echo("Error: You must be a mod to kick users.", err=True)
+            raise SystemExit(1)
 
-    dag = storage.get_group_dag(group_pubkey)
+    def make_event(group, author, privkey, tips):
+        return create_group_kick(group, author, privkey, target_pubkey, tips)
 
-    relays = get_canonical_relays(dag, fallback)
-    asyncio.run(sync_and_heal(dag, relays))
-    relays = get_canonical_relays(dag, fallback)
-
-    state = dag.get_state()
-    if not state.is_mod(user_pubkey):
-        click.echo("Error: You must be a mod to kick users.", err=True)
-        sys.exit(1)
-
-    tips = dag.get_tips()
-    event = create_group_kick(
-        group_hex=group_pubkey,
-        author_hex=user_pubkey,
-        author_privkey=user_privkey,
-        target=target_pubkey,
-        parents=tips,
+    _sync_and_publish(
+        group_pubkey,
+        relay,
+        make_event,
+        check_perm,
+        success_msg=f"Kicked {target_pubkey[:12]}... from group.",
     )
-
-    dag.add_event(event)
-
-    async def _pub_all():
-        async def pub_one(url):
-            await fetch_publish(url, event)
-
-        await asyncio.gather(*[pub_one(url) for url in relays])
-
-    asyncio.run(_pub_all())
-    click.echo(f"Kicked {target_pubkey[:12]}... from group.")
 
 
 @cli.command()
@@ -1053,42 +1035,22 @@ def kick(group_pubkey: str, target_pubkey: str, relay: str | None):
 @click.option("--relay", default=None, help="Relay URL")
 def mod_add(group_pubkey: str, target_pubkey: str, relay: str | None):
     """Promote a user to moderator (mod only)."""
-    storage = get_storage()
-    fallback = [relay] if relay else BOOTSTRAP_RELAYS
 
-    user_privkey = crypto.load_private_key(storage.get_user_key_path())
-    user_pubkey = crypto.public_key_from_private(user_privkey)
+    def check_perm(state, user):
+        if not state.is_mod(user):
+            click.echo("Error: You must be a mod.", err=True)
+            raise SystemExit(1)
 
-    dag = storage.get_group_dag(group_pubkey)
+    def make_event(group, author, privkey, tips):
+        return create_mod_add(group, author, privkey, target_pubkey, tips)
 
-    relays = get_canonical_relays(dag, fallback)
-    asyncio.run(sync_and_heal(dag, relays))
-    relays = get_canonical_relays(dag, fallback)
-
-    state = dag.get_state()
-    if not state.is_mod(user_pubkey):
-        click.echo("Error: You must be a mod.", err=True)
-        sys.exit(1)
-
-    tips = dag.get_tips()
-    event = create_mod_add(
-        group_hex=group_pubkey,
-        author_hex=user_pubkey,
-        author_privkey=user_privkey,
-        target=target_pubkey,
-        parents=tips,
+    _sync_and_publish(
+        group_pubkey,
+        relay,
+        make_event,
+        check_perm,
+        success_msg=f"Promoted {target_pubkey[:12]}... to mod.",
     )
-
-    dag.add_event(event)
-
-    async def _pub_all():
-        async def pub_one(url):
-            await fetch_publish(url, event)
-
-        await asyncio.gather(*[pub_one(url) for url in relays])
-
-    asyncio.run(_pub_all())
-    click.echo(f"Promoted {target_pubkey[:12]}... to mod.")
 
 
 @cli.command()
@@ -1097,42 +1059,22 @@ def mod_add(group_pubkey: str, target_pubkey: str, relay: str | None):
 @click.option("--relay", default=None, help="Relay URL")
 def mod_remove(group_pubkey: str, target_pubkey: str, relay: str | None):
     """Demote a moderator to regular member (mod only)."""
-    storage = get_storage()
-    fallback = [relay] if relay else BOOTSTRAP_RELAYS
 
-    user_privkey = crypto.load_private_key(storage.get_user_key_path())
-    user_pubkey = crypto.public_key_from_private(user_privkey)
+    def check_perm(state, user):
+        if not state.is_mod(user):
+            click.echo("Error: You must be a mod.", err=True)
+            raise SystemExit(1)
 
-    dag = storage.get_group_dag(group_pubkey)
+    def make_event(group, author, privkey, tips):
+        return create_mod_remove(group, author, privkey, target_pubkey, tips)
 
-    relays = get_canonical_relays(dag, fallback)
-    asyncio.run(sync_and_heal(dag, relays))
-    relays = get_canonical_relays(dag, fallback)
-
-    state = dag.get_state()
-    if not state.is_mod(user_pubkey):
-        click.echo("Error: You must be a mod.", err=True)
-        sys.exit(1)
-
-    tips = dag.get_tips()
-    event = create_mod_remove(
-        group_hex=group_pubkey,
-        author_hex=user_pubkey,
-        author_privkey=user_privkey,
-        target=target_pubkey,
-        parents=tips,
+    _sync_and_publish(
+        group_pubkey,
+        relay,
+        make_event,
+        check_perm,
+        success_msg=f"Demoted {target_pubkey[:12]}... from mod.",
     )
-
-    dag.add_event(event)
-
-    async def _pub_all():
-        async def pub_one(url):
-            await fetch_publish(url, event)
-
-        await asyncio.gather(*[pub_one(url) for url in relays])
-
-    asyncio.run(_pub_all())
-    click.echo(f"Demoted {target_pubkey[:12]}... from mod.")
 
 
 @cli.command()
@@ -1148,49 +1090,23 @@ def relay_update(group_pubkey: str, new_relays: tuple[str, ...], relay: str | No
     Publishes the update to all current relays, then seeds the new relays
     with the full local event history.
     """
-    storage = get_storage()
-    fallback = [relay] if relay else BOOTSTRAP_RELAYS
-
-    user_privkey = crypto.load_private_key(storage.get_user_key_path())
-    user_pubkey = crypto.public_key_from_private(user_privkey)
-
-    dag = storage.get_group_dag(group_pubkey)
-
-    # Sync and heal current relays first
-    old_relays = get_canonical_relays(dag, fallback)
-    click.echo(f"Syncing from {len(old_relays)} current relay(s)...")
-    asyncio.run(sync_and_heal(dag, old_relays))
-    old_relays = get_canonical_relays(dag, fallback)
-
-    state = dag.get_state()
-    if not state.is_mod(user_pubkey):
-        click.echo("Error: You must be a mod to update relays.", err=True)
-        sys.exit(1)
-
-    tips = dag.get_tips()
     new_relay_list = list(new_relays)
 
-    event = create_relay_update(
-        group_hex=group_pubkey,
-        author_hex=user_pubkey,
-        author_privkey=user_privkey,
-        new_relays=new_relay_list,
-        parents=tips,
+    def check_perm(state, user):
+        if not state.is_mod(user):
+            click.echo("Error: You must be a mod to update relays.", err=True)
+            raise SystemExit(1)
+
+    def make_event(group, author, privkey, tips):
+        return create_relay_update(group, author, privkey, new_relay_list, tips)
+
+    dag, old_relays = _sync_and_publish(
+        group_pubkey,
+        relay,
+        make_event,
+        check_perm,
+        success_msg=f"Updated relays to: {', '.join(new_relay_list)}",
     )
-
-    dag.add_event(event)
-
-    # Publish update to ALL current relays
-    click.echo(f"Publishing relay_update to {len(old_relays)} current relay(s)...")
-
-    async def _pub_all():
-        async def pub_one(url):
-            await fetch_publish(url, event)
-
-        await asyncio.gather(*[pub_one(url) for url in old_relays])
-
-    asyncio.run(_pub_all())
-    click.echo(f"Updated relays to: {', '.join(new_relay_list)}")
 
     # Seed new relays with full local history
     all_local = dag.get_all_events()
