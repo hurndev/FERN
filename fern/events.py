@@ -89,7 +89,18 @@ def _verify_event_integrity(event: Event) -> tuple[bool, str]:
         event["content"],
         event["ts"],
     )
-    if compute_event_id(canonical) != event["id"]:
+    computed_id = compute_event_id(canonical)
+    if computed_id != event["id"]:
+        print(
+            f"[VERIFY DEBUG] id mismatch: computed={computed_id[:16]}... stored={event['id'][:16]}..."
+        )
+        print(f"[VERIFY DEBUG] canonical bytes: {canonical[:100]}...")
+        print(
+            f"[VERIFY DEBUG] event type={event['type']} group={event['group'][:16]}... ts={event['ts']}"
+        )
+        print(
+            f"[VERIFY DEBUG] event content keys: {list(event.get('content', {}).keys()) if isinstance(event.get('content'), dict) else 'N/A'}"
+        )
         return False, "id mismatch"
 
     signer = event["group"] if event["type"] == "group_genesis" else event["author"]

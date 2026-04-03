@@ -228,6 +228,9 @@ class RelayServer:
             )
             print(f"    sending {len(events)} event(s)")
             for event in events:
+                print(
+                    f"    [SYNC DEBUG] sending event: type={event['type']} id={event['id'][:16]}... group={event['group'][:16]}..."
+                )
                 await ws.send(json.dumps({"type": "event", "event": event}))
         await ws.send(json.dumps({"type": "sync_complete", "group": group}))
 
