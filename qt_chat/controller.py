@@ -22,12 +22,14 @@ class ChatController(QObject):
     sync_finished = pyqtSignal(str)
     event_for_ui = pyqtSignal(str, dict)
     state_changed = pyqtSignal(str)
-    publish_ok = pyqtSignal(str)
+    publish_ok = pyqtSignal(str, str)
     publish_failed = pyqtSignal(str, str)
     error = pyqtSignal(str)
     log_message = pyqtSignal(str, str)
     relay_status = pyqtSignal(str, str, str)
     relays_changed = pyqtSignal(str, list)
+    group_creation_failed = pyqtSignal(str, str)
+    message_status_changed = pyqtSignal(str, str, str)
 
     def __init__(self, fern_home: str | None = None):
         super().__init__()
@@ -52,6 +54,9 @@ class ChatController(QObject):
 
         self._pending_publishes: dict[str, dict] = {}
         self._pending_actions: dict[str, tuple] = {}
+        self._pending_creations: dict[str, dict] = {}
+        self._pending_events: dict[str, tuple] = {}
+        self._retried_events: set[str] = set()
         self._worker_thread.start()
 
     def _on_worker_error(self, msg: str):
@@ -65,6 +70,32 @@ class ChatController(QObject):
         self.log_message.emit(level, message)
         if level == "error":
             self.error.emit(message)
+
+    def _format_publish_results(self, results: dict) -> str:
+        """Format per-relay publish results into a human-readable string."""
+        if not results:
+            return "no relays contacted"
+        successes = sum(
+            1
+            for r in results.values()
+            if r is not None and isinstance(r, dict) and r.get("type") == "ok"
+        )
+        total = len(results)
+        parts = []
+        for url, r in results.items():
+            short = url.replace("wss://", "").replace("ws://", "")
+            if r is None:
+                parts.append(f"{short}: timeout")
+            elif isinstance(r, dict):
+                t = r.get("type", "?")
+                if t == "ok":
+                    parts.append(f"{short}: OK")
+                else:
+                    msg = r.get("message", "")
+                    parts.append(f"{short}: {msg or t}")
+            else:
+                parts.append(f"{short}: {str(r)[:30]}")
+        return f"{successes}/{total} relays accepted ({', '.join(parts)})"
 
     def has_identity(self) -> bool:
         """Check if user key exists."""
@@ -303,31 +334,92 @@ class ChatController(QObject):
                 self.relays_changed.emit(group_pubkey, list(state.relays))
 
     def _on_publish_result(self, event_id: str, results_json: str):
-        """Handle publish result. If all failed, remove optimistic event."""
+        """Handle publish result. Logs outcome with per-relay detail."""
         pending = self._pending_publishes.pop(event_id, None)
+
+        try:
+            results = json.loads(results_json)
+        except Exception:
+            self._log(
+                "error",
+                f"publish result: failed to parse results for {event_id[:16]}...",
+            )
+            self.publish_failed.emit(event_id, "failed to parse results")
+            return
+
+        detail = self._format_publish_results(results)
+        successes = sum(
+            1
+            for r in results.values()
+            if r is not None and isinstance(r, dict) and r.get("type") == "ok"
+        )
+
+        if pending and pending.get("is_creation"):
+            group_pubkey = pending["group_pubkey"]
+            creation = self._pending_creations.pop(group_pubkey, None)
+            name = creation["name"] if creation else "unknown"
+
+            if successes == 0:
+                self._log(
+                    "error",
+                    f"Group creation failed: no relays accepted the genesis event. {detail}",
+                )
+                self.group_creation_failed.emit(group_pubkey, detail)
+                self.publish_failed.emit(event_id, detail)
+                return
+
+            genesis = creation["genesis"]
+            join_event = creation["join"]
+            relay_urls = creation["relay_urls"]
+
+            dag_obj = self.storage.get_group_dag(group_pubkey)
+            lock = self._worker.get_lock(group_pubkey)
+
+            with lock:
+                dag_obj.add_event(genesis, skip_verify=True, skip_auth=True)
+            with lock:
+                dag_obj.add_event(join_event, skip_verify=True, skip_auth=True)
+
+            self._log(
+                "info",
+                f"Group '{name}' created: {detail}. Publishing join event...",
+            )
+            self._worker.publish_event(join_event, relay_urls)
+
+            self._refresh_group_cache(group_pubkey)
+            self.state_changed.emit(group_pubkey)
+            self.group_created.emit(group_pubkey)
+            self.publish_ok.emit(event_id, detail)
+            return
+
         if pending:
             group_pubkey = pending["group_pubkey"]
-            dag_obj = self.storage.get_group_dag(group_pubkey)
-
-            try:
-                results = json.loads(results_json)
-            except Exception:
-                self.publish_failed.emit(event_id, "failed to parse results")
-                return
-
-            successes = sum(
-                1
-                for r in results.values()
-                if r is not None and isinstance(r, dict) and r.get("type") == "ok"
-            )
             if successes == 0:
-                dag_obj.remove_event(event_id)
-                self.publish_failed.emit(event_id, "All relays rejected the event")
+                self._log("error", f"Publish failed: {detail}")
+                event = pending["event"]
+                relay_urls = list(results.keys())
+                self._retried_events.add(event_id)
+                self._worker.schedule_retry(event, relay_urls, group_pubkey)
+                self.publish_failed.emit(event_id, detail)
+                self.message_status_changed.emit(event_id, "failed", detail)
+                self._pending_events.pop(event_id, None)
                 return
 
-            self.publish_ok.emit(event_id)
+            self._log("info", f"Publish confirmed: {detail}")
+            self.publish_ok.emit(event_id, detail)
+            self.message_status_changed.emit(event_id, "confirmed", detail)
+            self._pending_events.pop(event_id, None)
+        elif event_id in self._retried_events:
+            self._retried_events.discard(event_id)
+            if successes > 0:
+                self._log("info", f"Message delivered on retry: {detail}")
+                self.publish_ok.emit(event_id, detail)
+                self.message_status_changed.emit(event_id, "confirmed", detail)
+            else:
+                self._log("error", f"Message delivery failed after retries: {detail}")
+                self.publish_failed.emit(event_id, detail)
         else:
-            self.publish_ok.emit(event_id)
+            self.publish_ok.emit(event_id, detail)
 
     def _publish_action(
         self,
@@ -361,8 +453,6 @@ class ChatController(QObject):
             with lock:
                 dag_obj.add_event(event, skip_verify=True, skip_auth=True)
 
-            self.event_for_ui.emit(group_pubkey, event)
-
             if post_fn:
                 post_fn(event)
 
@@ -371,6 +461,9 @@ class ChatController(QObject):
                 "group_pubkey": group_pubkey,
                 "event": event,
             }
+            self._pending_events[event["id"]] = (group_pubkey, event["type"])
+            self.message_status_changed.emit(event["id"], "pending", "")
+            self.event_for_ui.emit(group_pubkey, event)
             self._worker.publish_event(event, relay_urls)
             self._refresh_group_cache(group_pubkey)
             self.state_changed.emit(group_pubkey)
@@ -389,15 +482,12 @@ class ChatController(QObject):
                 group_pubkey, self.user_pubkey, self.user_privkey, text, tips
             )
 
-        def post(event):
-            self._log("info", "Message sent to group")
-
-        self._publish_action(group_pubkey, create, check, post)
+        self._publish_action(group_pubkey, create, check)
 
     def create_group(
         self, name: str, description: str, public: bool, relay_urls: list[str]
     ):
-        """Create a new group."""
+        """Create a new group. Emits group_created only after at least one relay accepts the genesis."""
         try:
             group_privkey, group_pubkey = crypto.generate_keypair()
             self.storage.save_group_key(group_privkey, name)
@@ -406,31 +496,33 @@ class ChatController(QObject):
                 group_privkey, self.user_pubkey, name, description, public, relay_urls
             )
 
-            dag_obj = self.storage.get_group_dag(group_pubkey)
-            lock = self._worker.get_lock(group_pubkey)
-            with lock:
-                dag_obj.add_event(genesis, skip_verify=True, skip_auth=True)
             join_event = events.create_group_join(
                 group_pubkey, self.user_pubkey, self.user_privkey, [genesis["id"]]
             )
-            with lock:
-                dag_obj.add_event(join_event, skip_verify=True, skip_auth=True)
+
+            self._pending_creations[group_pubkey] = {
+                "name": name,
+                "genesis": genesis,
+                "join": join_event,
+                "relay_urls": relay_urls,
+                "group_privkey": group_privkey,
+            }
 
             self._pending_publishes[genesis["id"]] = {
                 "group_pubkey": group_pubkey,
                 "event": genesis,
+                "is_creation": True,
             }
             self._pending_publishes[join_event["id"]] = {
                 "group_pubkey": group_pubkey,
                 "event": join_event,
             }
-            self._worker.publish_event(genesis, relay_urls)
-            self._worker.publish_event(join_event, relay_urls)
 
-            self._refresh_group_cache(group_pubkey)
-            self.state_changed.emit(group_pubkey)
-            self.group_created.emit(group_pubkey)
-            self._log("info", f"Group '{name}' created")
+            self._log(
+                "info",
+                f"Creating group '{name}' — publishing genesis to {len(relay_urls)} relay(s)...",
+            )
+            self._worker.publish_event(genesis, relay_urls)
         except Exception as e:
             self._log("error", f"Failed to create group: {e}")
 
