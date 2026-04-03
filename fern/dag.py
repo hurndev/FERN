@@ -139,6 +139,20 @@ class EventDAG:
     def count(self) -> int:
         return len(self.events)
 
+    def remove_event(self, event_id: str) -> bool:
+        """Remove an event from the DAG. Returns True if removed, False if not found.
+
+        Only safe for rolling back optimistic adds — the removed event must have no
+        children (i.e. it must be a tip). Attempting to remove a non-tip will leave
+        the DAG in an inconsistent state.
+        """
+        if event_id not in self.events:
+            return False
+        del self.events[event_id]
+        self._invalidate_state_cache()
+        self._save()
+        return True
+
 
 class ClientStorage:
     """Manages local storage for multiple groups and user identity."""

@@ -4,7 +4,7 @@ FERN (Fault-tolerant Event Relay Network) is a messaging protocol designed for d
 
 Relay servers are intentionally dumb. They store and forward signed events, but have no authority over users and groups. Everything is verified locally by the client. Each group lives on a selection of 'canonical' relays, so if one relay goes down the group continues to exist. Groups can be instantly migrated to new relays, and message history will go with it.
 
-Message history is structured as a DAG (Directed Acyclic Graph), a similar concept to a blockchain. Every message references the messages before it, making the history tamper-proof and fully verifiable by anyone. Censorship is always detectable as a visible gap  in the chain. Clients automatically heal divergent relays by redistributing any messages a relay is missing, so the full message history is maintained across all group relays without direct communication between them.
+Message history is structured as a DAG (Directed Acyclic Graph), a similar concept to a blockchain. Every message references the messages before it, making the history tamper-proof and fully verifiable by anyone. Censorship is always detectable as a visible gap in the chain. Clients automatically heal divergent relays by redistributing any messages a relay is missing, so the full message history is maintained across all group relays without direct communication between them.
 
 Much of FERN's design is inspired by [NOSTR](https://en.wikipedia.org/wiki/Nostr), but unlike NOSTR it is designed specifically for group messaging: groups have a canonical relay set (rather than relying on a single centralized relay), history is verifiable for completeness across relays, and the self-healing replication model means a group's full history is always recoverable as long as any one client has it cached.
 
@@ -12,7 +12,7 @@ The full protocol specification (WIP) can be found in [FERN-protocol-spec.md](FE
 
 ## Current State
 
-This repository contains a CLI client, relay server, chat webapp, DAG inspector, debug tools, and testing utilities. The core protocol is implemented but has not been thoroughly tested and is NOT ready for production use. For now, only test locally.
+This repository contains a CLI client, relay server, Qt desktop chat application, DAG inspector, debug tools, and testing utilities. The core protocol is implemented but has not been thoroughly tested and is NOT ready for production use. For now, only test locally.
 
 ## Quick Start
 
@@ -59,13 +59,13 @@ fern wipe                      # Delete all local data, keep keypair
 
 Most commands perform a sync first to get the latest event history.
 
-### Web Chat (`fern-chat`)
+### Qt Chat App (`fern-chat`)
 
 ```bash
 fern-chat
 ```
 
-Opens the chat webapp at `http://127.0.0.1:8080`. Signing happens client-side in the browser — your private key never leaves your machine. You'll need at least one relay running to create or join groups.
+Opens a Qt desktop window with a retro-style interface. You'll need at least one relay running to create or join groups.
 
 ### DAG Inspector (`fern-inspect`)
 
@@ -93,5 +93,3 @@ fern-test spawn-user alice          # Create test user in /tmp/alice
 fern-test multi-send <group> alice bob --concurrent  # Send from multiple users
 fern-test watch <group_pubkey>      # Watch events on a relay in real-time
 ```
-
-See [TESTING_TOOLS.md](TESTING_TOOLS.md) for a full testing guide.

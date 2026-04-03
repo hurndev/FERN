@@ -17,3 +17,5 @@
 - State derivation must be sequential?
 - Prevent events with missing parents from being added to DAG or referenced in new events
 - Better relay on logging, show loaded events
+- Fix relay status in qt ui
+- Implement REFACTOR 2

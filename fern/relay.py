@@ -44,11 +44,18 @@ async def fetch_events(
             async for raw in ws:
                 msg = json.loads(raw)
                 if msg["type"] == "event":
-                    events.append(msg["event"])
+                    event = msg["event"]
+                    print(
+                        f"[FETCH] received event: type={event['type']} id={event['id'][:16]}... group={event['group'][:16]}... ts={event['ts']} parents={len(event.get('parents', []))}"
+                    )
+                    events.append(event)
                 elif msg["type"] == "sync_complete":
+                    print(
+                        f"[FETCH] sync_complete received, total events: {len(events)}"
+                    )
                     break
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[FETCH] error: {e}")
     return events
 
 
@@ -114,7 +121,15 @@ async def subscribe(
         async for raw in ws:
             msg = json.loads(raw)
             if msg.get("type") == "event":
+                print(
+                    f"[RELAY] received event from {relay_url}: id={msg['event'].get('id', '?')[:16]}..."
+                )
                 await on_event(msg["event"], relay_url)
+            else:
+                print(
+                    f"[RELAY] relay sent non-event message: {msg.get('type', 'unknown')}"
+                )
+    print(f"[RELAY] subscribe loop exited for {relay_url}")
 
 
 async def publish_to_all(
@@ -152,7 +167,8 @@ async def subscribe_with_retry(
             await subscribe(relay_url, group_pubkey, on_event)
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except BaseException as e:
+            print(f"[RELAY] subscribe error on {relay_url}: {e}")
             if on_error is not None:
                 on_error(relay_url, e)
         await asyncio.sleep(retry_delay)

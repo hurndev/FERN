@@ -8,7 +8,7 @@ The codebase has three kinds of component:
 
 1. **Shared libraries** — protocol logic used by everything
 2. **Relay server** — stores and forwards events
-3. **Clients** — two independent implementations that talk to relays
+3. **Clients** — two implementations: a CLI client and a Qt GUI client
 
 ## Module Map
 
@@ -21,9 +21,9 @@ These modules implement the protocol itself. Both clients and the relay server i
 | `crypto.py` | Ed25519 key generation, signing, verification, PEM key storage |
 | `events.py` | Canonical serialization, event creation helpers, `GroupState` derivation, event verification |
 | `dag.py` | `EventDAG` (local per-group event store + children index), `ClientStorage` (multi-group manager) |
-| `sync.py` | Shared sync decision logic. `decide_sync_action()` — pure function that decides skip/incremental/full based on local DAG state and relay summaries. Used by both `client.py` and `chat.py`. |
+| `sync.py` | Shared sync decision logic. `decide_sync_action()` — pure function that decides skip/incremental/full based on local DAG state and relay summaries. |
 | `relay.py` | Plain async functions for relay communication. One-shot: `fetch_summary`, `fetch_events`, `publish`, `fetch_event`, `fetch_genesis`, `publish_to_all`. Persistent: `subscribe` (streams events until cancelled), `subscribe_with_retry` (auto-reconnects on disconnect). |
-| `config.py` | Shared configuration values. `BOOTSTRAP_RELAYS` — default relay URLs used by CLI, debug, and test tools. |
+| `config.py` | Shared configuration values. `BOOTSTRAP_RELAYS` — default relay URLs used by CLI and debug tools. |
 | `storage.py` | Resolves storage paths (`~/.fern`, `FERN_TEST_USER`, `--home`) |
 
 ### Relay Server
@@ -37,37 +37,93 @@ These modules implement the protocol itself. Both clients and the relay server i
 | Module | Entry Point | Purpose |
 |---|---|---|
 | `client.py` | `fern` | CLI client. Full sync-and-heal, relay migration, event publishing. |
-| `chat.py` | `fern-chat` | Web chat app. Browser does signing via JS; Python backend proxies to relays. |
+| `qt_chat/` | `fern-chat` | Qt GUI chat application (PyQt5). All UI code in `app.py`. |
 | `inspect.py` | `fern-inspect` | DAG visualizer. Web UI showing real-time DAG rendering. |
 | `debug.py` | `fern-debug` | Debug CLI. Verify events, dag-tree, state, gaps, compare-relays, health check. |
 | `test.py` | `fern-test` | Test harness. Spawn users, multi-send, watch events. |
 
-### Frontend
+## Qt Chat Application (`qt_chat/`)
 
-| Path | Purpose |
-|---|---|
-| `static/chat.html` | Single-file web chat UI. Client-side Ed25519 signing, event creation, state derivation. |
+The Qt chat app is a PyQt5 desktop application. All UI code lives in `qt_chat/app.py`.
+
+### Structure
+
+```
+qt_chat/
+├── __init__.py     Entry point, creates QApplication and shows main window
+├── app.py          All UI widgets, dialogs, stylesheet, and helpers
+└── controller.py   Orchestration bridge between UI and background worker thread
+```
+
+### App.py Classes
+
+| Class | Type | Purpose |
+|---|---|---|
+| `RETRO_STYLESHEET` | Constant | CSS stylesheet for retro Windows 95 look |
+| `short_key()` | Helper | Truncates pubkey for display |
+| `format_timestamp()` | Helper | Formats unix timestamps |
+| `RetroTitleBar` | Widget | Gradient-painted custom title bar |
+| `RelayStatusBar` | Widget | Shows relay connection status dots |
+| `GroupListItem` | ListWidgetItem | Group list entry with icon, name, member count |
+| `MemberItemWidget` | Widget | Member list entry with role icon and clickable pubkey |
+| `ClickableLabel` | Label | Label that acts like a clickable link |
+| `IdentityDialog` | Dialog | Shown on first launch to generate or import identity |
+| `CreateGroupDialog` | Dialog | Form to create a new group |
+| `JoinGroupDialog` | Dialog | Form to join via group address |
+| `UserProfileDialog` | Dialog | Shows user info, role, and clickable pubkey |
+| `GroupChatView` | Widget | Chat view for one group (messages, input, relay status) |
+| `FernChatMain` | MainWindow | Main window with groups list, tabs, member list, event log |
+
+### Controller Architecture
+
+The Qt app uses a **controller pattern** to keep UI separate from protocol logic:
+
+```
+FernChatMain (UI)
+    ↓ Qt signals
+ChatController (Orchestration)
+    ↓ pyqtSignals
+RelayWorker (runs in QThread, async I/O)
+    ↓
+Relays (WebSocket)
+```
+
+- `ChatController` (in `controller.py`) runs in the main thread. It receives UI actions and routes them to the worker.
+- `RelayWorker` (in `worker.py`) runs in a separate QThread. It handles all async WebSocket communication with relays.
+- Results are emitted as Qt signals back to `FernChatMain` which updates the UI.
+
+This separation keeps the UI responsive during network I/O.
+
+### Key UI Patterns
+
+**Splitter-based layout:** The main window uses `QSplitter` to allow users to resize panels (groups list, chat area, members panel).
+
+**Retro styling:** The `RETRO_STYLESHEET` constant applies a Windows 95 aesthetic (3D beveled borders, gray backgrounds, navy accents) to all widgets.
+
+**Event filtering:** `GroupChatView` uses an event filter on the message input to detect Enter key for sending.
+
+**Max-height enforcement:** A splitter handles resizing the message input area, with a splitterMoved signal handler enforcing a 210px maximum.
 
 ## The Two Clients
 
-`client.py` and `chat.py` are **independent programs** that implement the same protocol. They share `crypto.py`, `events.py`, and `dag.py`, but handle connections and sync differently.
+`client.py` and `qt_chat/` are **independent programs** that implement the same protocol. They share `crypto.py`, `events.py`, and `dag.py`, but handle connections and sync differently.
 
 ### Connection Model
 
-| | CLI (`client.py`) | Chat (`chat.py`) |
+| | CLI (`client.py`) | Qt Chat (`qt_chat/`) |
 |---|---|---|
-| **Connections** | Short-lived. Opens a WebSocket per action, then closes. | Short-lived. One-shot calls for publish/sync, plus background `subscribe()` tasks for real-time events. |
-| **Where sync logic lives** | `sync_and_heal()` — called inline before every action | `_smart_sync()` — called from `ChatSession.handle_message` when browser sends `{action: "sync"}` |
+| **Connections** | Short-lived. Opens a WebSocket per action, then closes. | Background `subscribe()` tasks stream events in a worker thread. |
+| **Where sync logic lives** | `sync_and_heal()` — called inline before every action | `_smart_sync()` — called from controller signal handlers |
 | **Relay healing** | Yes. Cross-references relays, pushes missing events. | No. |
 | **Relay migration** | Yes. Follows migration chain across multiple sync rounds. | No. |
-| **Signing** | Server-side Python. Keys on disk. | Client-side browser JS. Keys in localStorage (fetched from backend on first load). |
-| **Event storage** | `EventDAG` on disk via `ClientStorage` | Same `EventDAG` on disk (backend), plus browser-side array in memory |
+| **Signing** | Server-side Python. Keys on disk. | Server-side Python (same as CLI). |
+| **Event storage** | `EventDAG` on disk via `ClientStorage` | Same `EventDAG` on disk via `ClientStorage` |
 
 ### Sync Logic
 
-Both clients share the same decision function: `sync.py:decide_sync_action()`. It's a pure function (no I/O) that takes local DAG state and relay summaries, and returns a `SyncDecision` indicating skip, full, or incremental sync. Each client fetches summaries using its own connection machinery, calls this function, then executes the result.
+Both clients share the same decision function: `sync.py:decide_sync_action()`. It's a pure function (no I/O) that takes local DAG state and relay summaries, and returns a `SyncDecision` indicating skip, incremental, or full sync. Each client fetches summaries using its own connection machinery, calls this function, then executes the result.
 
-The CLI has additional phases beyond the initial decision (relay discovery loops for migration, cross-relay healing). The chat only does the initial decision and executes it directly.
+The CLI has additional phases beyond the initial decision (relay discovery loops for migration, cross-relay healing). The Qt chat app does the initial decision and executes directly.
 
 **`decide_sync_action` decision tree:**
 
@@ -79,46 +135,6 @@ The CLI has additional phases beyond the initial decision (relay discovery loops
 Count is intentionally **not** compared, because relays store events that clients may reject (e.g. unauthorized mod actions). Tips are the correct signal — if the client knows all frontier events, there is nothing new to fetch.
 
 The 60-second buffer (`CLOCK_SKEW_BUFFER`) handles late-arriving concurrent events with earlier timestamps.
-
-### Data Flow in Chat
-
-```
-Browser                          chat.py (Python)                    Relay
-  │                                   │                                │
-  │  {action: "load_local", group}    │                                │
-  │ ─────────────────────────────────>│                                │
-  │  events from local EventDAG       │                                │
-  │ <─────────────────────────────────│                                │
-  │                                   │                                │
-  │  {action: "set_relays", relays}   │                                │
-  │ ─────────────────────────────────>│  stores relay URL list         │
-  │                                   │                                │
-  │  {action: "sync"}                 │                                │
-  │ ─────────────────────────────────>│                                │
-  │                                   │  _smart_sync():                │
-  │                                   │    check local DAG             │
-  │                                   │    fetch summaries (one-shot)  │
-  │                                   │    decide: skip/incr/full      │
-  │                                   │──── fetch_events(since) ──────>│
-  │                                   │<─── events ───────────────────│
-  │  events forwarded to browser      │                                │
-  │ <─────────────────────────────────│                                │
-  │  {type: "sync_complete"}          │                                │
-  │ <─────────────────────────────────│                                │
-  │                                   │                                │
-  │  {action: "publish", event}       │                                │
-  │ ─────────────────────────────────>│──── publish (one-shot) ───────>│
-  │                                   │<─── ok/error ─────────────────│
-  │  {type: "ok"} or {type: "error"}  │                                │
-  │ <─────────────────────────────────│                                │
-  │                                   │                                │
-  │  {action: "subscribe"}            │                                │
-  │ ─────────────────────────────────>│──── subscribe (persistent) ──>│
-  │  events streamed in background    │<─── events ───────────────────│
-  │ <─────────────────────────────────│                                │
-```
-
-Key point: the browser creates and signs events itself (using `@noble/ed25519`). The Python backend verifies them, forwards to relays, and stores locally.
 
 ## Relay Server
 
@@ -146,28 +162,12 @@ Events are sorted by `(ts, id)` — timestamp first, then event ID as tiebreaker
     └── <group_pubkey>.json       (event array for one group)
 ```
 
-## Maintenance Notes
-
-### Where signing happens
-
-- CLI: signing happens in Python (`events.py` helpers called from `client.py`)
-- Chat: signing happens in the browser (`chat.html` using `@noble/ed25519`). The backend only verifies and forwards.
-- Both produce identical events (same canonical serialization, same Ed25519 signatures).
-
-### Relay communication
-
-Both clients use the same plain async functions from `relay.py`:
-- One-shot: `publish()`, `fetch_events()`, `fetch_summary()`, `fetch_event()`, `fetch_genesis()` — open a WebSocket, send, receive, close.
-- Persistent: `subscribe()` — opens a WebSocket, subscribes, streams events until the connection drops. Callers handle retry.
-
-The CLI wraps `subscribe()` in its own retry loop (`subscribe_group()`). The chat backend does the same in `ChatSession._subscribe_with_retry()`.
-
 ## Entry Points
 
 ```
 fern                CLI client (client.py)
 fern-server         Relay server (server.py)
-fern-chat           Web chat app (chat.py)
+fern-chat           Qt chat app (qt_chat/__init__.py)
 fern-inspect        DAG visualizer (inspect.py)
 fern-debug          Debug tools (debug.py)
 fern-test           Test harness (test.py)
