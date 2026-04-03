@@ -1,6 +1,7 @@
 """ChatController — thin orchestration bridge between app.py and worker.py."""
 
 import json
+from typing import Callable
 
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
@@ -34,6 +35,7 @@ class ChatController(QObject):
         self.user_privkey: str = ""
         self.user_pubkey: str = ""
         self._active_syncs: set[str] = set()
+        self._group_info_cache: dict[str, dict] = {}
 
         self._worker = RelayWorker()
         self._worker_thread = QThread()
@@ -121,48 +123,63 @@ class ChatController(QObject):
         """Returns (pubkey, privkey)."""
         return self.user_pubkey, self.user_privkey
 
-    def list_groups(self) -> list[dict]:
-        """Returns [{pubkey, name, description, public, event_count, member_count, relays, joined}]
-        for each group in local storage."""
-        result = []
-        for group_pubkey in self.storage.list_groups():
-            dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
-            events_list = dag_obj.get_all_events()
-            result.append(
-                {
-                    "pubkey": group_pubkey,
-                    "name": state.metadata.get("name", f"Group_{group_pubkey[:8]}"),
-                    "description": state.metadata.get("description", ""),
-                    "public": state.public,
-                    "event_count": len(events_list),
-                    "member_count": len(state.joined),
-                    "relays": state.relays,
-                    "joined": self.user_pubkey in state.joined,
-                }
-            )
-        return result
+    def _with_lock(self, group_pubkey: str, fn: Callable):
+        """Run fn while holding the group lock. For safe main-thread DAG reads."""
+        lock = self._worker.get_lock(group_pubkey)
+        with lock:
+            return fn()
 
-    def get_group_events(self, group_pubkey: str) -> list[dict]:
-        """Returns sorted events for display."""
-        dag_obj = self.storage.get_group_dag(group_pubkey)
-        return dag_obj.get_all_events()
-
-    def get_group_state(self, group_pubkey: str):
-        """Returns current derived state for a group."""
-        dag_obj = self.storage.get_group_dag(group_pubkey)
-        return dag_obj.get_state()
-
-    def is_joined(self, group_pubkey: str) -> bool:
-        """Check if the user is in the joined set for this group."""
+    def _build_group_info(self, group_pubkey: str) -> dict:
+        """Build group info dict from DAG. Caller must hold lock."""
         dag_obj = self.storage.get_group_dag(group_pubkey)
         state = dag_obj.get_state()
+        events_list = dag_obj.get_all_events()
+        return {
+            "pubkey": group_pubkey,
+            "name": state.metadata.get("name", f"Group_{group_pubkey[:8]}"),
+            "description": state.metadata.get("description", ""),
+            "public": state.public,
+            "event_count": len(events_list),
+            "member_count": len(state.joined),
+            "relays": state.relays,
+            "joined": self.user_pubkey in state.joined,
+        }
+
+    def _refresh_group_cache(self, group_pubkey: str):
+        """Refresh cached group info for one group."""
+        lock = self._worker.get_lock(group_pubkey)
+        with lock:
+            self._group_info_cache[group_pubkey] = self._build_group_info(group_pubkey)
+
+    def _populate_group_cache(self):
+        """Populate cache for all known groups. Called on startup."""
+        for group_pubkey in self.storage.list_groups():
+            self._refresh_group_cache(group_pubkey)
+
+    def list_groups(self) -> list[dict]:
+        """Returns list of cached group info dicts."""
+        return list(self._group_info_cache.values())
+
+    def get_group_events(self, group_pubkey: str) -> list[dict]:
+        """Returns sorted events for display (thread-safe)."""
+        dag_obj = self.storage.get_group_dag(group_pubkey)
+        return self._with_lock(group_pubkey, dag_obj.get_all_events)
+
+    def get_group_state(self, group_pubkey: str):
+        """Returns current derived state for a group (thread-safe)."""
+        dag_obj = self.storage.get_group_dag(group_pubkey)
+        return self._with_lock(group_pubkey, dag_obj.get_state)
+
+    def is_joined(self, group_pubkey: str) -> bool:
+        """Check if the user is in the joined set for this group (thread-safe)."""
+        dag_obj = self.storage.get_group_dag(group_pubkey)
+        state = self._with_lock(group_pubkey, dag_obj.get_state)
         return self.user_pubkey in state.joined
 
     def is_mod(self, group_pubkey: str) -> bool:
-        """Check if the user is a mod for this group."""
+        """Check if the user is a mod for this group (thread-safe)."""
         dag_obj = self.storage.get_group_dag(group_pubkey)
-        state = dag_obj.get_state()
+        state = self._with_lock(group_pubkey, dag_obj.get_state)
         return self.user_pubkey in state.mods
 
     def sync_group(self, group_pubkey: str, hint_relays: list[str] | None = None):
@@ -172,7 +189,9 @@ class ChatController(QObject):
         try:
             self._active_syncs.add(group_pubkey)
             dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
+            lock = self._worker.get_lock(group_pubkey)
+            with lock:
+                state = dag_obj.get_state()
             relay_urls = (
                 state.relays
                 if state.relays
@@ -206,10 +225,10 @@ class ChatController(QObject):
                 f"Sync complete: {new_events} new events, {healed} healed, skipped={skipped}",
             )
 
+        self._refresh_group_cache(group_pubkey)
         self.state_changed.emit(group_pubkey)
         self.sync_finished.emit(group_pubkey)
 
-        # Handle any pending action queued for this group
         action = self._pending_actions.pop(group_pubkey, None)
         if action is None:
             return
@@ -223,13 +242,16 @@ class ChatController(QObject):
         """Finish joining after sync completes."""
         try:
             dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
+            lock = self._worker.get_lock(group_pubkey)
+            with lock:
+                state = dag_obj.get_state()
+                count = dag_obj.count
 
             if self.user_pubkey in state.joined:
                 self.group_joined.emit(group_pubkey)
                 return
 
-            if dag_obj.count == 0:
+            if count == 0:
                 self._log(
                     "error",
                     "Sync failed: no events received (is the genesis event on this relay?)",
@@ -242,11 +264,11 @@ class ChatController(QObject):
                 )
                 return
 
-            tips = dag_obj.get_tips()
+            with lock:
+                tips = dag_obj.get_tips()
             join_event = events.create_group_join(
                 group_pubkey, self.user_pubkey, self.user_privkey, tips
             )
-            lock = self._worker.get_lock(group_pubkey)
             with lock:
                 dag_obj.add_event(join_event, skip_verify=True, skip_auth=True)
             self.event_for_ui.emit(group_pubkey, join_event)
@@ -258,6 +280,7 @@ class ChatController(QObject):
             }
             self._worker.publish_event(join_event, relay_urls)
 
+            self._refresh_group_cache(group_pubkey)
             self.state_changed.emit(group_pubkey)
             self.group_joined.emit(group_pubkey)
             self._log("info", "Joined group successfully")
@@ -306,24 +329,42 @@ class ChatController(QObject):
         else:
             self.publish_ok.emit(event_id)
 
-    def send_message(self, group_pubkey: str, text: str):
-        """Create and publish a message event."""
+    def _publish_action(
+        self,
+        group_pubkey: str,
+        create_fn: Callable,
+        check_fn: Callable | None = None,
+        post_fn: Callable | None = None,
+    ):
+        """Create and publish an event.
+
+        Args:
+            create_fn: (tips) -> event | None. Return None to abort.
+            check_fn: (state) -> None. Raise or return. If None, no check.
+            post_fn: (event) -> None. Called after optimistic add, before publish.
+        """
         try:
             dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
+            lock = self._worker.get_lock(group_pubkey)
 
-            if not state.can_post(self.user_pubkey):
-                self._log("warning", "You must join the group before sending messages")
+            with lock:
+                state = dag_obj.get_state()
+                tips = dag_obj.get_tips()
+
+            if check_fn:
+                check_fn(state)
+
+            event = create_fn(tips)
+            if event is None:
                 return
 
-            tips = dag_obj.get_tips()
-            event = events.create_message(
-                group_pubkey, self.user_pubkey, self.user_privkey, text, tips
-            )
-            lock = self._worker.get_lock(group_pubkey)
             with lock:
                 dag_obj.add_event(event, skip_verify=True, skip_auth=True)
+
             self.event_for_ui.emit(group_pubkey, event)
+
+            if post_fn:
+                post_fn(event)
 
             relay_urls = state.relays if state.relays else config.BOOTSTRAP_RELAYS
             self._pending_publishes[event["id"]] = {
@@ -331,9 +372,27 @@ class ChatController(QObject):
                 "event": event,
             }
             self._worker.publish_event(event, relay_urls)
-            self._log("info", "Message sent to group")
+            self._refresh_group_cache(group_pubkey)
+            self.state_changed.emit(group_pubkey)
         except Exception as e:
-            self._log("error", f"Failed to send message: {e}")
+            self._log("error", f"Action failed: {e}")
+
+    def send_message(self, group_pubkey: str, text: str):
+        """Create and publish a message event."""
+
+        def check(state):
+            if not state.can_post(self.user_pubkey):
+                raise PermissionError("Must join before sending messages")
+
+        def create(tips):
+            return events.create_message(
+                group_pubkey, self.user_pubkey, self.user_privkey, text, tips
+            )
+
+        def post(event):
+            self._log("info", "Message sent to group")
+
+        self._publish_action(group_pubkey, create, check, post)
 
     def create_group(
         self, name: str, description: str, public: bool, relay_urls: list[str]
@@ -368,6 +427,7 @@ class ChatController(QObject):
             self._worker.publish_event(genesis, relay_urls)
             self._worker.publish_event(join_event, relay_urls)
 
+            self._refresh_group_cache(group_pubkey)
             self.state_changed.emit(group_pubkey)
             self.group_created.emit(group_pubkey)
             self._log("info", f"Group '{name}' created")
@@ -390,7 +450,9 @@ class ChatController(QObject):
 
         try:
             dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
+            lock = self._worker.get_lock(group_pubkey)
+            with lock:
+                state = dag_obj.get_state()
 
             if self.user_pubkey in state.joined:
                 self.group_joined.emit(group_pubkey)
@@ -405,45 +467,29 @@ class ChatController(QObject):
 
     def leave_group(self, group_pubkey: str):
         """Leave a group."""
-        try:
-            dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
 
+        def check(state):
             if self.user_pubkey not in state.joined:
-                self._log("warning", "You are not a member of this group")
-                return
-
+                raise PermissionError("Not a member of this group")
             if self.user_pubkey == state.genesis["content"]["founder"]:
-                self._log(
-                    "warning", "You are the founder and cannot leave your own group"
-                )
-                return
+                raise PermissionError("Founder cannot leave their own group")
 
-            tips = dag_obj.get_tips()
-            leave_event = events.create_group_leave(
+        def create(tips):
+            return events.create_group_leave(
                 group_pubkey, self.user_pubkey, self.user_privkey, tips
             )
-            lock = self._worker.get_lock(group_pubkey)
-            with lock:
-                dag_obj.add_event(leave_event, skip_verify=True, skip_auth=True)
-            self.event_for_ui.emit(group_pubkey, leave_event)
 
-            relay_urls = state.relays if state.relays else config.BOOTSTRAP_RELAYS
-            self._pending_publishes[leave_event["id"]] = {
-                "group_pubkey": group_pubkey,
-                "event": leave_event,
-            }
-            self._worker.publish_event(leave_event, relay_urls)
-
-            self.state_changed.emit(group_pubkey)
+        def post(event):
             self.group_left.emit(group_pubkey)
-        except Exception as e:
-            self._log("error", f"Failed to leave group: {e}")
+
+        self._publish_action(group_pubkey, create, check, post)
 
     def subscribe_group(self, group_pubkey: str):
         """Start live subscriptions for a group."""
         dag_obj = self.storage.get_group_dag(group_pubkey)
-        state = dag_obj.get_state()
+        lock = self._worker.get_lock(group_pubkey)
+        with lock:
+            state = dag_obj.get_state()
         relay_urls = state.relays if state.relays else config.BOOTSTRAP_RELAYS
         self._worker.start_subscriptions(group_pubkey, relay_urls)
         self._log("info", "Subscribed to group events")
@@ -455,116 +501,56 @@ class ChatController(QObject):
 
     def invite_user(self, group_pubkey: str, invitee_pubkey: str):
         """Invite a user (mod only)."""
-        try:
-            dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
 
+        def check(state):
             if self.user_pubkey not in state.mods:
-                self._log("warning", "Only moderators can invite users")
-                return
+                raise PermissionError("Only moderators can invite users")
 
-            tips = dag_obj.get_tips()
-            event = events.create_group_invite(
+        def create(tips):
+            return events.create_group_invite(
                 group_pubkey, self.user_pubkey, self.user_privkey, invitee_pubkey, tips
             )
-            lock = self._worker.get_lock(group_pubkey)
-            with lock:
-                dag_obj.add_event(event, skip_verify=True, skip_auth=True)
-            self.event_for_ui.emit(group_pubkey, event)
 
-            relay_urls = state.relays if state.relays else config.BOOTSTRAP_RELAYS
-            self._pending_publishes[event["id"]] = {
-                "group_pubkey": group_pubkey,
-                "event": event,
-            }
-            self._worker.publish_event(event, relay_urls)
-            self.state_changed.emit(group_pubkey)
-        except Exception as e:
-            self._log("error", f"Failed to invite user: {e}")
+        self._publish_action(group_pubkey, create, check)
 
     def kick_user(self, group_pubkey: str, target_pubkey: str):
         """Kick a user (mod only)."""
-        try:
-            dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
 
+        def check(state):
             if self.user_pubkey not in state.mods:
-                self._log("warning", "Only moderators can kick users")
-                return
+                raise PermissionError("Only moderators can kick users")
 
-            tips = dag_obj.get_tips()
-            event = events.create_group_kick(
+        def create(tips):
+            return events.create_group_kick(
                 group_pubkey, self.user_pubkey, self.user_privkey, target_pubkey, tips
             )
-            lock = self._worker.get_lock(group_pubkey)
-            with lock:
-                dag_obj.add_event(event, skip_verify=True, skip_auth=True)
-            self.event_for_ui.emit(group_pubkey, event)
 
-            relay_urls = state.relays if state.relays else config.BOOTSTRAP_RELAYS
-            self._pending_publishes[event["id"]] = {
-                "group_pubkey": group_pubkey,
-                "event": event,
-            }
-            self._worker.publish_event(event, relay_urls)
-            self.state_changed.emit(group_pubkey)
-        except Exception as e:
-            self._log("error", f"Failed to kick user: {e}")
+        self._publish_action(group_pubkey, create, check)
 
     def promote_mod(self, group_pubkey: str, target_pubkey: str):
         """Promote to mod (mod only)."""
-        try:
-            dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
 
+        def check(state):
             if self.user_pubkey not in state.mods:
-                self._log("warning", "Only moderators can promote users")
-                return
+                raise PermissionError("Only moderators can promote users")
 
-            tips = dag_obj.get_tips()
-            event = events.create_mod_add(
+        def create(tips):
+            return events.create_mod_add(
                 group_pubkey, self.user_pubkey, self.user_privkey, target_pubkey, tips
             )
-            lock = self._worker.get_lock(group_pubkey)
-            with lock:
-                dag_obj.add_event(event, skip_verify=True, skip_auth=True)
-            self.event_for_ui.emit(group_pubkey, event)
 
-            relay_urls = state.relays if state.relays else config.BOOTSTRAP_RELAYS
-            self._pending_publishes[event["id"]] = {
-                "group_pubkey": group_pubkey,
-                "event": event,
-            }
-            self._worker.publish_event(event, relay_urls)
-            self.state_changed.emit(group_pubkey)
-        except Exception as e:
-            self._log("error", f"Failed to promote user: {e}")
+        self._publish_action(group_pubkey, create, check)
 
     def demote_mod(self, group_pubkey: str, target_pubkey: str):
         """Demote from mod (mod only)."""
-        try:
-            dag_obj = self.storage.get_group_dag(group_pubkey)
-            state = dag_obj.get_state()
 
+        def check(state):
             if self.user_pubkey not in state.mods:
-                self._log("warning", "Only moderators can demote users")
-                return
+                raise PermissionError("Only moderators can demote users")
 
-            tips = dag_obj.get_tips()
-            event = events.create_mod_remove(
+        def create(tips):
+            return events.create_mod_remove(
                 group_pubkey, self.user_pubkey, self.user_privkey, target_pubkey, tips
             )
-            lock = self._worker.get_lock(group_pubkey)
-            with lock:
-                dag_obj.add_event(event, skip_verify=True, skip_auth=True)
-            self.event_for_ui.emit(group_pubkey, event)
 
-            relay_urls = state.relays if state.relays else config.BOOTSTRAP_RELAYS
-            self._pending_publishes[event["id"]] = {
-                "group_pubkey": group_pubkey,
-                "event": event,
-            }
-            self._worker.publish_event(event, relay_urls)
-            self.state_changed.emit(group_pubkey)
-        except Exception as e:
-            self._log("error", f"Failed to demote user: {e}")
+        self._publish_action(group_pubkey, create, check)

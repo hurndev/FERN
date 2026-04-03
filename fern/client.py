@@ -4,8 +4,7 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path
-from typing import Any
+
 
 import click
 import websockets
@@ -22,23 +21,15 @@ from .events import (
     create_mod_add,
     create_mod_remove,
     create_relay_update,
-    derive_group_state,
-    verify_event,
-    verify_event_id,
-    verify_event_signature,
 )
 from .dag import ClientStorage, EventDAG
 from .relay import (
-    fetch_events,
-    fetch_genesis,
-    publish as fetch_publish,
-    fetch_summary,
     publish_to_all,
     subscribe_with_retry,
 )
 from .storage import resolve_fern_dir
 from .config import BOOTSTRAP_RELAYS
-from .sync import decide_sync_action
+from .sync import SyncResult, run_sync_and_heal
 
 
 _fern_home: str | None = None
@@ -61,387 +52,6 @@ def get_canonical_relays(
     if env_relay:
         return [env_relay]
     return list(BOOTSTRAP_RELAYS)
-
-
-def validate_genesis(event: Event) -> tuple[bool, str]:
-    """Validate a genesis event. Returns (valid, reason)."""
-    if not event:
-        return False, "no event"
-
-    # Check required fields
-    for field in [
-        "id",
-        "type",
-        "group",
-        "author",
-        "parents",
-        "content",
-        "ts",
-        "sig",
-    ]:
-        if field not in event:
-            return False, f"missing field: {field}"
-
-    if event["type"] != "group_genesis":
-        return False, "not a genesis event"
-
-    if event["parents"]:
-        return False, "genesis must have empty parents"
-
-    # Verify ID matches canonical serialisation
-    if not verify_event_id(event):
-        return False, "event ID mismatch"
-
-    # Verify signature against group pubkey
-    if not verify_event_signature(event, event["group"]):
-        return False, "invalid signature"
-
-    return True, "ok"
-
-
-async def fetch_and_validate_events(
-    relay_urls: list[str],
-    group_pubkey: str,
-    since: int = 0,
-    skip_genesis_validation: bool = False,
-) -> tuple[dict[str, Event], dict[str, set[str]], list[str], int]:
-    """Fetch events from multiple relays in parallel and validate them.
-
-    Args:
-        relay_urls: List of relay URLs to fetch from
-        group_pubkey: Group public key
-        since: Only fetch events with ts >= since (0 = full sync)
-        skip_genesis_validation: If True, skip genesis validation (for incremental sync)
-
-    Returns:
-        - all_validated: dict mapping event_id -> event
-        - relay_event_ids: dict mapping relay_url -> set of event_ids it has
-        - good_relays: list of relays that returned valid genesis
-        - invalid_count: number of invalid events discarded
-    """
-    all_validated: dict[str, Event] = {}
-    relay_event_ids: dict[str, set[str]] = {}
-    good_relays: list[str] = []
-    invalid_count = 0
-
-    # Fetch genesis from all relays to validate them (unless skipped)
-    if skip_genesis_validation:
-        # For incremental sync, assume local genesis is valid and all relays are good
-        good_relays = list(relay_urls)
-        valid_genesis = None
-    else:
-        genesis_tasks = [fetch_genesis(url, group_pubkey) for url in relay_urls]
-        genesis_results = await asyncio.gather(*genesis_tasks)
-
-        valid_genesis = None
-        for url, genesis in zip(relay_urls, genesis_results):
-            if genesis is None:
-                click.echo(f"    {url}: no genesis found")
-                continue
-            ok, reason = validate_genesis(genesis)
-            if ok:
-                if valid_genesis is None:
-                    valid_genesis = genesis
-                elif genesis["id"] != valid_genesis["id"]:
-                    click.echo(f"    {url}: DIFFERENT genesis - discarding", err=True)
-                    continue
-                good_relays.append(url)
-            else:
-                click.echo(
-                    f"    {url}: genesis INVALID ({reason}) - discarding", err=True
-                )
-
-    if not good_relays:
-        return {}, {}, [], 0
-
-    # Fetch events from good relays (using since parameter for incremental sync)
-    fetch_tasks = [fetch_events(url, group_pubkey, since) for url in good_relays]
-    fetch_results = await asyncio.gather(*fetch_tasks)
-
-    for url, events in zip(good_relays, fetch_results):
-        ids = set()
-        for event in events:
-            ok, reason = verify_event(event)
-            if not ok:
-                invalid_count += 1
-                eid = event.get("id", "?")[:16]
-                click.echo(
-                    f"    {url}: invalid {event.get('type', '?')} {eid}... ({reason})"
-                )
-                continue
-            ids.add(event["id"])
-            if event["id"] not in all_validated:
-                all_validated[event["id"]] = event
-        relay_event_ids[url] = ids
-
-    return all_validated, relay_event_ids, good_relays, invalid_count
-
-
-async def sync_and_heal(dag: EventDAG, hint_relays: list[str]) -> dict:
-    """Full sync-and-heal cycle with relay discovery.
-
-    The sync process handles group migration by discovering canonical relays
-    through the event history itself, rather than trusting hint relays.
-
-    Process:
-      1. Check local state - if we have events, get latest timestamp and tips
-      2. Query relay summaries to check if sync is even needed
-      3. If summaries match local state, skip sync (already in sync)
-      4. If not, do incremental or full sync depending on local state
-      5. Heal any divergence across canonical relays
-
-    Returns summary dict with sync statistics.
-    """
-    summary: dict[str, Any] = {
-        "hint_relays": list(hint_relays),
-        "canonical_relays": [],
-        "bad_relays": [],
-        "sync_rounds": 0,
-        "total_events": 0,
-        "invalid_events": 0,
-        "healed_events": 0,
-        "gaps": [],
-        "skipped": False,
-    }
-
-    if not hint_relays:
-        return summary
-
-    # Snapshot local events - these are the persistent working set
-    local_events: dict[str, dict] = dict(dag.events)
-    local_event_ids_snapshot = set(local_events.keys())
-
-    # =========================================================================
-    # PHASE 0: CHECK IF SYNC IS NEEDED (incremental sync optimization)
-    # =========================================================================
-    # If we have local events, check relay summaries first to avoid
-    # unnecessary full history downloads.
-    # =========================================================================
-
-    local_latest_ts = 0
-    local_count = len(local_events)
-
-    if local_count > 0:
-        all_local_events = sorted(
-            local_events.values(), key=lambda e: (e["ts"], e["id"])
-        )
-        if all_local_events:
-            local_latest_ts = all_local_events[-1]["ts"]
-        local_event_ids = set(local_events.keys())
-
-        click.echo(f"  Local state: {local_count} events, latest ts={local_latest_ts}")
-        click.echo(f"  Fetching relay summaries to check if sync is needed...")
-
-        summary_tasks = [fetch_summary(url, dag.group_pubkey) for url in hint_relays]
-        summary_results = await asyncio.gather(*summary_tasks)
-
-        relay_summaries: dict[str, dict] = {}
-        for url, s in zip(hint_relays, summary_results):
-            if s is not None:
-                relay_summaries[url] = s
-
-        if relay_summaries:
-            decision = decide_sync_action(
-                local_event_ids, local_latest_ts, relay_summaries
-            )
-
-            if decision.action == "skip":
-                summary["skipped"] = True
-                click.echo(
-                    f"  [SKIP] All relay tips present in local DAG "
-                    f"({local_count} events)"
-                )
-
-                state = derive_group_state(local_events.values())
-                summary["canonical_relays"] = (
-                    state.relays if state.relays else list(hint_relays)
-                )
-
-                gaps = dag.get_missing_parents()
-                summary["gaps"] = sorted(gaps)
-                if gaps:
-                    click.echo(f"  WARNING: {len(gaps)} gap(s) detected")
-                else:
-                    click.echo("  DAG complete - no gaps")
-
-                return summary
-
-            click.echo(
-                f"  Relay has new tips not in local DAG - "
-                f"need {'incremental' if decision.action == 'incremental' else 'full'} sync"
-            )
-
-    # =========================================================================
-    # PHASE 1: SYNC WITH RELAY DISCOVERY
-    # =========================================================================
-    # We sync from relays, then check if the group has migrated to different
-    # relays. If so, we switch to the new relays and continue. This repeats
-    # until the relay list stabilises (derived relays match used relays).
-    # =========================================================================
-
-    current_relays = list(hint_relays)
-    all_validated: dict[str, dict] = dict(local_events)
-    seen_relays: set[str] = set()
-    all_relay_event_ids: dict[str, set[str]] = {}
-
-    while current_relays:
-        summary["sync_rounds"] += 1
-        round_num = summary["sync_rounds"]
-
-        click.echo(
-            f"  [Sync round {round_num}] Using relays: {', '.join(current_relays)}"
-        )
-
-        used_this_round = frozenset(current_relays)
-        seen_relays.update(current_relays)
-
-        sync_since = local_latest_ts if local_latest_ts > 0 else 0
-        skip_genesis = local_latest_ts > 0
-
-        if sync_since > 0:
-            click.echo(f"    Incremental sync since ts={sync_since}")
-
-        (
-            events,
-            relay_event_ids,
-            good_relays,
-            invalid_count,
-        ) = await fetch_and_validate_events(
-            current_relays,
-            dag.group_pubkey,
-            since=sync_since,
-            skip_genesis_validation=skip_genesis,
-        )
-
-        summary["invalid_events"] += invalid_count
-
-        new_events = 0
-        for eid, event in events.items():
-            if eid not in all_validated:
-                all_validated[eid] = event
-                new_events += 1
-
-        click.echo(
-            f"    Fetched {len(events)} events ({new_events} new, {invalid_count} invalid)"
-        )
-
-        bad_this_round = [r for r in current_relays if r not in good_relays]
-        summary["bad_relays"].extend(bad_this_round)
-
-        if not good_relays:
-            click.echo("    No working relays found.", err=True)
-            break
-
-        # Accumulate relay event IDs for cross-relay healing
-        for url, ids in relay_event_ids.items():
-            all_relay_event_ids[url] = ids
-
-        # Derive canonical relays from group state
-        state = derive_group_state(all_validated.values())
-        derived_relays = state.relays if state.relays else []
-
-        click.echo(
-            f"    Derived canonical relays: {derived_relays or '(none in group state)'}"
-        )
-
-        derived_set = frozenset(derived_relays)
-        if derived_set == used_this_round or not derived_relays:
-            click.echo("    Relay list stable - sync complete")
-            break
-
-        new_relays = [r for r in derived_relays if r not in seen_relays]
-        if not new_relays:
-            click.echo("    All derived relays already synced - sync complete")
-            break
-
-        click.echo(f"    Group migrated - switching to canonical relays")
-        current_relays = derived_relays
-
-    summary["total_events"] = len(all_validated)
-
-    # =========================================================================
-    # PHASE 2: HEAL CANONICAL RELAYS
-    # =========================================================================
-    # Now that we have the full history and know the canonical relays,
-    # we heal any divergence between them by cross-referencing event sets.
-    # =========================================================================
-
-    state = derive_group_state(all_validated.values())
-    canonical_relays = state.relays if state.relays else list(seen_relays)
-    summary["canonical_relays"] = canonical_relays
-
-    click.echo(f"\n  [Healing] Canonical relays: {', '.join(canonical_relays)}")
-
-    canonical_event_ids: dict[str, set[str]] = {}
-    for url in canonical_relays:
-        if url in all_relay_event_ids:
-            canonical_event_ids[url] = all_relay_event_ids[url]
-        else:
-            events = await fetch_events(url, dag.group_pubkey, since=sync_since)
-            ids = set()
-            for event in events:
-                ok, _ = verify_event(event)
-                if ok:
-                    ids.add(event["id"])
-                    if event["id"] not in all_validated:
-                        all_validated[event["id"]] = event
-            canonical_event_ids[url] = ids
-
-    new_event_ids = set(all_validated.keys()) - local_event_ids_snapshot
-    events_to_heal = set(all_validated.keys()) if sync_since == 0 else new_event_ids
-    healed = 0
-
-    click.echo(f"    Healing {len(events_to_heal)} event(s)")
-
-    for url in canonical_relays:
-        relay_ids = canonical_event_ids.get(url, set())
-        missing = events_to_heal - relay_ids
-        if missing:
-            click.echo(f"    {url}: missing {len(missing)} event(s), pushing...")
-            for event_id in missing:
-                event = all_validated[event_id]
-                result = await fetch_publish(url, event)
-                if result and result.get("type") == "ok":
-                    healed += 1
-        else:
-            click.echo(f"    {url}: up to date")
-
-    summary["healed_events"] = healed
-
-    # =========================================================================
-    # PHASE 3: FINALISE LOCAL STORAGE
-    # =========================================================================
-
-    new_added = 0
-    rejected = 0
-    for event in sorted(all_validated.values(), key=lambda e: (e["ts"], e["id"])):
-        ok, reason = dag.add_event(event, skip_verify=True)
-        if ok:
-            new_added += 1
-        elif reason != "duplicate":
-            eid = event.get("id", "?")[:16]
-            click.echo(f"    [REJECTED] {event['type']} {eid}... ({reason})")
-            rejected += 1
-
-    dag._save()
-
-    msg = f"\n  Added {new_added} new events locally ({dag.count} total)"
-    if rejected:
-        msg += f", {rejected} rejected"
-    click.echo(msg)
-
-    gaps = dag.get_missing_parents()
-    summary["gaps"] = sorted(gaps)
-    if gaps:
-        click.echo(f"  WARNING: {len(gaps)} gap(s) - missing parent events:")
-        for g in sorted(gaps)[:5]:
-            click.echo(f"    {g[:16]}...")
-        if len(gaps) > 5:
-            click.echo(f"    ... and {len(gaps) - 5} more")
-    else:
-        click.echo("  DAG complete - no gaps")
-
-    return summary
 
 
 async def subscribe_group(dag: EventDAG, relay_urls: list[str], callback=None) -> None:
@@ -509,12 +119,12 @@ def format_event(event: Event) -> str:
         return f"[{ts}] {author}: [{etype}] {json.dumps(event['content'])}"
 
 
-def print_heal_summary(summary: dict) -> None:
+def print_heal_summary(result: SyncResult) -> None:
     """Print a brief summary after sync-and-heal."""
-    if summary.get("bad_relays"):
-        click.echo(f"  Discarded {len(summary['bad_relays'])} unreliable relay(s).")
-    if summary.get("canonical_relays"):
-        click.echo(f"  Canonical relays: {', '.join(summary['canonical_relays'])}")
+    if result.bad_relays:
+        click.echo(f"  Discarded {len(result.bad_relays)} unreliable relay(s).")
+    if result.canonical_relays:
+        click.echo(f"  Canonical relays: {', '.join(result.canonical_relays)}")
 
 
 def _sync_and_publish(
@@ -544,7 +154,7 @@ def _sync_and_publish(
     dag = storage.get_group_dag(group_pubkey)
 
     relays = get_canonical_relays(dag, fallback)
-    asyncio.run(sync_and_heal(dag, relays))
+    asyncio.run(run_sync_and_heal(dag, relays, on_log=click.echo))
     relays = get_canonical_relays(dag, fallback)
 
     state = dag.get_state()
@@ -596,7 +206,7 @@ def keygen():
             return
 
     crypto.save_keypair(privkey, path)
-    click.echo(f"Generated new identity:")
+    click.echo("Generated new identity:")
     click.echo(f"  Public key: {pubkey}")
     click.echo(f"  Private key saved to: {path}")
 
@@ -661,7 +271,7 @@ def create_group(
     else:
         default_relays = ",".join(BOOTSTRAP_RELAYS)
         relay_str = click.prompt(
-            f"Canonical relays",
+            "Canonical relays",
             default=default_relays,
             show_default=True,
         )
@@ -696,7 +306,7 @@ def create_group(
         else:
             click.echo(f"  {url}: {result.get('message', 'unknown error')}", err=True)
 
-    click.echo(f"\nGroup created!")
+    click.echo("\nGroup created!")
     click.echo(f"  Name: {name}")
     click.echo(f"  Group pubkey: {group_pubkey}")
     click.echo(f"  Address: {group_pubkey}@{','.join(relay_list)}")
@@ -761,7 +371,7 @@ def send(
                 relays.append(relay)
     else:
         click.echo(f"Syncing from {len(relays)} relay(s): {', '.join(relays)}")
-        summary = asyncio.run(sync_and_heal(dag, relays))
+        summary = asyncio.run(run_sync_and_heal(dag, relays, on_log=click.echo))
         print_heal_summary(summary)
 
         if not force_relay:
@@ -835,7 +445,7 @@ def messages(group_pubkey: str, relay: str | None, limit: int):
 
     # Sync and heal
     relays = get_canonical_relays(dag, fallback)
-    summary = asyncio.run(sync_and_heal(dag, relays))
+    summary = asyncio.run(run_sync_and_heal(dag, relays, on_log=click.echo))
     print_heal_summary(summary)
 
     events = dag.get_all_events()
@@ -860,7 +470,7 @@ def subscribe(group_pubkey: str, relay: str | None):
     # Sync and heal first
     relays = get_canonical_relays(dag, fallback)
     click.echo(f"Syncing from {len(relays)} relay(s)...")
-    summary = asyncio.run(sync_and_heal(dag, relays))
+    summary = asyncio.run(run_sync_and_heal(dag, relays, on_log=click.echo))
     print_heal_summary(summary)
 
     # Subscribe on all canonical relays simultaneously
@@ -911,8 +521,8 @@ def join(address: str):
         click.echo("No relay hints provided, using bootstrap relays.")
         relay_urls = list(BOOTSTRAP_RELAYS)
 
-    # Full sync and heal (sync_and_heal handles relay discovery)
-    summary = asyncio.run(sync_and_heal(dag, relay_urls))
+    # Full sync and heal (run_sync_and_heal handles relay discovery)
+    summary = asyncio.run(run_sync_and_heal(dag, relay_urls, on_log=click.echo))
     print_heal_summary(summary)
 
     state = dag.get_state()
@@ -1188,7 +798,7 @@ def sync(group_pubkey: str, relay: str | None):
     relays = get_canonical_relays(dag, fallback)
     click.echo(f"Sync-and-heal across {len(relays)} relay(s)...")
 
-    summary = asyncio.run(sync_and_heal(dag, relays))
+    summary = asyncio.run(run_sync_and_heal(dag, relays, on_log=click.echo))
     print_heal_summary(summary)
 
     click.echo(f"Total local events: {dag.count}")

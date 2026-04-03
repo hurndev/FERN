@@ -5,7 +5,9 @@ import signal
 
 from PyQt5.QtWidgets import QApplication, QDialog
 
-from .app import FernChatMain, IdentityDialog, RETRO_STYLESHEET
+from .app import FernChatMain
+from .styles import RETRO_STYLESHEET
+from .dialogs import IdentityDialog
 
 
 def main():
@@ -37,6 +39,7 @@ def main():
         print(f"[FERN] Identity loaded: {pubkey[:16]}...")
 
     print("[FERN] Loading groups from disk...")
+    controller._populate_group_cache()
     groups = controller.list_groups()
     print(f"[FERN] Found {len(groups)} group(s) locally")
     for g in groups:
