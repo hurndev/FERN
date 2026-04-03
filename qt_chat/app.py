@@ -59,6 +59,8 @@ class GroupChatView(QWidget):
         self.controller = controller
         self._last_event_id: str | None = None
         self._displayed_ids: set[str] = set()
+        self._pending_message_ids: set[str] = set()
+        self._pending_spans: dict[str, tuple[int, int]] = {}
         self._setup_ui()
         self._populate_events()
         self.chat_display.anchorClicked.connect(self._on_anchor_clicked)
@@ -309,7 +311,19 @@ class GroupChatView(QWidget):
             msg_fmt.setFont(QFont("MS Sans Serif", 10))
             msg_fmt.setForeground(QColor("#000000"))
             cursor.setCharFormat(msg_fmt)
-            cursor.insertText(f"{content}\n")
+            cursor.insertText(f"{content}")
+
+            if event["id"] in self._pending_message_ids:
+                start_pos = cursor.position()
+                pending_fmt = QTextCharFormat()
+                pending_fmt.setFont(QFont("MS Sans Serif", 9, QFont.Normal, True))
+                pending_fmt.setForeground(QColor("#888888"))
+                cursor.setCharFormat(pending_fmt)
+                cursor.insertText("  [sending...]")
+                end_pos = cursor.position()
+                self._pending_spans[event["id"]] = (start_pos, end_pos)
+
+            cursor.insertText("\n")
 
             self.chat_display.setTextCursor(cursor)
             self.chat_display.ensureCursorVisible()
@@ -409,6 +423,39 @@ class GroupChatView(QWidget):
                 return True
         return super().eventFilter(obj, event)
 
+    def _append_message_status(self, event_id: str, status: str, detail: str):
+        """Remove or replace the [sending...] text for a pending message."""
+        self._pending_message_ids.discard(event_id)
+        span = self._pending_spans.pop(event_id, None)
+        if span is None:
+            return
+
+        start, end = span
+        doc = self.chat_display.document()
+        if start >= doc.characterCount() or end > doc.characterCount():
+            return
+
+        cursor = QTextCursor(doc)
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+
+        if status == "confirmed":
+            cursor.removeSelectedText()
+        elif status == "failed":
+            reason = detail.split("(")[1][:-1] if "(" in detail else detail
+            fmt = QTextCharFormat()
+            fmt.setFont(QFont("MS Sans Serif", 9, QFont.Normal, True))
+            fmt.setForeground(QColor("#CC0000"))
+            cursor.setCharFormat(fmt)
+            cursor.insertText(f"  [FAILED: {reason}]")
+
+        delta = cursor.position() - end
+        if delta != 0:
+            for eid in list(self._pending_spans.keys()):
+                s, e = self._pending_spans[eid]
+                if s > start:
+                    self._pending_spans[eid] = (s + delta, e + delta)
+
     def refresh_header(self):
         state = self.controller.get_group_state(self.group_pubkey)
         if not state:
@@ -455,6 +502,8 @@ class FernChatMain(QMainWindow):
         self.controller.group_joined.connect(self._on_group_joined)
         self.controller.group_left.connect(self._on_group_left)
         self.controller.relays_changed.connect(self._on_relays_changed)
+        self.controller.group_creation_failed.connect(self._on_group_creation_failed)
+        self.controller.message_status_changed.connect(self._on_message_status_changed)
 
     def _setup_ui(self):
         central = QWidget()
@@ -581,7 +630,7 @@ class FernChatMain(QMainWindow):
         self.event_log = QTextEdit()
         self.event_log.setObjectName("EventLog")
         self.event_log.setReadOnly(True)
-        self.event_log.setFixedHeight(120)
+        self.event_log.setMinimumHeight(80)
         right_layout.addWidget(self.event_log)
 
         main_splitter.addWidget(right_panel)
@@ -935,6 +984,29 @@ class FernChatMain(QMainWindow):
         self._populate_group_list()
         self._open_group(group_pubkey)
         self.statusBar().showMessage("Created group", 3000)
+
+    def _on_group_creation_failed(self, group_pubkey: str, detail: str):
+        self._on_log_message("error", f"Group creation failed: {detail}")
+        QMessageBox.warning(
+            self,
+            "Group Creation Failed",
+            f"No relays accepted the genesis event.\n\n"
+            f"This means your group exists locally but cannot be found by anyone else.\n\n"
+            f"Details: {detail}\n\n"
+            f"Try again when relays are online, or check your relay addresses.",
+        )
+
+    def _on_message_status_changed(self, event_id: str, status: str, detail: str):
+        """Handle message delivery status updates."""
+        if status == "pending":
+            for view in self.chat_views.values():
+                view._pending_message_ids.add(event_id)
+            return
+        for view in self.chat_views.values():
+            if event_id in view._pending_message_ids:
+                view._append_message_status(event_id, status, detail)
+                view._pending_message_ids.discard(event_id)
+                break
 
     def _on_group_joined(self, group_pubkey: str):
         self._populate_group_list()

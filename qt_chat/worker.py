@@ -37,6 +37,11 @@ class RelayWorker(QObject):
         self._started = False
         self._storage: ClientStorage | None = None
         self._group_locks: dict[str, Lock] = {}
+        self._retry_queue: list[dict] = []
+        self._retry_lock = Lock()
+        self._retry_timer_task: asyncio.Task | None = None
+        self._max_retries = 5
+        self._retry_interval = 15.0
 
     def set_storage(self, storage: ClientStorage) -> None:
         """Set the ClientStorage instance. Called by controller on main thread before starting."""
@@ -67,6 +72,7 @@ class RelayWorker(QObject):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._started = True
+        self._retry_timer_task = self._loop.create_task(self._retry_timer_loop())
         self._loop.run_forever()
 
     def stop(self):
@@ -85,6 +91,9 @@ class RelayWorker(QObject):
                 task.cancel()
             if tasks_to_cancel:
                 await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            if self._retry_timer_task:
+                self._retry_timer_task.cancel()
+                self._retry_timer_task = None
             self._loop.stop()
 
         asyncio.run_coroutine_threadsafe(_shutdown(), self._loop)
@@ -132,6 +141,115 @@ class RelayWorker(QObject):
         }
         self.publish_result.emit(event["id"], json.dumps(results_json))
 
+    def schedule_retry(self, event: dict, relay_urls: list[str], group_pubkey: str):
+        """Schedule a failed event for retry. Called by controller when publish fails."""
+        with self._retry_lock:
+            already_queued = any(e["id"] == event["id"] for e in self._retry_queue)
+            if not already_queued:
+                self._retry_queue.append(
+                    {
+                        "event": event,
+                        "relay_urls": list(relay_urls),
+                        "group_pubkey": group_pubkey,
+                        "attempts": 0,
+                    }
+                )
+
+    async def _retry_timer_loop(self):
+        """Periodically retry failed publishes."""
+        while not self._stopping:
+            try:
+                await asyncio.sleep(self._retry_interval)
+                await self._flush_retry_queue()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[WORKER] retry timer error: {e}")
+
+    async def _flush_retry_queue(self):
+        """Attempt to publish all queued events."""
+        with self._retry_lock:
+            items = list(self._retry_queue)
+            self._retry_queue.clear()
+
+        still_pending = []
+        for item in items:
+            event = item["event"]
+            relay_urls = item["relay_urls"]
+            group_pubkey = item["group_pubkey"]
+            item["attempts"] += 1
+
+            results = await relay.publish_to_all(relay_urls, event)
+            results_json = {
+                url: (
+                    None
+                    if r is None
+                    else {"type": r.get("type"), "message": r.get("message")}
+                )
+                if isinstance(r, dict)
+                else str(r)
+                for url, r in results.items()
+            }
+            self.publish_result.emit(event["id"], json.dumps(results_json))
+
+            successes = sum(
+                1
+                for r in results.values()
+                if r is not None and isinstance(r, dict) and r.get("type") == "ok"
+            )
+            if successes == 0 and item["attempts"] < self._max_retries:
+                still_pending.append(item)
+
+        if still_pending:
+            with self._retry_lock:
+                self._retry_queue.extend(still_pending)
+
+    async def _flush_retry_for_relay(self, relay_url: str):
+        """Immediately retry queued events that use a specific relay."""
+        with self._retry_lock:
+            items = list(self._retry_queue)
+            self._retry_queue.clear()
+
+        still_pending = []
+        not_for_relay = []
+        for item in items:
+            if relay_url not in item["relay_urls"]:
+                not_for_relay.append(item)
+                continue
+
+            event = item["event"]
+            relay_urls = item["relay_urls"]
+
+            result = await relay.publish(relay_url, event)
+            results_json = {
+                relay_url: (
+                    None
+                    if result is None
+                    else {"type": result.get("type"), "message": result.get("message")}
+                )
+                if isinstance(result, dict)
+                else str(result)
+            }
+            self.publish_result.emit(event["id"], json.dumps(results_json))
+
+            successes = (
+                1
+                if (
+                    result is not None
+                    and isinstance(result, dict)
+                    and result.get("type") == "ok"
+                )
+                else 0
+            )
+            if successes == 0 and item["attempts"] < self._max_retries:
+                item["attempts"] += 1
+                still_pending.append(item)
+
+        if still_pending or not_for_relay:
+            with self._retry_lock:
+                self._retry_queue.extend(still_pending)
+                self._retry_queue.extend(not_for_relay)
+
     def start_subscriptions(self, group_pubkey: str, relay_urls: list[str]):
         """Open persistent subscribe connections to all relays.
         Emits: event_received(group_pubkey, event_json), relay_status(group_pubkey, relay_url, status)"""
@@ -165,9 +283,11 @@ class RelayWorker(QObject):
 
         def on_connect(url):
             self.relay_status.emit(group_pubkey, url, "connected")
+            self._submit(self._flush_retry_for_relay(url))
 
         def on_reconnect(url):
             self.relay_status.emit(group_pubkey, url, "reconnecting")
+            self._submit(self._flush_retry_for_relay(url))
 
         def on_error(url, exc):
             print(f"[WORKER] subscribe error on {url}: {exc}")
