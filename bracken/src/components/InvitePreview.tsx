@@ -80,6 +80,7 @@ export function InvitePreview({
     const address = `fern:${pendingJoin.pubkey}@${allRelays.join(',')}`
     try {
       await onJoin(address)
+      onCancel()
     } catch (e) {
       setJoinPhase('error')
       setJoinError(String(e))
