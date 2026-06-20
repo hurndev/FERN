@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react'
 import styles from '../styles/components.module.css'
 
 interface Props {
+  channelId: string
   channelName: string
   canPost: boolean
   disabledReason?: string
@@ -16,6 +17,7 @@ export interface SlashCommand {
 }
 
 export function Composer({
+  channelId,
   channelName,
   canPost,
   disabledReason,
@@ -66,7 +68,7 @@ export function Composer({
     setSending(true)
     setText('')
     try {
-      await onSend(trimmed, channelName)
+      await onSend(trimmed, channelId)
     } finally {
       setSending(false)
     }

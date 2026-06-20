@@ -8,8 +8,8 @@ class ProtocolTypes:
     KICK = "kick"
     BAN = "ban"
     UNBAN = "unban"
-    MOD_ADD = "mod_add"
-    MOD_REMOVE = "mod_remove"
+    ADMIN_ADD = "admin_add"
+    ADMIN_REMOVE = "admin_remove"
     RELAY_UPDATE = "relay_update"
     METADATA_UPDATE = "metadata_update"
 
@@ -19,7 +19,9 @@ class ChatTypes:
     REACTION = "chat.reaction"
     NICKNAME_SET = "chat.nickname_set"
     CHANNEL_CREATE = "chat.channel_create"
+    CHANNEL_UPDATE = "chat.channel_update"
     CHANNEL_DELETE = "chat.channel_delete"
+    SETTINGS_UPDATE = "chat.settings_update"
 
 
 PROTOCOL_TYPES: frozenset[str] = frozenset(
@@ -31,8 +33,8 @@ PROTOCOL_TYPES: frozenset[str] = frozenset(
         ProtocolTypes.KICK,
         ProtocolTypes.BAN,
         ProtocolTypes.UNBAN,
-        ProtocolTypes.MOD_ADD,
-        ProtocolTypes.MOD_REMOVE,
+        ProtocolTypes.ADMIN_ADD,
+        ProtocolTypes.ADMIN_REMOVE,
         ProtocolTypes.RELAY_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
     }
@@ -44,7 +46,9 @@ CHAT_TYPES: frozenset[str] = frozenset(
         ChatTypes.REACTION,
         ChatTypes.NICKNAME_SET,
         ChatTypes.CHANNEL_CREATE,
+        ChatTypes.CHANNEL_UPDATE,
         ChatTypes.CHANNEL_DELETE,
+        ChatTypes.SETTINGS_UPDATE,
     }
 )
 
@@ -56,12 +60,14 @@ STATE_EVENT_TYPES: frozenset[str] = frozenset(
         ProtocolTypes.KICK,
         ProtocolTypes.BAN,
         ProtocolTypes.UNBAN,
-        ProtocolTypes.MOD_ADD,
-        ProtocolTypes.MOD_REMOVE,
+        ProtocolTypes.ADMIN_ADD,
+        ProtocolTypes.ADMIN_REMOVE,
         ProtocolTypes.RELAY_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
         ChatTypes.CHANNEL_CREATE,
+        ChatTypes.CHANNEL_UPDATE,
         ChatTypes.CHANNEL_DELETE,
+        ChatTypes.SETTINGS_UPDATE,
     }
 )
 

@@ -10,14 +10,14 @@ interface Props {
   rejectedIds: Set<string>
   connectedEventIds: Set<string>
   localEventIds: Set<string>
-  mods: Set<string>
+  admins: Set<string>
   joined: Set<string>
   nicknames: Map<string, string>
   banned: Set<string>
   deliveries: Record<string, MessageDelivery>
   viewerPubkey?: string
   selectedChannel?: string
-  onModAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
+  onAdminAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
   onRetryMessage?: (eventId: string) => Promise<void>
 }
 
@@ -35,9 +35,9 @@ interface MessageDelivery {
   error?: string
 }
 
-const MOD_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'mod_add', 'mod_remove', 'join', 'leave', 'genesis', 'metadata_update', 'relay_update', 'chat.channel_create', 'chat.channel_delete'])
+const ADMIN_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'admin_add', 'admin_remove', 'join', 'leave', 'genesis', 'metadata_update', 'relay_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'])
 
-function formatModAction(event: FernEvent): { clickable?: boolean; pubkey?: string; text: string }[] {
+function formatAdminAction(event: FernEvent): { clickable?: boolean; pubkey?: string; text: string }[] {
   const a: { clickable?: boolean; pubkey?: string; text: string }[] = []
   const author = { clickable: true, pubkey: event.author, text: truncateId(event.author) }
   const t = event.type
@@ -51,8 +51,8 @@ function formatModAction(event: FernEvent): { clickable?: boolean; pubkey?: stri
   else if (t === 'ban') { a.push(author, { text: ' banned ' }, target); const r = event.content['reason'] as string; if (r) a.push({ text: ` (${r})` }) }
   else if (t === 'unban') { a.push(author, { text: ' unbanned ' }, target) }
   else if (t === 'invite') { a.push(author, { text: ' invited ' }, invitee) }
-  else if (t === 'mod_add') { a.push(author, { text: ' promoted ' }, target, { text: ' to mod' }) }
-  else if (t === 'mod_remove') { a.push(author, { text: ' demoted ' }, target) }
+  else if (t === 'admin_add') { a.push(author, { text: ' promoted ' }, target, { text: ' to admin' }) }
+  else if (t === 'admin_remove') { a.push(author, { text: ' demoted ' }, target) }
   else if (t === 'join') { a.push(author, { text: ' joined the group' }) }
   else if (t === 'leave') { a.push(author, { text: ' left the group' }) }
   else if (t === 'genesis') { a.push(author, { text: ' created the group' }) }
@@ -75,8 +75,15 @@ function formatModAction(event: FernEvent): { clickable?: boolean; pubkey?: stri
     a.push(author, { text: ` created channel #${name}` })
   }
   else if (t === 'chat.channel_delete') {
-    const name = (event.content['name'] as string) || '?'
+    const name = (event.content['name'] as string) || (event.content['id'] as string) || '?'
     a.push(author, { text: ` deleted channel #${name}` })
+  }
+  else if (t === 'chat.channel_update') {
+    const name = (event.content['name'] as string) || (event.content['id'] as string) || '?'
+    a.push(author, { text: ` updated channel #${name}` })
+  }
+  else if (t === 'chat.settings_update') {
+    a.push(author, { text: ' updated chat settings' })
   }
   return a
 }
@@ -86,14 +93,14 @@ export function MessageList({
   rejectedIds,
   connectedEventIds,
   localEventIds,
-  mods,
+  admins,
   joined,
   nicknames,
   banned,
   deliveries,
   viewerPubkey = '',
   selectedChannel = 'general',
-  onModAction,
+  onAdminAction,
   onRetryMessage,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -105,9 +112,9 @@ export function MessageList({
   const rows = useMemo(() => {
     const relevantEvents = events
       .filter((e) => connectedEventIds.has(e.id))
-      .filter((e) => e.type === 'chat.message' || MOD_TYPES.has(e.type))
+      .filter((e) => e.type === 'chat.message' || ADMIN_TYPES.has(e.type))
       .filter((e) => {
-        if (MOD_TYPES.has(e.type)) return true
+        if (ADMIN_TYPES.has(e.type)) return true
         if (e.type === 'chat.message') {
           const ch = (e.content['channel'] as string) || 'general'
           return ch === selectedChannel
@@ -133,7 +140,7 @@ export function MessageList({
           })
         }
       }
-      if (MOD_TYPES.has(event.type)) {
+      if (ADMIN_TYPES.has(event.type)) {
         displayRows.push({ type: 'system', event, ts: event.ts })
       } else {
         displayRows.push({ type: 'message', event, ts: event.ts })
@@ -199,7 +206,7 @@ export function MessageList({
 
         if (row.type === 'system') {
           lastAuthor = null
-          const parts = formatModAction(row.event!)
+          const parts = formatAdminAction(row.event!)
           return (
             <div key={`sys-${row.event!.id}`} className={styles.systemRow}>
               <span className={styles.systemText}>
@@ -207,7 +214,7 @@ export function MessageList({
                   part.clickable && part.pubkey ? (
                     <span
                       key={i}
-                      className={styles.systemChip + (mods.has(part.pubkey) ? ' ' + styles.systemChipMod : '')}
+                      className={styles.systemChip + (admins.has(part.pubkey) ? ' ' + styles.systemChipMod : '')}
                       onClick={() => openProfile(part.pubkey!)}
                       title="Click to view profile"
                     >
@@ -229,7 +236,7 @@ export function MessageList({
         lastAuthor = event.author
         lastTs = event.ts
 
-        const isMod = mods.has(event.author)
+        const isAdmin = admins.has(event.author)
         const nick = nicknames.get(event.author)
         const delivery = deliveries[event.id]
 
@@ -250,7 +257,7 @@ export function MessageList({
                   <Avatar value={event.author} size={28} />
                 </span>
                 <span
-                  className={`${styles.authorChip} ${isMod ? styles.authorChipMod : ''}`}
+                  className={`${styles.authorChip} ${isAdmin ? styles.authorChipMod : ''}`}
                   onClick={() => openProfile(event.author)}
                   title="Click to view profile"
                 >
@@ -308,13 +315,13 @@ export function MessageList({
         <ProfilePopup
           pubkey={profile.pubkey}
           nickname={nicknames.get(profile.pubkey) ?? null}
-          isMod={mods.has(profile.pubkey)}
+          isAdmin={admins.has(profile.pubkey)}
           isBanned={banned.has(profile.pubkey)}
           isMember={joined.has(profile.pubkey)}
-          viewerIsMod={mods.has(viewerPubkey)}
+          viewerIsAdmin={admins.has(viewerPubkey)}
           viewerPubkey={viewerPubkey}
           onClose={() => setProfile(null)}
-          onModAction={onModAction}
+          onAdminAction={onAdminAction}
         />
       )}
     </div>

@@ -41,8 +41,8 @@ class _ColorFormatter(logging.Formatter):
         "kick": RED,
         "ban": RED,
         "unban": GREEN,
-        "mod_add": MAGENTA,
-        "mod_remove": MAGENTA,
+        "admin_add": MAGENTA,
+        "admin_remove": MAGENTA,
         "relay_update": CYAN,
         "metadata_update": CYAN,
     }

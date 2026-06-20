@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { FernLogo } from './FernLogo'
 import { IdentitySetup } from './IdentitySetup'
 import { fetchGroupPreview, type GroupPreview } from '../fern/relay'
@@ -43,23 +43,27 @@ export function InvitePreview({
   const [joinPhase, setJoinPhase] = useState<JoinPhase>('idle')
   const [joinError, setJoinError] = useState<string | null>(null)
 
-  const allRelays = [...pendingJoin.relays, ...extraRelays].filter(
-    (v, i, a) => a.indexOf(v) === i,
+  const allRelays = useMemo(
+    () => [...pendingJoin.relays, ...extraRelays].filter((v, i, a) => a.indexOf(v) === i),
+    [pendingJoin.relays, extraRelays],
   )
 
   useEffect(() => {
     let cancelled = false
-    if (allRelays.length === 0) {
-      setLoadPhase('noRelays')
+    const loadPreview = async () => {
+      await Promise.resolve()
+      if (cancelled) return
+      if (allRelays.length === 0) {
+        setLoadPhase('noRelays')
+        setPreview(null)
+        setUnreachable([])
+        return
+      }
+      setLoadPhase('loading')
       setPreview(null)
-      setUnreachable([])
-      return
-    }
-    setLoadPhase('loading')
-    setPreview(null)
-    setJoinError(null)
-    setJoinPhase('idle')
-    fetchGroupPreview(pendingJoin.pubkey, allRelays).then((result) => {
+      setJoinError(null)
+      setJoinPhase('idle')
+      const result = await fetchGroupPreview(pendingJoin.pubkey, allRelays)
       if (cancelled) return
       if ('error' in result) {
         setLoadPhase('notFound')
@@ -68,11 +72,12 @@ export function InvitePreview({
         setLoadPhase('preview')
         setPreview(result)
       }
-    })
+    }
+    void loadPreview()
     return () => {
       cancelled = true
     }
-  }, [pendingJoin.pubkey, allRelays.join(',')])
+  }, [pendingJoin.pubkey, allRelays])
 
   const handleJoin = async () => {
     setJoinPhase('joining')

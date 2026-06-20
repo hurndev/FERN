@@ -137,10 +137,10 @@ cli/
     ├── init.py                  # fern init — generate identity
     ├── whoami.py                # fern whoami — show pubkey
     ├── group.py                 # fern group create|join|list|info|members|leave
-    │                            #   kick|ban|unban|invite|mod-add|mod-remove|relay-update|nickname
+    │                            #   kick|ban|unban|invite|admin-add|admin-remove|relay-update|nickname
     ├── post.py                  # fern post <group> <text> (syncs state, checks auth before publishing)
-    ├── read.py                  # fern read <group> (shows mod actions inline, nicknames, auth filtering)
-    ├── watch.py                 # fern watch <group> (shows mod actions, nicknames, auth filtering)
+    ├── read.py                  # fern read <group> (shows admin actions inline, nicknames, auth filtering)
+    ├── watch.py                 # fern watch <group> (shows admin actions, nicknames, auth filtering)
     ├── verify.py                # fern verify <group>
     ├── relay.py                 # fern relay start|info
     └── dag.py                   # fern dag --db <path> — launch the DAG viewer for any SQLite store
@@ -228,18 +228,28 @@ Key canonical serialization rules:
 
 ```python
 @dataclass(frozen=True)
+class Channel:
+    id: str
+    name: str
+    description: str = ""
+    position: int = 0
+
+@dataclass(frozen=True)
 class GroupState:
     members: frozenset[str]
     joined: frozenset[str]
     banned: Mapping[str, BanEntry]
-    mods: frozenset[str]
+    admins: frozenset[str]
     relays: tuple[str, ...]
     metadata: Mapping[str, str]
     public: bool
+    app: str = "chat"
+    channels: Mapping[str, Channel] = ...
+    chat_settings: Mapping[str, str] = ...
 
     def is_banned_at(self, pubkey: str, ts: int) -> bool: ...
     def can_post(self, pubkey: str, ts: int) -> bool: ...
-    def can_moderate(self, pubkey: str) -> bool: ...
+    def can_admin(self, pubkey: str) -> bool: ...
 
 def derive_group_state(events: Iterable[Event]) -> tuple[GroupState, list[Event]]: ...
 def apply_event(state: GroupState, event: Event) -> GroupState: ...
@@ -248,7 +258,12 @@ def is_authorised(state: GroupState, event: Event) -> bool: ...
 
 State is folded in `(ts, id)` canonical linearisation order over the genesis-connected event set only. Events with missing parents are retained in storage for gap healing, but they must not be applied to state until their complete parent chain connects to genesis. Conflict resolution: events at same `ts` are ordered by ascending `id`. Last-writer-wins per field.
 
-Ban semantics: a ban persists until `unban` or `until` expiry. A banned user cannot `join`. A `kick` does not ban — user can re-join.
+Ban semantics: a ban persists until `unban` or `until` expiry. A banned user cannot `join`. A `kick` does not ban — user can re-join. A ban or kick removes protocol admin authority from the target.
+
+Chat channels are app-level state in the reference implementation. The reserved
+genesis channel has ID `"general"`; channels created after genesis use their
+`chat.channel_create` event ID as the channel ID. `chat.settings_update` stores
+chat-wide settings such as `default_channel` and `system_channel`.
 
 ### 3.4 `fern.dag` (Pure)
 
@@ -446,17 +461,17 @@ Groups are numbered 1, 2, 3... in join order. `config.json` stores a `group_orde
 | `fern group info` | `<group>` | `cli/commands/group.py` — syncs from relays, derives state, prints full pubkey and invite link |
 | `fern group members` | `<group>` | `cli/commands/group.py` — syncs, prints full pubkeys with nicknames and roles/bans |
 | `fern group leave` | `<group>` | `cli/commands/group.py` — publishes `leave` event, updates config |
-| `fern group kick` | `<group> <target>` | `cli/commands/group.py` — mod: publishes `kick` event |
-| `fern group ban` | `<group> <target> [--until ts] [--reason text]` | `cli/commands/group.py` — mod: publishes `ban` event |
-| `fern group unban` | `<group> <target>` | `cli/commands/group.py` — mod: publishes `unban` event |
-| `fern group invite` | `<group> <invitee>` | `cli/commands/group.py` — mod: publishes `invite` event |
-| `fern group mod-add` | `<group> <target>` | `cli/commands/group.py` — mod: publishes `mod_add` event |
-| `fern group mod-remove` | `<group> <target>` | `cli/commands/group.py` — mod: publishes `mod_remove` event |
-| `fern group relay-update` | `<group> <url>...` | `cli/commands/group.py` — mod: publishes `relay_update` event |
+| `fern group kick` | `<group> <target>` | `cli/commands/group.py` — admin: publishes `kick` event |
+| `fern group ban` | `<group> <target> [--until ts] [--reason text]` | `cli/commands/group.py` — admin: publishes `ban` event |
+| `fern group unban` | `<group> <target>` | `cli/commands/group.py` — admin: publishes `unban` event |
+| `fern group invite` | `<group> <invitee>` | `cli/commands/group.py` — admin: publishes `invite` event |
+| `fern group admin-add` | `<group> <target>` | `cli/commands/group.py` — admin: publishes `admin_add` event |
+| `fern group admin-remove` | `<group> <target>` | `cli/commands/group.py` — admin: publishes `admin_remove` event |
+| `fern group relay-update` | `<group> <url>...` | `cli/commands/group.py` — admin: publishes `relay_update` event |
 | `fern group nickname` | `<group> <name>` | `cli/commands/group.py` — publishes `chat.nickname_set` event |
 | `fern post` | `[--channel c] [--reply-to id] <group> <text>` | `cli/commands/post.py` — syncs, derives state, checks auth (joined + not banned), publishes |
-| `fern read` | `[--channel c] [-n N] [--show-rejected] <group>` | `cli/commands/read.py` — syncs, filters by auth, shows mod actions inline, shows nicknames |
-| `fern watch` | `[--channel c] [--show-rejected] <group>` | `cli/commands/watch.py` — subscribes, shows mod actions and nicknames live (Ctrl+C stops) |
+| `fern read` | `[--channel c] [-n N] [--show-rejected] <group>` | `cli/commands/read.py` — syncs, filters by auth, shows admin actions inline, shows nicknames |
+| `fern watch` | `[--channel c] [--show-rejected] <group>` | `cli/commands/watch.py` — subscribes, shows admin actions and nicknames live (Ctrl+C stops) |
 | `fern verify` | `<group>` | `cli/commands/verify.py` — requests attestations, runs monitor pass, prints trust ledger |
 | `fern relay start` | `--port N --store X [--log-level L] [--no-color]` | `cli/commands/relay.py` — starts a WebSocket relay server with coloured logging |
 | `fern relay info` | `<url>` | `cli/commands/relay.py` — fetches relay metadata |
@@ -501,7 +516,7 @@ The `WebSocketRelayClient` uses a single-reader model: a `_listen_loop` task rea
 | Events | `tests/unit/events/test_events.py` | Canonical serialization, structural validation, signature verification |
 | Events | `tests/unit/events/test_serialization_property.py` | Property-based: determinism, unicode round-trip, tag sorting |
 | DAG | `tests/unit/dag/test_dag.py` | Head computation, gap detection, cycle check |
-| State | `tests/unit/state/test_state.py` | State derivation, ban/unban/kick semantics, mod add/remove, metadata, `(ts,id)` ordering |
+| State | `tests/unit/state/test_state.py` | State derivation, ban/unban/kick semantics, admin add/remove, metadata, `(ts,id)` ordering |
 | Completeness | `tests/unit/completeness/test_completeness.py` | Receipt build/verify, attestation build/verify, `set_hash` determinism |
 | Chat | `tests/unit/chat/test_chat.py` | Message/reaction/nickname builders |
 | Integration | `tests/integration/test_fake_relay.py` | FakeRelay publish/get/sync/attestation round-trips |
@@ -591,7 +606,7 @@ Install for development: `pip install -e ".[dev]"`
 - **idb** — IndexedDB wrapper for local event/receipt/identity persistence
 - **No REST API** — only WebSocket connections to FERN relays and a one-time HTTPS metadata fetch
 
-Features: private-key identity create/import, group join with sync, real-time message list (connected-DAG filtering, auth filtering, mod action system messages, nickname display, jdenticon avatars, collapsed consecutive messages, retryable failed sends), profile popups with mod actions, mod-only slash commands, collapsible mobile sidebar, member/relay drawers, group info, relay count badge, and settings with nickname editing, private-key export, and logout.
+Features: private-key identity create/import, group join with sync, real-time message list (connected-DAG filtering, auth filtering, admin action system messages, nickname display, jdenticon avatars, collapsed consecutive messages, retryable failed sends), profile popups with admin actions, admin-only slash commands, collapsible mobile sidebar, member/relay drawers, group info, relay count badge, and settings with nickname editing, private-key export, and logout.
 
 Bracken implements the connected-DAG gate in TypeScript: disconnected events remain in IndexedDB for gap healing, but do not enter normal message rendering, group-state derivation, or future parent selection.
 

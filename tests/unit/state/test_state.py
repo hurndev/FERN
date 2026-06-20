@@ -7,12 +7,12 @@ from fern.state.machine import derive_group_state
 def make_genesis(
     group: str,
     founder: str,
-    mods: list[str] | None = None,
+    admins: list[str] | None = None,
     relays: list[str] | None = None,
     public: bool = True,
 ) -> Event:
-    if mods is None:
-        mods = [founder]
+    if admins is None:
+        admins = [founder]
     if relays is None:
         relays = ["wss://relay.test"]
     return Event(
@@ -26,10 +26,12 @@ def make_genesis(
             "description": "",
             "public": public,
             "founder": founder,
-            "mods": mods,
+            "admins": admins,
             "relays": relays,
             "app": "chat",
-            "chat.channels": ["general"],
+            "chat.channels": [{"id": "general", "name": "general", "position": 0}],
+            "chat.default_channel": "general",
+            "chat.system_channel": "general",
         },
         ts=1,
         tags=(),
@@ -66,7 +68,7 @@ class TestGroupState:
         state, rejected = derive_group_state([genesis])
         assert "f" * 64 in state.members
         assert "f" * 64 in state.joined
-        assert "f" * 64 in state.mods
+        assert "f" * 64 in state.admins
         assert state.public is True
         assert len(rejected) == 0
 
@@ -118,19 +120,73 @@ class TestGroupState:
         )
         state, rejected = derive_group_state([genesis, join, kick])
         assert "a" * 64 not in state.joined
-        assert "a" * 64 not in state.mods
+        assert "a" * 64 not in state.admins
         assert "a" * 64 not in state.banned
 
-    def test_mod_add_and_remove(self) -> None:
+    def test_admin_add_and_remove(self) -> None:
         genesis = make_genesis("0" * 64, "f" * 64)
         add = make_event(
-            ProtocolTypes.MOD_ADD, "f" * 64, "0" * 64, ts=2, content={"target": "a" * 64}
+            ProtocolTypes.ADMIN_ADD, "f" * 64, "0" * 64, ts=2, content={"target": "a" * 64}
         )
         remove = make_event(
-            ProtocolTypes.MOD_REMOVE, "f" * 64, "0" * 64, ts=3, content={"target": "a" * 64}
+            ProtocolTypes.ADMIN_REMOVE, "f" * 64, "0" * 64, ts=3, content={"target": "a" * 64}
         )
         state, rejected = derive_group_state([genesis, add, remove])
-        assert "a" * 64 not in state.mods
+        assert "a" * 64 not in state.admins
+
+    def test_channel_create_update_delete_uses_stable_event_id(self) -> None:
+        genesis = make_genesis("0" * 64, "f" * 64)
+        create = make_event(
+            "chat.channel_create",
+            "f" * 64,
+            "0" * 64,
+            ts=2,
+            content={"name": "announcements", "description": "News", "position": 1},
+            event_id="c" * 64,
+        )
+        update = make_event(
+            "chat.channel_update",
+            "f" * 64,
+            "0" * 64,
+            ts=3,
+            content={"id": "c" * 64, "name": "news"},
+            event_id="d" * 64,
+        )
+        state, rejected = derive_group_state([genesis, create, update])
+        assert state.channels["c" * 64].name == "news"
+        assert state.channels["c" * 64].description == "News"
+
+        delete = make_event(
+            "chat.channel_delete",
+            "f" * 64,
+            "0" * 64,
+            ts=4,
+            content={"id": "c" * 64},
+            event_id="e" * 64,
+        )
+        state, rejected = derive_group_state([genesis, create, update, delete])
+        assert "c" * 64 not in state.channels
+
+    def test_chat_settings_update_uses_channel_ids(self) -> None:
+        genesis = make_genesis("0" * 64, "f" * 64)
+        create = make_event(
+            "chat.channel_create",
+            "f" * 64,
+            "0" * 64,
+            ts=2,
+            content={"name": "audit"},
+            event_id="c" * 64,
+        )
+        settings = make_event(
+            "chat.settings_update",
+            "f" * 64,
+            "0" * 64,
+            ts=3,
+            content={"system_channel": "c" * 64},
+            event_id="d" * 64,
+        )
+        state, rejected = derive_group_state([genesis, create, settings])
+        assert state.chat_settings["system_channel"] == "c" * 64
 
     def test_metadata_update(self) -> None:
         genesis = make_genesis("0" * 64, "f" * 64)

@@ -11,19 +11,19 @@ interface MemberDrawerProps {
   nicknames: Map<string, string>
   viewerPubkey?: string
   onClose: () => void
-  onModAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
+  onAdminAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
 }
 
-export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onModAction }: MemberDrawerProps) {
+export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onAdminAction }: MemberDrawerProps) {
   const [profile, setProfile] = useState<string | null>(null)
 
   const openProfile = useCallback((pubkey: string) => {
     setProfile(pubkey)
   }, [])
 
-  const mods = [...state.joined].filter((pk) => state.mods.has(pk)).sort()
-  const nonMods = [...state.joined].filter((pk) => !state.mods.has(pk)).sort()
-  const ordered = [...mods, ...nonMods]
+  const admins = [...state.joined].filter((pk) => state.admins.has(pk)).sort()
+  const nonAdmins = [...state.joined].filter((pk) => !state.admins.has(pk)).sort()
+  const ordered = [...admins, ...nonAdmins]
   const banned = [...state.banned.entries()].sort((a, b) => a[0].localeCompare(b[0]))
 
   return (
@@ -36,7 +36,7 @@ export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onM
         </div>
         <div className={styles.drawerBody}>
           {ordered.map((pubkey) => {
-            const isMod = state.mods.has(pubkey)
+            const isAdmin = state.admins.has(pubkey)
             const nick = nicknames.get(pubkey)
             return (
               <div
@@ -45,7 +45,7 @@ export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onM
                 onClick={() => openProfile(pubkey)}
               >
                 <Avatar value={pubkey} size={24} />
-                <span className={`${styles.memberPubkey} ${isMod ? styles.memberPubkeyMod : ''}`}>
+                <span className={`${styles.memberPubkey} ${isAdmin ? styles.memberPubkeyMod : ''}`}>
                   {nick ?? truncateId(pubkey)}
                   {pubkey === viewerPubkey && ' (You)'}
                 </span>
@@ -88,13 +88,13 @@ export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onM
         <ProfilePopup
           pubkey={profile}
           nickname={nicknames.get(profile) ?? null}
-          isMod={state.mods.has(profile)}
+          isAdmin={state.admins.has(profile)}
           isBanned={state.banned.has(profile)}
           isMember={state.joined.has(profile)}
-          viewerIsMod={state.mods.has(viewerPubkey)}
+          viewerIsAdmin={state.admins.has(viewerPubkey)}
           viewerPubkey={viewerPubkey}
           onClose={() => setProfile(null)}
-          onModAction={onModAction}
+          onAdminAction={onAdminAction}
         />
       )}
     </>

@@ -38,13 +38,13 @@ const USER_COMMANDS: SlashCommand[] = [
   { cmd: '/nickname', desc: 'Set your display name' },
 ]
 
-const MOD_COMMANDS: SlashCommand[] = [
+const ADMIN_COMMANDS: SlashCommand[] = [
   { cmd: '/kick', desc: 'Kick a member by pubkey' },
   { cmd: '/ban', desc: 'Ban a member by pubkey' },
   { cmd: '/unban', desc: 'Lift a ban by pubkey' },
   { cmd: '/invite', desc: 'Invite a pubkey' },
-  { cmd: '/promote', desc: 'Promote a member to mod' },
-  { cmd: '/demote', desc: 'Demote a mod' },
+  { cmd: '/promote', desc: 'Promote a member to admin' },
+  { cmd: '/demote', desc: 'Demote an admin' },
   { cmd: '/relay-add', desc: 'Add canonical relays' },
   { cmd: '/relay-remove', desc: 'Remove canonical relays' },
   { cmd: '/name', desc: 'Set group name' },
@@ -68,6 +68,18 @@ function uniqueRelays(relays: string[]): string[] {
   return [...new Set(relays)]
 }
 
+function pendingJoinFromLocation(): PendingJoin | null {
+  const params = new URLSearchParams(window.location.search)
+  const group = params.get('group')?.trim()
+  if (!group || !isValidPubkey(group)) return null
+  const relaysParam = params.get('relays') ?? ''
+  const relays = relaysParam
+    .split(/[\s,]+/)
+    .map((r) => r.trim())
+    .filter(Boolean)
+  return { pubkey: group, relays }
+}
+
 export default function App() {
   const bracken = useBracken()
   const [showAddGroup, setShowAddGroup] = useState(false)
@@ -77,7 +89,7 @@ export default function App() {
   const [showGroupInfo, setShowGroupInfo] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [localEventIds, setLocalEventIds] = useState<Set<string>>(new Set())
-  const [pendingJoin, setPendingJoin] = useState<PendingJoin | null>(null)
+  const [pendingJoin, setPendingJoin] = useState<PendingJoin | null>(() => pendingJoinFromLocation())
   const [modalInitial, setModalInitial] = useState<{ address?: string; error?: string | null } | null>(null)
 
   const openAddGroup = useCallback((initial?: { address?: string; error?: string | null }) => {
@@ -99,17 +111,9 @@ export default function App() {
   }, [bracken.events])
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const group = params.get('group')?.trim()
-    if (!group || !isValidPubkey(group)) return
-    const relaysParam = params.get('relays') ?? ''
-    const relays = relaysParam
-      .split(/[\s,]+/)
-      .map((r) => r.trim())
-      .filter(Boolean)
-    setPendingJoin({ pubkey: group, relays })
+    if (!pendingJoin) return
     window.history.replaceState(null, '', window.location.pathname)
-  }, [])
+  }, [pendingJoin])
 
   const isAlreadyMember =
     pendingJoin !== null &&
@@ -130,25 +134,24 @@ export default function App() {
     return computeNicknames(bracken.events.filter((event) => connectedEventIds.has(event.id)))
   }, [bracken.events, connectedEventIds])
 
-  const mods = useMemo(() => {
-    return bracken.state?.mods ?? new Set<string>()
+  const admins = useMemo(() => {
+    return bracken.state?.admins ?? new Set<string>()
   }, [bracken.state])
 
-  const [selectedChannel, setSelectedChannel] = useState('general')
-
-  useEffect(() => {
-    setSelectedChannel('general')
-  }, [bracken.activeGroup])
+  const [selectedChannels, setSelectedChannels] = useState<Record<string, string>>({})
+  const selectedChannel = bracken.activeGroup
+    ? selectedChannels[bracken.activeGroup] ?? 'general'
+    : 'general'
 
   const channels = useMemo(() => {
-    if (!bracken.state) return ['general']
-    return [...bracken.state.channels].sort()
+    if (!bracken.state) return [{ id: 'general', name: 'general', description: '', position: 0 }]
+    return [...bracken.state.channels.values()].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
   }, [bracken.state])
 
-  const isViewerMod = bracken.identity ? mods.has(bracken.identity.publicKey) : false
+  const isViewerAdmin = bracken.identity ? admins.has(bracken.identity.publicKey) : false
   const slashCommands = useMemo(() => {
-    return isViewerMod ? [...USER_COMMANDS, ...MOD_COMMANDS] : USER_COMMANDS
-  }, [isViewerMod])
+    return isViewerAdmin ? [...USER_COMMANDS, ...ADMIN_COMMANDS] : USER_COMMANDS
+  }, [isViewerAdmin])
 
   if (bracken.loading) {
     return (
@@ -219,8 +222,8 @@ export default function App() {
             bracken.setActiveGroup(pk)
             setSidebarOpen(false)
           }}
-          onSelectChannel={(ch) => {
-            setSelectedChannel(ch)
+          onSelectChannel={(channelId, groupPubkey) => {
+            setSelectedChannels((prev) => ({ ...prev, [groupPubkey]: channelId }))
             setSidebarOpen(false)
           }}
           onAddGroupClick={() => {
@@ -245,7 +248,9 @@ export default function App() {
               >
                 ☰
               </button>
-              <span className={styles.channelName}># {selectedChannel}</span>
+              <span className={styles.channelName}>
+                # {bracken.state?.channels.get(selectedChannel)?.name ?? selectedChannel}
+              </span>
               <button
                 className={styles.groupLabelBtn}
                 onClick={() => setShowGroupInfo(true)}
@@ -274,70 +279,72 @@ export default function App() {
               rejectedIds={rejectedIds}
               connectedEventIds={connectedEventIds}
               localEventIds={localEventIds}
-              mods={mods}
+              admins={admins}
               joined={joinedSet}
               nicknames={nicknames}
               banned={bannedSet}
               deliveries={bracken.messageDeliveries}
               viewerPubkey={userPubkey}
               selectedChannel={selectedChannel}
-              onModAction={bracken.modAction}
+              onAdminAction={bracken.adminAction}
               onRetryMessage={bracken.retryMessage}
             />
 
             <Composer
-              channelName={selectedChannel}
+              channelId={selectedChannel}
+              channelName={bracken.state?.channels.get(selectedChannel)?.name ?? selectedChannel}
               canPost={canPost && !isBanned}
               disabledReason={
                 isBanned
                   ? 'You are banned from this group.'
                   : !canPost
-                    ? 'You have not joined this group. Ask a mod to invite you, or join if public.'
+                    ? 'You have not joined this group. Ask an admin to invite you, or join if public.'
                     : undefined
               }
               onSend={bracken.sendMessage}
               onCommand={async (cmd, args) => {
                 if (cmd === '/nickname' && args) {
                   await bracken.setNickname(args)
-                } else if (isViewerMod && cmd === '/kick') {
-                  await bracken.modAction('kick', firstArg(args))
-                } else if (isViewerMod && cmd === '/ban') {
+                } else if (isViewerAdmin && cmd === '/kick') {
+                  await bracken.adminAction('kick', firstArg(args))
+                } else if (isViewerAdmin && cmd === '/ban') {
                   const target = firstArg(args)
                   const reason = args.trim().slice(target.length).trim()
-                  await bracken.modAction('ban', target, { reason, until: null })
-                } else if (isViewerMod && cmd === '/unban') {
-                  await bracken.modAction('unban', firstArg(args))
-                } else if (isViewerMod && cmd === '/invite') {
-                  await bracken.modAction('invite', firstArg(args))
-                } else if (isViewerMod && cmd === '/promote') {
-                  await bracken.modAction('mod_add', firstArg(args))
-                } else if (isViewerMod && cmd === '/demote') {
-                  await bracken.modAction('mod_remove', firstArg(args))
-                } else if (isViewerMod && cmd === '/relay-add') {
+                  await bracken.adminAction('ban', target, { reason, until: null })
+                } else if (isViewerAdmin && cmd === '/unban') {
+                  await bracken.adminAction('unban', firstArg(args))
+                } else if (isViewerAdmin && cmd === '/invite') {
+                  await bracken.adminAction('invite', firstArg(args))
+                } else if (isViewerAdmin && cmd === '/promote') {
+                  await bracken.adminAction('admin_add', firstArg(args))
+                } else if (isViewerAdmin && cmd === '/demote') {
+                  await bracken.adminAction('admin_remove', firstArg(args))
+                } else if (isViewerAdmin && cmd === '/relay-add') {
                   const relaysToAdd = parseRelayArgs(args)
                   if (relaysToAdd.length > 0) {
                     const currentRelays = bracken.state?.relays ?? activeGroupEntry.relays
-                    await bracken.modAction('relay_update', '', {
+                    await bracken.adminAction('relay_update', '', {
                       relays: uniqueRelays([...currentRelays, ...relaysToAdd]),
                     })
                   }
-                } else if (isViewerMod && cmd === '/relay-remove') {
+                } else if (isViewerAdmin && cmd === '/relay-remove') {
                   const relaysToRemove = new Set(parseRelayArgs(args))
                   if (relaysToRemove.size > 0) {
                     const currentRelays = bracken.state?.relays ?? activeGroupEntry.relays
                     const relays = currentRelays.filter((relay) => !relaysToRemove.has(relay))
                     if (relays.length > 0) {
-                      await bracken.modAction('relay_update', '', { relays })
+                      await bracken.adminAction('relay_update', '', { relays })
                     }
                   }
-                } else if (isViewerMod && cmd === '/name' && args.trim()) {
-                  await bracken.modAction('metadata_update', '', { name: args.trim() })
-                } else if (isViewerMod && cmd === '/description') {
-                  await bracken.modAction('metadata_update', '', { description: args.trim() })
-                } else if (isViewerMod && cmd === '/channel-create' && args.trim()) {
-                  await bracken.modAction('chat.channel_create', '', { name: args.trim() })
-                } else if (isViewerMod && cmd === '/channel-delete' && args.trim()) {
-                  await bracken.modAction('chat.channel_delete', '', { name: args.trim() })
+                } else if (isViewerAdmin && cmd === '/name' && args.trim()) {
+                  await bracken.adminAction('metadata_update', '', { name: args.trim() })
+                } else if (isViewerAdmin && cmd === '/description') {
+                  await bracken.adminAction('metadata_update', '', { description: args.trim() })
+                } else if (isViewerAdmin && cmd === '/channel-create' && args.trim()) {
+                  await bracken.adminAction('chat.channel_create', '', { name: args.trim() })
+                } else if (isViewerAdmin && cmd === '/channel-delete' && args.trim()) {
+                  const channel = [...(bracken.state?.channels.values() ?? [])].find((ch) => ch.name === args.trim() || ch.id === args.trim())
+                  if (channel) await bracken.adminAction('chat.channel_delete', '', { id: channel.id })
                 }
               }}
               commands={slashCommands}
@@ -372,7 +379,7 @@ export default function App() {
           nicknames={nicknames}
           viewerPubkey={userPubkey}
           onClose={() => setShowMembers(false)}
-          onModAction={bracken.modAction}
+          onAdminAction={bracken.adminAction}
         />
       )}
       {showRelays && (

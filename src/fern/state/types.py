@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -12,16 +12,29 @@ class BanEntry:
 
 
 @dataclass(frozen=True)
+class Channel:
+    id: str
+    name: str
+    description: str = ""
+    position: int = 0
+
+
+@dataclass(frozen=True)
 class GroupState:
     members: frozenset[str]
     joined: frozenset[str]
     banned: Mapping[str, BanEntry]
-    mods: frozenset[str]
+    admins: frozenset[str]
     relays: tuple[str, ...]
     metadata: Mapping[str, str]
     public: bool
     app: str = "chat"
-    channels: frozenset[str] = frozenset({"general"})
+    channels: Mapping[str, Channel] = field(
+        default_factory=lambda: {"general": Channel(id="general", name="general")}
+    )
+    chat_settings: Mapping[str, str] = field(
+        default_factory=lambda: {"default_channel": "general", "system_channel": "general"}
+    )
 
     def is_banned_at(self, pubkey: str, ts: int) -> bool:
         entry = self.banned.get(pubkey)
@@ -34,5 +47,5 @@ class GroupState:
     def can_post(self, pubkey: str, ts: int) -> bool:
         return pubkey in self.joined and not self.is_banned_at(pubkey, ts)
 
-    def can_moderate(self, pubkey: str) -> bool:
-        return pubkey in self.mods
+    def can_admin(self, pubkey: str) -> bool:
+        return pubkey in self.admins

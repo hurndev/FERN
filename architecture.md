@@ -40,7 +40,7 @@ Split the responsibilities a traditional chat server holds into independent role
 | Responsibility | Held by |
 |---|---|
 | Storing and transporting messages | **Relays** — interchangeable servers anyone can run |
-| Making admin decisions (bans, etc.) | **Founder + mods** — their decisions are public, signed events |
+| Making admin decisions (bans, etc.) | **Founder + admins** — their decisions are public, signed events |
 | Catching misbehavior | **Every client does this for free** just by reading the chat |
 
 And the resolution of the moderation-vs-censorship paradox:
@@ -82,8 +82,8 @@ Each relay has its own Ed25519 keypair, used for signing receipts and attestatio
 
 ### 5.4 Actor Roles
 
-- **Founder** — creates the group, holds the group private key (used once for genesis), and their user key for ongoing mod actions. The founder is the initial mod; subsequent mods can promote/demote other mods (the founder has no special authority beyond being the initial mod).
-- **Mods** — pubkeys the founder has designated. Can sign admin actions (invite, kick, ban, unban, promote, relay updates, metadata updates). Flat list, no capability chains.
+- **Founder** — creates the group, holds the group private key (used once for genesis), and their user key for ongoing admin actions. The founder is the initial admin; subsequent admins can promote/demote other admins (the founder has no special authority beyond being the initial admin).
+- **Admins** — pubkeys with root group authority. Can sign protocol admin actions (invite, kick, ban, unban, admin promotion/demotion, relay updates, metadata updates). Apps may treat admins as app superusers, but richer apps can define app-level roles beneath this root authority.
 - **Members** — users who have an active `join` event (and no subsequent `leave` or `kick`). Can post events.
 - **Relays** — servers that store and serve events. Multiple per group; clients connect to several.
 - **Clients** — what users run. Connect to multiple relays, post, verify, monitor. Every client is automatically also a monitor — there is no separate monitor role.
@@ -226,10 +226,12 @@ Group state is derived entirely by replaying the genesis-connected subset of the
 members:   set of pubkeys invited to the group
 joined:    set of pubkeys who have joined (have an active join)
 banned:    map of pubkey → {until, reason}
-mods:      set of pubkeys with moderator privileges
+admins:      set of pubkeys with admin privileges
 relays:    [url, url, ...]
 metadata:  { name, description }
 public:    boolean (from genesis)
+app:       primary app profile (e.g. chat)
+channels: app-owned chat channel map, when app == chat
 ```
 
 ### 8.2 Derivation Rules
@@ -238,7 +240,7 @@ Starting from genesis:
 
 - `members` is initialised with the founder pubkey
 - `joined` is initialised with the founder pubkey (the founder is automatically joined)
-- `mods` is initialised with the founder pubkey
+- `admins` is initialised with the founder pubkey
 - `relays` is initialised from the genesis content
 - `metadata` is initialised from the genesis content
 - `public` is initialised from the genesis content
@@ -251,13 +253,17 @@ For each subsequent connected event in timestamp order:
 | `invite` | Add `invitee` to `members` |
 | `join` | Add `author` to `joined` (if authorised — see 8.5) |
 | `leave` | Remove `author` from `joined` |
-| `kick` | Remove `target` from `joined` and `mods` (keep in `members`) |
+| `kick` | Remove `target` from `joined` and `admins` (keep in `members`) |
 | `ban` | Add `target` to `banned` with `until` and `reason`. Ban persists until explicitly lifted. |
 | `unban` | Remove `target` from `banned` |
-| `mod_add` | Add `target` to `mods` |
-| `mod_remove` | Remove `target` from `mods` |
+| `admin_add` | Add `target` to `admins` |
+| `admin_remove` | Remove `target` from `admins` |
 | `relay_update` | Replace `relays` with new value |
 | `metadata_update` | Replace `metadata` fields present in content |
+| `chat.channel_create` | Add a chat channel object with ID equal to the create event ID |
+| `chat.channel_update` | Update channel metadata by stable channel ID |
+| `chat.channel_delete` | Remove a non-`general` channel by stable channel ID |
+| `chat.settings_update` | Update chat-wide settings such as default/system channel |
 
 ### 8.3 Conflict Resolution
 
@@ -267,7 +273,7 @@ When two events have the same timestamp and affect the same state field, the eve
 
 Before applying a state change event, clients verify:
 
-- The `author` pubkey is in `mods` at the point in the DAG immediately before this event
+- The `author` pubkey is in `admins` at the point in the DAG immediately before this event
 - Exception: `genesis` is verified against the group pubkey
 - Exception: `join` and `leave` are verified against the `author` pubkey directly (users can always join or leave for themselves)
 
@@ -282,7 +288,7 @@ Bans work as follows:
 - A ban **persists** until explicitly lifted by an `unban` event, or until the `until` timestamp passes (if set).
 - A `join` event from a banned user is discarded by clients.
 - A `kick` does **not** add to the banned map — the user can re-join. A `ban` prevents re-joining.
-- Promoting a banned user to mod does **not** automatically lift the ban. The ban must be explicitly lifted via `unban` first.
+- Promoting a banned user to admin does **not** automatically lift the ban. The ban must be explicitly lifted via `unban` first.
 
 This makes concurrent admin actions (one bans, another promotes in the same epoch without seeing the ban) predictable: a ban always persists until explicitly lifted.
 
@@ -437,21 +443,21 @@ Uses local trust ledgers for relay reputation. Cross-client reputation propagati
 
 ### 10.1 Protocol-Level Types
 
-These are defined by the protocol specification. They are bare strings without a dot. They handle group lifecycle, membership, moderation, and infrastructure.
+These are defined by the protocol specification. They are bare strings without a dot. They handle group lifecycle, membership, root authority, and infrastructure.
 
 | Type | Author | Content | Description |
 |---|---|---|---|
-| `genesis` | Group key | `{name, description, public, founder, mods, relays}` | Creates a new group. Only event signed with the group private key. The `author` field contains the founder's user pubkey. |
+| `genesis` | Group key | `{name, description, public, founder, admins, relays}` | Creates a new group. Only event signed with the group private key. The `author` field contains the founder's user pubkey. |
 | `join` | User (self) | `{}` | User joins the group. In private groups, requires a prior `invite`. |
 | `leave` | User (self) | `{}` | User leaves the group. |
-| `invite` | Mod | `{invitee, role}` | Invites a user to the group. Required before `join` in private groups. |
-| `kick` | Mod | `{target}` | Removes a user from `joined`. User can re-join. Does not ban. |
-| `ban` | Mod | `{target, until, reason}` | Bans a user. `until` is optional (null = permanent). `reason` is a string. Prevents re-joining until `unban`. |
-| `unban` | Mod | `{target}` | Lifts a ban. |
-| `mod_add` | Mod | `{target}` | Promotes a member to moderator. |
-| `mod_remove` | Mod | `{target}` | Demotes a moderator to regular member. |
-| `relay_update` | Mod | `{relays: [...]}` | Updates the canonical relay list. |
-| `metadata_update` | Mod | `{name, description}` | Updates group name or description. |
+| `invite` | Admin | `{invitee, role}` | Invites a user to the group. Required before `join` in private groups. |
+| `kick` | Admin | `{target}` | Removes a user from `joined`. User can re-join. Does not ban. |
+| `ban` | Admin | `{target, until, reason}` | Bans a user. `until` is optional (null = permanent). `reason` is a string. Prevents re-joining until `unban`. |
+| `unban` | Admin | `{target}` | Lifts a ban. |
+| `admin_add` | Admin | `{target}` | Promotes a member to admin. |
+| `admin_remove` | Admin | `{target}` | Demotes an admin to regular member. |
+| `relay_update` | Admin | `{relays: [...]}` | Updates the canonical relay list. |
+| `metadata_update` | Admin | `{name, description}` | Updates group name or description. |
 
 ### 10.2 The `chat` Namespace (Default App)
 
@@ -462,6 +468,10 @@ FERN defines an official default app namespace, `chat`, which covers basic group
 | `chat.message` | `{text, channel, reply_to?}` | A chat message. `channel` scopes to a channel within the group. `reply_to` is an optional event ID for threaded replies. |
 | `chat.reaction` | `{target, emoji}` | A reaction to a message. |
 | `chat.nickname_set` | `{nickname}` | Self-asserted nickname for the signing user. |
+| `chat.channel_create` | `{name, description?, position?}` | Creates a channel. The channel ID is the event ID. |
+| `chat.channel_update` | `{id, name?, description?, position?}` | Updates channel metadata by stable channel ID. |
+| `chat.channel_delete` | `{id}` | Deletes a non-`general` channel from normal rendering. |
+| `chat.settings_update` | `{default_channel?, system_channel?}` | Updates chat-wide settings by channel ID. |
 
 Apps are free to define additional namespaces and types. Unknown types are ignored by clients that don't understand them — forward compatibility is free.
 
@@ -486,7 +496,7 @@ Each group has a set of **canonical relays** defined in current group state (via
 
 The invariant: at every point in time, all current canonical relays hold identical complete history from genesis. This gives clients a clean symmetric comparison property — if all canonical relays agree on the same `set_hash`, `tips`, and `count`, the client has complete history.
 
-Anyone can stand up a new relay for an existing group at any time: fetch the log from existing relays, start serving. The founder/mods can bless it (via `relay_update`) or not. Clients decide which relays to trust based on their own policies and audit results.
+Anyone can stand up a new relay for an existing group at any time: fetch the log from existing relays, start serving. The founder/admins can bless it (via `relay_update`) or not. Clients decide which relays to trust based on their own policies and audit results.
 
 ### 11.3 Relay Validation
 
@@ -497,7 +507,7 @@ When a relay receives an event it must:
 3. Store the event if it belongs to a group the relay is hosting
 4. Return a signed receipt to the publishing client
 
-Relays must store events regardless of whether they hold the parent events. Relays must not apply authorisation rules — that is the client's responsibility. Relays store all events with valid signatures and valid structure, including events that clients would reject (e.g., a non-mod attempting to kick a user).
+Relays must store events regardless of whether they hold the parent events. Relays must not apply authorisation rules — that is the client's responsibility. Relays store all events with valid signatures and valid structure, including events that clients would reject (e.g., a non-admin attempting to kick a user).
 
 ### 11.4 Relay Garbage Collection
 
@@ -583,7 +593,7 @@ In a public group (`public: true` in `genesis`), any user may publish a `join` e
 
 ### 12.2 Private Groups
 
-In a private group (`public: false` in `genesis`), a user must have a `invite` event from a mod before they can publish a `join` event. The group address must be shared privately. Clients must reject `join` events from users not in `members`.
+In a private group (`public: false` in `genesis`), a user must have an `invite` event from an admin before they can publish a `join` event. The group address must be shared privately. Clients must reject `join` events from users not in `members`.
 
 ---
 
@@ -611,7 +621,7 @@ The relay hints are starting points only. Once a client has received any events,
 
 To migrate a group to a new relay set:
 
-1. A mod publishes a `relay_update` event naming the new relay set
+1. An admin publishes a `relay_update` event naming the new relay set
 2. All connected clients observe the update and seed the new relays with full history (Section 13.4)
 3. All clients begin publishing new events to the new relay set
 4. Old relays must not be decommissioned until every new relay holds the complete history — clients confirm this by cross-referencing event sets across old and new relays before the old set is removed
@@ -691,17 +701,18 @@ The protocol (FERN) defines:
 - Cryptographic primitives (keys, hashing, signing)
 - Identity (user, group, relay)
 - The causal DAG (parents, heads, gaps, healing)
-- Group state machine (membership, moderation, relays, metadata)
+- Group state machine (membership, root authority, relays, metadata)
 - Completeness layer (receipts, attestations, monitoring, backfill, fraud proofs)
 - Relay protocol (WebSocket actions, relay validation, GC)
 - Discovery and migration
-- Protocol-level event types (genesis, join, leave, invite, kick, ban, unban, mod_add, mod_remove, relay_update, metadata_update)
+- Protocol-level event types (genesis, join, leave, invite, kick, ban, unban, admin_add, admin_remove, relay_update, metadata_update)
 
 Applications define:
 - Their own event types (`appname.local_type`)
 - Content schemas for those types
 - How events are displayed and interacted with
 - App-specific state derived from events (e.g., a poll app tracks vote tallies; a chat app tracks channels and threads)
+- App-specific roles and permissions beneath protocol admins, when needed
 
 The protocol is agnostic to app-level types. It transports, stores, signs, and provides completeness guarantees for all events uniformly, regardless of type. Unknown types are stored by relays and ignored by clients that don't understand them.
 
@@ -714,14 +725,14 @@ This separation lets multiple apps share the same infrastructure: identity, rela
 | Attack | Protection |
 |---|---|
 | Forge a message as another user | Author signatures defeat this |
-| Forge a group state change (admin action) | Mod signatures + check against folded mod list |
+| Forge a group state change (admin action) | Admin signatures + check against folded admin list |
 | Insert a fake event into the DAG | Signatures prevent forgery; the connected-subgraph rule prevents disconnected events from entering state, normal rendering, or future parent selection |
 | Relay silently censors a message it accepted | Receipt + attestation divergence; provable to any observer via fraud proof |
 | Relay refuses to accept a message at all | Multi-relay redundancy (K=3); if at least one honest, it has the event and the others are provably divergent |
 | Split-view attack (relay serves different state to different clients) | Signed attestations make divergence provable when clients compare notes. Defeated probabilistically by vantage diversity. |
 | Relay shuts down | Group continues on remaining relays; new relays can stand up anytime |
 | Relay lags behind | Detected via attestation comparison; self-healed via backfill from sibling relays |
-| Founder issues bad bans/mod decisions | Founder trust is accepted at join time. Bans are render filters; underlying log stays complete. |
+| Founder issues bad bans/admin decisions | Founder trust is accepted at join time. Bans are render filters; underlying log stays complete. |
 | All relays a client uses collude to suppress a message and its descendants | Censorship undetectable. Fundamental; out of scope without consensus. |
 | IP exposure between members | No client-to-client connections; only relays see client IPs |
 
@@ -750,7 +761,7 @@ Documented future extensions, deliberately excluded to keep the design implement
 - **App-prefixed types with pubkey namespaces**: `<app_pubkey>.appname.type` for collision-free type names. Convention-based `appname.type` currently.
 - **Protocol versioning**: a `protocol` field in genesis content for forward compatibility.
 - **Relay-side policy enforcement**: relays checking group-state policies on ingest. Currently, relays accept any well-formed event; all moderation is client-side.
-- **Extended app surfaces**: pins, channel policies, roles beyond member/mod, message edits. Apps can define these in their own event types.
+- **Extended app surfaces**: pins, channel policies, roles beyond member/admin, message edits. Apps can define these in their own event types.
 
 These are documented as upgrade paths, not abandoned. The current design's goal is a working, secure, minimal protocol. Each deferred feature has a clear path back when concrete demand justifies the complexity.
 

@@ -149,8 +149,8 @@ class GroupSession:
             ProtocolTypes.KICK,
             ProtocolTypes.BAN,
             ProtocolTypes.UNBAN,
-            ProtocolTypes.MOD_ADD,
-            ProtocolTypes.MOD_REMOVE,
+            ProtocolTypes.ADMIN_ADD,
+            ProtocolTypes.ADMIN_REMOVE,
             ProtocolTypes.RELAY_UPDATE,
             ProtocolTypes.METADATA_UPDATE,
         ):

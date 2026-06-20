@@ -238,8 +238,8 @@ const typeStyles = {
   'kick':           { color: '#ff5722', shape: 'dot',      size: 12, label: 'kick' },
   'ban':            { color: '#f44336', shape: 'dot',      size: 12, label: 'ban' },
   'unban':          { color: '#8bc34a', shape: 'dot',      size: 12, label: 'unban' },
-  'mod_add':        { color: '#9c27b0', shape: 'dot',      size: 12, label: 'mod_add' },
-  'mod_remove':     { color: '#673ab7', shape: 'dot',      size: 12, label: 'mod_remove' },
+  'admin_add':      { color: '#9c27b0', shape: 'dot',      size: 12, label: 'admin_add' },
+  'admin_remove':   { color: '#673ab7', shape: 'dot',      size: 12, label: 'admin_remove' },
   'relay_update':   { color: '#00bcd4', shape: 'dot',      size: 12, label: 'relay_update' },
   'metadata_update':{ color: '#009688', shape: 'dot',      size: 12, label: 'metadata_update' },
 };

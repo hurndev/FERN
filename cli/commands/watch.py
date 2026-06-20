@@ -15,7 +15,7 @@ from cli.config import (
     connect_transports,
     get_client_id,
 )
-from cli.commands.read import MOD_TYPES, _compute_nicknames, _display_name, _format_mod_action
+from cli.commands.read import ADMIN_TYPES, _compute_nicknames, _display_name, _format_admin_action
 from cli.sync import sync_group_from_transports
 
 
@@ -76,8 +76,8 @@ async def _watch(channel: str | None, show_rejected: bool, group_id: str) -> Non
         except Exception:
             return
 
-        if event.type in MOD_TYPES:
-            formatted = _format_mod_action(event, nicknames)
+        if event.type in ADMIN_TYPES:
+            formatted = _format_admin_action(event, nicknames)
             if formatted:
                 click.echo(formatted)
             return

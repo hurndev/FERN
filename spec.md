@@ -44,7 +44,7 @@ A user identity is a locally-generated Ed25519 keypair. There is no registration
 
 A group has its own Ed25519 keypair, distinct from the founder's user keypair. The group's public key **is** the group's identifier.
 
-The group private key MUST be used only to sign the `genesis` event. It MUST NOT be used for any other purpose. After signing the genesis event, the group private key SHOULD be stored offline or destroyed (it is not needed for ongoing operations; subsequent group modifications are signed by mods' user keys).
+The group private key MUST be used only to sign the `genesis` event. It MUST NOT be used for any other purpose. After signing the genesis event, the group private key SHOULD be stored offline or destroyed (it is not needed for ongoing operations; subsequent group modifications are signed by admins' user keys).
 
 ### 2.3 Relay Identity
 
@@ -203,7 +203,7 @@ The protocol treats all events uniformly for transport, validation, and complete
 
 ## 5. Protocol Event Types
 
-These event types are defined by the protocol and handle group lifecycle, membership, moderation, and infrastructure. They are bare strings (no dot).
+These event types are defined by the protocol and handle group lifecycle, membership, root authority, and infrastructure. They are bare strings (no dot).
 
 ### 5.1 `genesis`
 
@@ -219,10 +219,14 @@ Content schema:
   "description": "Optional description",
   "public":      true,
   "founder":     "<founder user pubkey hex>",
-  "mods":        ["<founder user pubkey hex>"],
+  "admins":      ["<founder user pubkey hex>"],
   "relays":      ["wss://relay1.example.com", "wss://relay2.example.com"],
   "app":         "chat",
-  "chat.channels": ["general"]
+  "chat.channels": [
+    {"id": "general", "name": "general", "description": "", "position": 0}
+  ],
+  "chat.default_channel": "general",
+  "chat.system_channel":  "general"
 }
 ```
 
@@ -232,12 +236,28 @@ Content schema:
 | `description` | string | Optional description. May be empty. |
 | `public` | boolean | If `true`, any user may `join` freely. If `false`, `join` requires a prior `invite`. |
 | `founder` | string | Founder's user pubkey (64-char hex). MUST equal the `author` field of this event. |
-| `mods` | array of strings | Initial mod pubkeys. MUST include the founder. Initial list MUST be non-empty. |
+| `admins` | array of strings | Initial admin pubkeys. MUST include the founder. Initial list MUST be non-empty. |
 | `relays` | array of strings | Initial canonical relay URLs (e.g., `wss://...`). MUST be non-empty. |
-| `app` | string | The primary app namespace this group uses. All app-level event types MUST be prefixed with `app`. For example `"app": "chat"` means all app event types use the `chat.` prefix (e.g., `chat.message`). A client that does not understand `app` SHOULD NOT engage with the group. MUST be a non-empty string containing at least one `.` or recognised bare name (e.g., `"chat"`). |
-| `chat.channels` | array of strings | Required when `app` is `"chat"`. Initial channel list. MUST contain at least one channel. MUST contain `"general"`. |
+| `app` | string | The primary app profile this group uses. For example `"app": "chat"` means the main user experience is the `chat` app. This is a rendering/profile declaration, not a relay storage constraint. A client that does not understand `app` SHOULD NOT pretend to provide the full group experience. |
+| dotted keys | any JSON value allowed by the owning app schema | Initial app configuration. Bare keys are protocol-reserved; dotted keys are app- or extension-owned. Unknown dotted keys MUST be preserved and ignored by clients that do not understand them. |
+| `chat.channels` | array of channel objects | Required when `app` is `"chat"`. Initial channel objects. MUST contain an object with `id == "general"`. |
+| `chat.default_channel` | string | Optional when `app` is `"chat"`. Channel ID selected by default. Defaults to `"general"` if absent. |
+| `chat.system_channel` | string | Optional when `app` is `"chat"`. Channel ID for system messages. Defaults to `"general"` if absent. |
 
-Verification: `sig` MUST verify against the `group` field as the public key. The `founder` field MUST equal the `author` field. The `mods` array MUST contain the `founder` pubkey. If `app == "chat"`, `chat.channels` MUST be present and non-empty. `chat.channels` MUST contain `"general"`.
+For `chat.channels`, each object has this schema:
+
+```json
+{
+  "id": "general",
+  "name": "general",
+  "description": "",
+  "position": 0
+}
+```
+
+`id` and `name` are required non-empty strings. `description` is optional and defaults to `""`. `position` is optional and defaults to the object's array position.
+
+Verification: `sig` MUST verify against the `group` field as the public key. The `founder` field MUST equal the `author` field. The `admins` array MUST contain the `founder` pubkey. Bare genesis keys are protocol-reserved. If `app == "chat"`, `chat.channels` MUST be present and non-empty and MUST contain the reserved channel ID `"general"`.
 
 ### 5.2 `join`
 
@@ -251,7 +271,7 @@ Content schema:
 
 (Empty object — no fields required at this time. Reserved for future extension.)
 
-Authorisation: in public groups, any user may join. In private groups, the `author` MUST be in the group's `members` set (i.e., have a prior `invite` event from a mod) before this event. `join` events from uninvited users in private groups are stored by relays but discarded from client state.
+Authorisation: in public groups, any user may join. In private groups, the `author` MUST be in the group's `members` set (i.e., have a prior `invite` event from an admin) before this event. `join` events from uninvited users in private groups are stored by relays but discarded from client state.
 
 ### 5.3 `leave`
 
@@ -283,7 +303,7 @@ Content schema:
 | `invitee` | string | Pubkey of the user being invited (64-char hex). |
 | `role` | string | Role being offered. Currently only `"member"` is defined. Reserved for future extension. |
 
-Authorisation: the `author` MUST be in the group's `mods` set at the point in the DAG immediately before this event.
+Authorisation: the `author` MUST be in the group's `admins` set at the point in the DAG immediately before this event.
 
 ### 5.5 `kick`
 
@@ -297,7 +317,7 @@ Content schema:
 }
 ```
 
-Authorisation: `author` MUST be a mod.
+Authorisation: `author` MUST be an admin.
 
 ### 5.6 `ban`
 
@@ -319,7 +339,7 @@ Content schema:
 | `until` | integer or null | Optional Unix timestamp after which the ban expires. `null` means permanent. |
 | `reason` | string | Free-text reason. May be empty. |
 
-Authorisation: `author` MUST be a mod.
+Authorisation: `author` MUST be an admin.
 
 ### 5.7 `unban`
 
@@ -333,25 +353,11 @@ Content schema:
 }
 ```
 
-Authorisation: `author` MUST be a mod.
+Authorisation: `author` MUST be an admin.
 
-### 5.8 `mod_add`
+### 5.8 `admin_add`
 
-Promotes a member to moderator.
-
-Content schema:
-
-```json
-{
-  "target": "<user pubkey hex>"
-}
-```
-
-Authorisation: `author` MUST be a mod.
-
-### 5.9 `mod_remove`
-
-Demotes a moderator to regular member.
+Promotes a member to admin.
 
 Content schema:
 
@@ -361,7 +367,21 @@ Content schema:
 }
 ```
 
-Authorisation: `author` MUST be a mod. A mod MAY demote themselves.
+Authorisation: `author` MUST be an admin.
+
+### 5.9 `admin_remove`
+
+Demotes an admin to regular member.
+
+Content schema:
+
+```json
+{
+  "target": "<user pubkey hex>"
+}
+```
+
+Authorisation: `author` MUST be an admin. An admin MAY demote themselves.
 
 ### 5.10 `relay_update`
 
@@ -377,7 +397,7 @@ Content schema:
 
 The `relays` array MUST be non-empty. All URLs MUST use the `wss://` scheme.
 
-Authorisation: `author` MUST be a mod.
+Authorisation: `author` MUST be an admin.
 
 ### 5.11 `metadata_update`
 
@@ -394,7 +414,7 @@ Content schema:
 
 Both fields are optional. Only fields present in the content are updated; absent fields are left unchanged.
 
-Authorisation: `author` MUST be a mod.
+Authorisation: `author` MUST be an admin.
 
 ---
 
@@ -411,7 +431,7 @@ Content schema:
 ```json
 {
   "text":      "Hello, world.",
-  "channel":   "general",
+  "channel":   "<channel id>",
   "reply_to":  "<event id hex>"
 }
 ```
@@ -419,7 +439,7 @@ Content schema:
 | Field | Type | Description |
 |---|---|---|
 | `text` | string | Message text. Non-empty. |
-| `channel` | string | Channel name within the group. Non-empty. Names are case-sensitive. |
+| `channel` | string | Stable channel ID within the group. Non-empty. For the initial general channel this is `"general"`; for channels created after genesis this is the ID of the `chat.channel_create` event. |
 | `reply_to` | string or null | Optional event ID of the message being replied to. If present, MUST be a valid event ID (64-char hex). If absent or `null`, the message is not a reply. |
 
 Authorisation: `author` MUST be in the `joined` set and not in the `banned` set at this point in the DAG.
@@ -464,35 +484,88 @@ Authorisation: `author` MUST be in the `joined` set. The nickname applies to the
 
 ### 6.4 `chat.channel_create`
 
-A mod creates a new channel in the group.
+An admin creates a new channel in the group.
 
 Content schema:
 
 ```json
 {
-  "name": "announcements"
+  "name":        "announcements",
+  "description": "Release notes and project updates",
+  "position":    1
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | Channel name. Non-empty, case-sensitive, max 50 chars. Alphanumeric, hyphens, and underscores permitted. |
+| `description` | string | Optional channel description. Defaults to `""`. |
+| `position` | integer | Optional display ordering hint. Defaults to append order. |
 
-Authorisation: `author` MUST be a mod. The `name` MUST NOT already exist in `channels`. The event is stored but discarded from state on duplicate names.
+The stable channel ID for a created channel is the event ID of the
+`chat.channel_create` event itself. Messages and later channel operations MUST
+refer to that ID, not to the channel's mutable name.
 
-### 6.5 `chat.channel_delete`
+Authorisation: `author` MUST be an admin. The `name` SHOULD NOT already exist in `channels`; clients SHOULD discard duplicate-name creates from app state while still storing the event.
 
-A mod deletes an existing channel.
+### 6.5 `chat.channel_update`
+
+An admin updates metadata for an existing channel.
 
 Content schema:
 
 ```json
 {
-  "name": "announcements"
+  "id":          "<channel id>",
+  "name":        "news",
+  "description": "Project news",
+  "position":    2
 }
 ```
 
-Authorisation: `author` MUST be a mod. The `"general"` channel MUST NOT be deleted. Messages in a deleted channel remain in the DAG but are hidden from normal rendering (the channel name is removed from `channels`, so `chat.message` events with that channel name are filtered from display). Clients MUST NOT delete events from storage when a channel is deleted.
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Stable channel ID. Required. |
+| `name` | string | Optional replacement channel name. |
+| `description` | string | Optional replacement description. |
+| `position` | integer | Optional replacement display ordering hint. |
+
+Only fields present in `content` are updated. Unknown channel IDs are ignored for app state.
+
+Authorisation: `author` MUST be an admin.
+
+### 6.6 `chat.channel_delete`
+
+An admin deletes an existing channel.
+
+Content schema:
+
+```json
+{
+  "id": "<channel id>"
+}
+```
+
+Authorisation: `author` MUST be an admin. The reserved `"general"` channel ID MUST NOT be deleted. Messages in a deleted channel remain in the DAG but are hidden from normal rendering. Clients MUST NOT delete events from storage when a channel is deleted.
+
+### 6.7 `chat.settings_update`
+
+An admin updates chat-wide settings.
+
+Content schema:
+
+```json
+{
+  "default_channel": "<channel id>",
+  "system_channel":  "<channel id>"
+}
+```
+
+Both fields are optional. Only fields present in the content are updated.
+Clients MUST ignore channel-setting values that do not refer to an existing
+channel ID.
+
+Authorisation: `author` MUST be an admin.
 
 ---
 
@@ -552,12 +625,13 @@ The state consists of:
 members:    set of pubkey hex strings (invited users)
 joined:     set of pubkey hex strings (currently joined users)
 banned:     map of pubkey hex -> {until: int|null, reason: string}
-mods:       set of pubkey hex strings
+admins:       set of pubkey hex strings
 relays:     list of relay URL strings
 metadata:   {name: string, description: string}
 public:     boolean
 app:        string (primary app namespace, e.g. \"chat\")
-channels:   set of channel name strings (when app is \"chat\")
+channels:   map of channel id -> {id, name, description, position} (when app is \"chat\")
+chat_settings: {default_channel, system_channel} (when app is \"chat\")
 ```
 
 ### 8.2 Initialisation
@@ -567,12 +641,14 @@ State is initialised from the `genesis` event:
 - `members = {founder}`  (the founder is implicitly a member)
 - `joined = {founder}`   (the founder is automatically joined)
 - `banned = {}`
-- `mods = genesis.content.mods`  (MUST include the founder)
+- `admins = genesis.content.admins`  (MUST include the founder)
 - `relays = genesis.content.relays`
 - `metadata = {name: genesis.content.name, description: genesis.content.description}`
 - `public = genesis.content.public`
 - `app = genesis.content.app`  (e.g., `"chat"`)
-- `channels = set(genesis.content["chat.channels"])`  (when `app == "chat"`; MUST contain `"general"`)
+- `channels = map(genesis.content["chat.channels"] by id)`  (when `app == "chat"`; MUST contain `"general"`)
+- `chat_settings.default_channel = genesis.content["chat.default_channel"]` or `"general"`
+- `chat_settings.system_channel = genesis.content["chat.system_channel"]` or `"general"`
 
 ### 8.3 Derivation Order
 
@@ -591,15 +667,17 @@ For each event in canonical linearisation order (skipping the genesis, which has
 | `invite` | Add `content.invitee` to `members`. |
 | `join` | If `public == true` OR `author` is in `members`: add `author` to `joined`. If `author` is in `banned` and (banned entry's `until` is null or `until > event.ts`): discard (do not add to `joined`). |
 | `leave` | Remove `author` from `joined`. |
-| `kick` | Remove `content.target` from `joined` and `mods` (keep in `members`). |
-| `ban` | Add `{until: content.until, reason: content.reason}` to `banned[target]`. Remove `content.target` from `joined`. |
+| `kick` | Remove `content.target` from `joined` and `admins` (keep in `members`). |
+| `ban` | Add `{until: content.until, reason: content.reason}` to `banned[target]`. Remove `content.target` from `joined` and `admins`. |
 | `unban` | Remove `content.target` from `banned`. |
-| `mod_add` | Add `content.target` to `mods`. |
-| `mod_remove` | Remove `content.target` from `mods`. |
+| `admin_add` | Add `content.target` to `admins`. |
+| `admin_remove` | Remove `content.target` from `admins`. |
 | `relay_update` | Replace `relays` with `content.relays`. |
 | `metadata_update` | For each field present in `content`, update `metadata[field]`. |
-| `chat.channel_create` | Add `content.name` to `channels`. Reject if `content.name` is already in `channels`. |
-| `chat.channel_delete` | Remove `content.name` from `channels`. Reject if `content.name` is `"general"`. |
+| `chat.channel_create` | Add a channel object to `channels` with `id = event.id`, plus `name`, `description`, and `position` from content. Discard from app state if the name duplicates an existing channel name. |
+| `chat.channel_update` | Update the named fields of `channels[content.id]`. Ignore unknown channel IDs. |
+| `chat.channel_delete` | Remove `channels[content.id]`. Reject if `content.id` is `"general"`. If a deleted channel was selected by `chat_settings`, reset that setting to `"general"`. |
+| `chat.settings_update` | Update `chat_settings.default_channel` and/or `chat_settings.system_channel` if present and if the target channel IDs exist. |
 | (any other type) | No state effect. The event is stored but does not affect group state. |
 
 ### 8.5 Authorisation
@@ -608,12 +686,13 @@ Before applying a state-change event, the implementation verifies:
 
 - For `genesis`: already used for init; no further auth check.
 - For `join` and `leave`: always permitted (the `author` signs for themselves).
-- For `invite`, `kick`, `ban`, `unban`, `mod_add`, `mod_remove`, `relay_update`, `metadata_update`: the `author` MUST be in the current `mods` set (i.e., `mods` at the canonical linearisation point immediately before this event).
-- For `chat.*` events: the `author` MUST be in `joined` and not in `banned` at this point.
+- For `invite`, `kick`, `ban`, `unban`, `admin_add`, `admin_remove`, `relay_update`, `metadata_update`: the `author` MUST be in the current `admins` set (i.e., `admins` at the canonical linearisation point immediately before this event).
+- For `chat.channel_create`, `chat.channel_update`, `chat.channel_delete`, and `chat.settings_update`: the `author` MUST be in the current `admins` set.
+- For other `chat.*` events: the `author` MUST be in `joined` and not in `banned` at this point.
 
 Events failing authorisation are **discarded from state** but kept in the event store (see Section 10.3). Connected unauthorised events count toward canonical linearisation for the purposes of ordering other events, but they do not modify state. Disconnected events do not enter state linearisation until connected.
 
-**Note on founder demotion:** The founder is the initial mod (set in `genesis.content.mods`), but has no special authority beyond that. A founder can demote themselves via `mod_remove` (transferring sole control to the remaining mods), and other mods can demote the founder. This is intentional: the group is governed by its current mod set, not by an irrevocable founder. Groups that wish to preserve founder authority can maintain an out-of-band social agreement, but the protocol does not enforce it.
+**Note on founder demotion:** The founder is the initial admin (set in `genesis.content.admins`), but has no special authority beyond that. A founder can demote themselves via `admin_remove` (transferring sole control to the remaining admins), and other admins can demote the founder. This is intentional: the group is governed by its current admin set, not by an irrevocable founder. Groups that wish to preserve founder authority can maintain an out-of-band social agreement, but the protocol does not enforce it.
 
 ### 8.6 Conflict Resolution
 
@@ -628,7 +707,7 @@ Because the canonical linearisation order is `(ts, id)`, this is automatic: amon
 - A `join` event from a banned user is discarded (the user cannot re-join while banned).
 - A ban persists until either an `unban` event is issued OR the `until` timestamp passes. When checking whether a user is banned at time T (for evaluating a `join` or `chat.message` at time T), an entry in `banned[target]` is considered active iff `until == null` OR `until > T`. (Once expired, the user may `join` again without an `unban`.)
 - A `kick` does NOT add to the `banned` map — the user remains in `members` and may re-join.
-- A `mod_add` on a banned user does NOT lift the ban. The ban must be lifted via `unban` first (or expire via `until`).
+- An `admin_add` on a banned user does NOT lift the ban. The ban must be lifted via `unban` first (or expire via `until`).
 
 ### 8.8 Posting Authorisation
 
@@ -926,7 +1005,7 @@ Each group has a set of **canonical relays** defined in current group state (via
 
 The invariant: at every point in time, all current canonical relays SHOULD hold identical complete history from genesis. Clients confirm this via attestation comparison.
 
-Anyone can run a relay for an existing group at any time: fetch the log from existing relays, start serving. Only `relay_update` events (signed by a mod) make a relay canonical.
+Anyone can run a relay for an existing group at any time: fetch the log from existing relays, start serving. Only `relay_update` events (signed by an admin) make a relay canonical.
 
 ### 10.3 Relay Validation
 
@@ -944,7 +1023,7 @@ When a relay receives an event via `publish` or `backfill` (from a client), it M
    broadcast the event to subscribed clients (Section 10.4.2). For `backfill`
    actions, do NOT broadcast (Section 10.4.12).
 
-Relays MUST store events regardless of whether they hold the parent events. Relays MUST store events regardless of authorisation (i.e., a non-mod attempting a `kick` is stored, even though clients will reject it). Only structural and signature checks gate storage.
+Relays MUST store events regardless of whether they hold the parent events. Relays MUST store events regardless of authorisation (i.e., a non-admin attempting a `kick` is stored, even though clients will reject it). Only structural and signature checks gate storage.
 
 Relays SHOULD check whether an event is already stored before performing
 expensive signature verification. If the event is already stored, the relay
@@ -1306,7 +1385,7 @@ In a public group (`public: true` in genesis), any user may publish a `join` eve
 
 ### 11.2 Private Groups
 
-In a private group (`public: false` in genesis), a user MUST have a valid `invite` event from a mod before they can publish a `join` event. The group address MUST be shared privately (out-of-band). Clients MUST reject `join` events from users not in `members`.
+In a private group (`public: false` in genesis), a user MUST have a valid `invite` event from an admin before they can publish a `join` event. The group address MUST be shared privately (out-of-band). Clients MUST reject `join` events from users not in `members`.
 
 Relays do not enforce the public/private distinction — they store any well-formed event. The distinction is enforced by clients during state derivation (Section 8.5).
 
@@ -1357,7 +1436,7 @@ Relays MUST support `subscribe` + `sync` for an unknown group; if they do not ho
 
 To migrate a group to a new relay set:
 
-1. A mod publishes a `relay_update` event naming the new relay set.
+1. An admin publishes a `relay_update` event naming the new relay set.
 2. All connected clients observe the update.
 3. Each client MUST perform new relay seeding (Section 12.5) for any new relay in the set.
 4. Clients begin publishing new events to the new relay set.

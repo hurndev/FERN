@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { FernLogo } from './FernLogo'
 import { truncateId } from '../fern/utils'
 import type { GroupEntry, RelayConnection } from '../hooks/useBracken'
+import type { Channel } from '../fern/state'
 import styles from '../styles/components.module.css'
 
 interface Props {
@@ -9,10 +10,10 @@ interface Props {
   activeGroup: string | null
   identityPubkey: string
   relayConns: RelayConnection[]
-  channels: string[]
+  channels: Channel[]
   selectedChannel: string
   onSelectGroup: (pubkey: string) => void
-  onSelectChannel: (channel: string) => void
+  onSelectChannel: (channelId: string, groupPubkey: string) => void
   onAddGroupClick: () => void
   onIdentityClick: () => void
 }
@@ -82,18 +83,18 @@ export function Sidebar({
               {isExpanded &&
                 channels.map((ch) => (
                   <div
-                    key={ch}
+                    key={ch.id}
                     className={`${styles.channelItem} ${
-                      activeGroup === group.pubkey && selectedChannel === ch
+                      activeGroup === group.pubkey && selectedChannel === ch.id
                         ? styles.channelItemActive
                         : ''
                     }`}
                     onClick={() => {
                       onSelectGroup(group.pubkey)
-                      onSelectChannel(ch)
+                      onSelectChannel(ch.id, group.pubkey)
                     }}
                   >
-                    # {ch}
+                    # {ch.name}
                   </div>
                 ))}
             </div>

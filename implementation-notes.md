@@ -205,14 +205,15 @@ Bracken is the browser SPA in `bracken/`. It stores identity, events, receipts, 
 Current UI and protocol behavior:
 - Usernames/nicknames are not unique. `chat.nickname_set` is per-author display metadata; two users can display the same name.
 - The current user is marked with `(You)` in message headers and the member list.
-- Moderator styling is color-only in lists/messages; textual `(Mod)` is reserved for full user profiles.
+- Admin styling is color-only in lists/messages; textual `(Admin)` is reserved for full user profiles.
 - Settings call the export secret a "private key", not a "seed". Import belongs in setup only.
 - Logging out wipes Bracken identity and local IndexedDB cache, then returns to setup.
 - The private key reveal control is an icon-only eye button.
 - Group info exposes the full group pubkey, invite link, description, and canonical relays with compact copy controls.
 - If there are no connected relays, sends remain local retryable deliveries. Failed local sends are shown as failed with a retry action and are excluded from future parent selection.
 - The header relay badge shows the canonical relay count: red for one, orange for two, green for three or more.
-- Mod-only slash commands include `/kick`, `/ban`, `/unban`, `/invite`, `/promote`, `/demote`, `/relay-add`, `/relay-remove`, `/name`, and `/description`. `/relay-add` and `/relay-remove` accept multiple URLs separated by spaces or commas.
+- Admin-only slash commands include `/kick`, `/ban`, `/unban`, `/invite`, `/promote`, `/demote`, `/relay-add`, `/relay-remove`, `/name`, `/description`, `/channel-create`, and `/channel-delete`. `/relay-add` and `/relay-remove` accept multiple URLs separated by spaces or commas.
+- Bracken treats chat channel IDs as stable. The genesis channel ID is `"general"`; new channels use the `chat.channel_create` event ID. Channel names are mutable display metadata, not identifiers.
 
 ---
 
@@ -327,9 +328,9 @@ Note: `bracken/` is a separate TypeScript SPA (Vite + React) implementing the sa
 
 ### 9.2 Event type names
 
-Protocol types (no dot): `genesis`, `join`, `leave`, `invite`, `kick`, `ban`, `unban`, `mod_add`, `mod_remove`, `relay_update`, `metadata_update`
+Protocol types (no dot): `genesis`, `join`, `leave`, `invite`, `kick`, `ban`, `unban`, `admin_add`, `admin_remove`, `relay_update`, `metadata_update`
 
-`chat` namespace (official app): `chat.message`, `chat.reaction`, `chat.nickname_set`
+`chat` namespace (official app): `chat.message`, `chat.reaction`, `chat.nickname_set`, `chat.channel_create`, `chat.channel_update`, `chat.channel_delete`, `chat.settings_update`
 
 Future namespaces: `<appname>.<type>` (e.g., `poll.vote`, `schedule.event`)
 
@@ -373,13 +374,13 @@ fern group members 1
 fern group leave 1
 fern group nickname 1 "Alice"
 
-# Moderation (mod-only)
+# Moderation (admin-only)
 fern group kick 1 <pubkey>
 fern group ban 1 <pubkey> [--until <ts>] [--reason <text>]
 fern group unban 1 <pubkey>
 fern group invite 1 <pubkey>
-fern group mod-add 1 <pubkey>
-fern group mod-remove 1 <pubkey>
+fern group admin-add 1 <pubkey>
+fern group admin-remove 1 <pubkey>
 fern group relay-update 1 ws://new-relay:9000
 
 # Messaging

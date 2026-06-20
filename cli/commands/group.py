@@ -129,8 +129,12 @@ async def _create(name: str, description: str, public: bool, relay_urls: list[st
                 "description": description,
                 "public": public,
                 "founder": user.pubkey,
-                "mods": [user.pubkey],
+                "admins": [user.pubkey],
                 "relays": list(relay_urls),
+                "app": "chat",
+                "chat.channels": [{"id": "general", "name": "general", "position": 0}],
+                "chat.default_channel": "general",
+                "chat.system_channel": "general",
             },
             group_keypair=group_kp.keypair,
         )
@@ -329,7 +333,7 @@ async def _info(group_id: str) -> None:
             click.echo("Group: (no genesis found)")
         click.echo(f"  Public: {state.public}")
         click.echo(f"  Pubkey: {group_pubkey}")
-        click.echo(f"  Mods: {len(state.mods)}")
+        click.echo(f"  Admins: {len(state.admins)}")
         click.echo(f"  Members: {len(state.joined)}")
         click.echo(f"  Banned: {len(state.banned)}")
         click.echo(f"  Relays: {', '.join(state.relays)}")
@@ -396,7 +400,7 @@ async def _members(group_id: str) -> None:
 
         click.echo(f"Members ({len(state.joined)}):")
         for pubkey in sorted(state.joined):
-            role = "mod" if pubkey in state.mods else "member"
+            role = "admin" if pubkey in state.admins else "member"
             banned_info = state.banned.get(pubkey)
             status = " [banned]" if banned_info and (banned_info.until is None or banned_info.until > int(time.time())) else ""
             nick = nicknames.get(pubkey) or ""
@@ -567,7 +571,7 @@ async def _relay_update(group_id: str, urls: list[str]) -> None:
     click.echo("  New relays will be seeded with history on next sync.")
 
 
-async def _publish_mod_event(
+async def _publish_admin_event(
     group_id: str,
     event_type: str,
     content: dict[str, object],
@@ -650,7 +654,7 @@ async def _publish_mod_event(
 @click.argument("group_id")
 @click.argument("target_pubkey")
 def kick(group_id: str, target_pubkey: str) -> None:
-    asyncio.run(_publish_mod_event(
+    asyncio.run(_publish_admin_event(
         group_id,
         ProtocolTypes.KICK,
         {"target": target_pubkey},
@@ -665,7 +669,7 @@ def kick(group_id: str, target_pubkey: str) -> None:
 @click.option("--reason", default="", help="Reason for ban")
 def ban(group_id: str, target_pubkey: str, until: int | None, reason: str) -> None:
     content: dict[str, object] = {"target": target_pubkey, "until": until, "reason": reason}
-    asyncio.run(_publish_mod_event(
+    asyncio.run(_publish_admin_event(
         group_id,
         ProtocolTypes.BAN,
         content,
@@ -677,7 +681,7 @@ def ban(group_id: str, target_pubkey: str, until: int | None, reason: str) -> No
 @click.argument("group_id")
 @click.argument("target_pubkey")
 def unban(group_id: str, target_pubkey: str) -> None:
-    asyncio.run(_publish_mod_event(
+    asyncio.run(_publish_admin_event(
         group_id,
         ProtocolTypes.UNBAN,
         {"target": target_pubkey},
@@ -689,7 +693,7 @@ def unban(group_id: str, target_pubkey: str) -> None:
 @click.argument("group_id")
 @click.argument("invitee_pubkey")
 def invite(group_id: str, invitee_pubkey: str) -> None:
-    asyncio.run(_publish_mod_event(
+    asyncio.run(_publish_admin_event(
         group_id,
         ProtocolTypes.INVITE,
         {"invitee": invitee_pubkey, "role": "member"},
@@ -697,27 +701,27 @@ def invite(group_id: str, invitee_pubkey: str) -> None:
     ))
 
 
-@command.command(name="mod-add")
+@command.command(name="admin-add")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-def mod_add_cmd(group_id: str, target_pubkey: str) -> None:
-    asyncio.run(_publish_mod_event(
+def admin_add_cmd(group_id: str, target_pubkey: str) -> None:
+    asyncio.run(_publish_admin_event(
         group_id,
-        ProtocolTypes.MOD_ADD,
+        ProtocolTypes.ADMIN_ADD,
         {"target": target_pubkey},
-        f"Promoted {target_pubkey[:16]}... to mod in group {group_id}.",
+        f"Promoted {target_pubkey[:16]}... to admin in group {group_id}.",
     ))
 
 
-@command.command(name="mod-remove")
+@command.command(name="admin-remove")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-def mod_remove_cmd(group_id: str, target_pubkey: str) -> None:
-    asyncio.run(_publish_mod_event(
+def admin_remove_cmd(group_id: str, target_pubkey: str) -> None:
+    asyncio.run(_publish_admin_event(
         group_id,
-        ProtocolTypes.MOD_REMOVE,
+        ProtocolTypes.ADMIN_REMOVE,
         {"target": target_pubkey},
-        f"Demoted {target_pubkey[:16]}... from mod in group {group_id}.",
+        f"Demoted {target_pubkey[:16]}... from admin in group {group_id}.",
     ))
 
 

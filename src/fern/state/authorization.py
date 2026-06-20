@@ -17,18 +17,20 @@ def is_authorised(state: GroupState, event: Event) -> bool:
         ProtocolTypes.KICK,
         ProtocolTypes.BAN,
         ProtocolTypes.UNBAN,
-        ProtocolTypes.MOD_ADD,
-        ProtocolTypes.MOD_REMOVE,
+        ProtocolTypes.ADMIN_ADD,
+        ProtocolTypes.ADMIN_REMOVE,
         ProtocolTypes.RELAY_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
     ):
-        return event.author in state.mods
+        return event.author in state.admins
 
     if event.type in (
         ChatTypes.CHANNEL_CREATE,
+        ChatTypes.CHANNEL_UPDATE,
         ChatTypes.CHANNEL_DELETE,
+        ChatTypes.SETTINGS_UPDATE,
     ):
-        return event.author in state.mods
+        return event.author in state.admins
 
     if event.type.startswith("chat."):
         return state.can_post(event.author, event.ts)

@@ -6,19 +6,19 @@ import styles from '../styles/components.module.css'
 interface Props {
   pubkey: string
   nickname: string | null
-  isMod: boolean
+  isAdmin: boolean
   isBanned?: boolean
   isMember?: boolean
-  viewerIsMod?: boolean
+  viewerIsAdmin?: boolean
   viewerPubkey?: string
   onClose: () => void
-  onModAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
+  onAdminAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
 }
 
 export function ProfilePopup({
-  pubkey, nickname, isMod, isBanned = false, isMember = true,
-  viewerIsMod = false, viewerPubkey = '',
-  onClose, onModAction,
+  pubkey, nickname, isAdmin, isBanned = false, isMember = true,
+  viewerIsAdmin = false, viewerPubkey = '',
+  onClose, onAdminAction,
 }: Props) {
   const [copied, setCopied] = useState(false)
   const [acting, setActing] = useState(false)
@@ -40,17 +40,17 @@ export function ProfilePopup({
   }
 
   const handleAction = async (type: string) => {
-    if (!onModAction) return
+    if (!onAdminAction) return
     setActing(true)
     try {
-      await onModAction(type, pubkey)
+      await onAdminAction(type, pubkey)
       onClose()
     } finally {
       setActing(false)
     }
   }
 
-  const showModActions = viewerIsMod && !isSelf
+  const showAdminActions = viewerIsAdmin && !isSelf
 
   return (
     <div className={styles.profileOverlay} onClick={onClose}>
@@ -61,12 +61,12 @@ export function ProfilePopup({
             <Avatar value={pubkey} size={48} />
           </div>
           <div className={styles.profileIdentity}>
-            <div className={styles.profileName + (isMod && isMember ? ' ' + styles.profileNameMod : '')}>
+            <div className={styles.profileName + (isAdmin && isMember ? ' ' + styles.profileNameMod : '')}>
               {nickname ?? truncateId(pubkey)}
-              {isMod && isMember && <span className={styles.memberModTag}> (Mod)</span>}
+              {isAdmin && isMember && <span className={styles.memberModTag}> (Admin)</span>}
             </div>
             <div className={styles.profileRole}>
-              {isMember ? (isMod ? 'Moderator' : 'Member') : 'Not in group'}
+              {isMember ? (isAdmin ? 'Admin' : 'Member') : 'Not in group'}
               {isBanned && <span className={styles.profileBanned}> · Banned</span>}
             </div>
           </div>
@@ -86,9 +86,9 @@ export function ProfilePopup({
             <span className={styles.profileValue}>{nickname}</span>
           </div>
         )}
-        {showModActions && (
+        {showAdminActions && (
           <div className={styles.modActions}>
-            <span className={styles.profileLabel}>Mod Actions</span>
+            <span className={styles.profileLabel}>Admin Actions</span>
             <div className={styles.modActionBtns}>
               <button
                 className={styles.modActionBtn}
@@ -114,10 +114,10 @@ export function ProfilePopup({
                   Ban
                 </button>
               )}
-              {isMod ? (
+              {isAdmin ? (
                 <button
                   className={styles.modActionBtn}
-                  onClick={() => handleAction('mod_remove')}
+                  onClick={() => handleAction('admin_remove')}
                   disabled={acting}
                 >
                   Demote
@@ -125,7 +125,7 @@ export function ProfilePopup({
               ) : (
                 <button
                   className={styles.modActionBtn}
-                  onClick={() => handleAction('mod_add')}
+                  onClick={() => handleAction('admin_add')}
                   disabled={acting}
                 >
                   Promote

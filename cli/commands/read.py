@@ -18,7 +18,7 @@ from cli.config import (
 from cli.output import print_error
 
 
-MOD_TYPES = {"kick", "ban", "unban", "invite", "mod_add", "mod_remove", "join", "leave"}
+ADMIN_TYPES = {"kick", "ban", "unban", "invite", "admin_add", "admin_remove", "join", "leave"}
 
 
 def _compute_nicknames(events: list[Event]) -> dict[str, str]:
@@ -46,7 +46,7 @@ def _display_name(pubkey: str, nicknames: dict[str, str]) -> str:
     return nicknames.get(pubkey) or f"{pubkey[:12]}..."
 
 
-def _format_mod_action(event: Event, nicknames: dict[str, str]) -> str | None:
+def _format_admin_action(event: Event, nicknames: dict[str, str]) -> str | None:
     t = event.type
     target = event.content.get("target", "")
     target_name = _display_name(target, nicknames) if target else ""
@@ -66,9 +66,9 @@ def _format_mod_action(event: Event, nicknames: dict[str, str]) -> str | None:
         invitee = event.content.get("invitee", "")
         invitee_name = _display_name(invitee, nicknames) if invitee else ""
         return f"--- {author} invited {invitee_name} ---"
-    if t == "mod_add":
-        return f"--- {author} promoted {target_name} to mod ---"
-    if t == "mod_remove":
+    if t == "admin_add":
+        return f"--- {author} promoted {target_name} to admin ---"
+    if t == "admin_remove":
         return f"--- {author} demoted {target_name} ---"
     if t == "join":
         return f"--- {author} joined the group ---"
@@ -152,8 +152,8 @@ async def _read(channel: str | None, count: int, show_rejected: bool, group_id: 
                         continue
                 entries.append((ts, line))
 
-            elif event.type in MOD_TYPES:
-                formatted = _format_mod_action(event, nicknames)
+            elif event.type in ADMIN_TYPES:
+                formatted = _format_admin_action(event, nicknames)
                 if formatted is not None:
                     entries.append((ts, formatted))
 

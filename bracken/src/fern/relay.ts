@@ -341,7 +341,7 @@ export interface GroupPreview {
   description: string
   public: boolean
   founder: string
-  mods: string[]
+  admins: string[]
   canonicalRelays: string[]
   sourceRelay: string
 }
@@ -380,8 +380,8 @@ export async function fetchGroupPreview(
         description: typeof content['description'] === 'string' ? (content['description'] as string) : '',
         public: content['public'] !== false,
         founder: typeof content['founder'] === 'string' ? (content['founder'] as string) : '',
-        mods: Array.isArray(content['mods'])
-          ? (content['mods'] as unknown[]).filter((m): m is string => typeof m === 'string')
+        admins: Array.isArray(content['admins'])
+          ? (content['admins'] as unknown[]).filter((m): m is string => typeof m === 'string')
           : [],
         canonicalRelays,
         sourceRelay: url,

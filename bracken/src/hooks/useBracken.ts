@@ -277,6 +277,8 @@ export function useBracken() {
     if (!group) return
 
     const clientMap = clientsRef.current
+    const healInFlight = healInFlightRef.current
+    const healRetryGate = healRetryGateRef.current
     let cancelled = false
     const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>()
     const healKey = (url: string) => `${url}|${groupPubkey}`
@@ -363,8 +365,8 @@ export function useBracken() {
 
         client.onClose(() => {
           clientMap.delete(url)
-          healInFlightRef.current.delete(healKey(url))
-          healRetryGateRef.current.delete(healKey(url))
+          healInFlight.delete(healKey(url))
+          healRetryGate.delete(healKey(url))
           upsertConn(url, { connected: false, client: undefined })
           scheduleReconnect(url)
         })
@@ -419,8 +421,8 @@ export function useBracken() {
         client.close()
       }
       for (const url of group.relays) {
-        healInFlightRef.current.delete(healKey(url))
-        healRetryGateRef.current.delete(healKey(url))
+        healInFlight.delete(healKey(url))
+        healRetryGate.delete(healKey(url))
       }
       clientMap.clear()
       setConnStates([])
@@ -674,7 +676,7 @@ export function useBracken() {
     [events, groups, publishToGroupRelays],
   )
 
-  const modAction = useCallback(
+  const adminAction = useCallback(
     async (type: string, targetPubkey = '', extra?: Record<string, unknown>): Promise<void> => {
       if (!identity || !activeGroup) return
       const group = groups.find((g) => g.pubkey === activeGroup)
@@ -692,8 +694,12 @@ export function useBracken() {
         if (!Array.isArray(content['relays'])) return
       } else if (type === 'metadata_update') {
         if (!('name' in content) && !('description' in content)) return
-      } else if (type === 'chat.channel_create' || type === 'chat.channel_delete') {
+      } else if (type === 'chat.channel_create') {
         if (!('name' in content)) return
+      } else if (type === 'chat.channel_update' || type === 'chat.channel_delete') {
+        if (!('id' in content)) return
+      } else if (type === 'chat.settings_update') {
+        if (!('default_channel' in content) && !('system_channel' in content)) return
       } else {
         if (!targetPubkey) return
         content['target'] = targetPubkey
@@ -764,10 +770,16 @@ export function useBracken() {
           description: options?.description ?? '',
           public: options?.public ?? true,
           founder: identity.publicKey,
-          mods: [identity.publicKey],
+          admins: [identity.publicKey],
           relays: relayUrls,
           app: 'chat',
-          'chat.channels': [...channelList],
+          'chat.channels': [...channelList].map((channel, idx) => ({
+            id: channel,
+            name: channel,
+            position: idx,
+          })),
+          'chat.default_channel': 'general',
+          'chat.system_channel': 'general',
         },
         ts: Math.floor(Date.now() / 1000),
         tags: [],
@@ -853,7 +865,7 @@ export function useBracken() {
     sendMessage,
     retryMessage,
     createGroup,
-    modAction,
+    adminAction,
     setNickname,
   }
 }
