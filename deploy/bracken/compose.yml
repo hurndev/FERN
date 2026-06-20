@@ -1,0 +1,17 @@
+services:
+  bracken:
+    build:
+      context: ../..
+      dockerfile: deploy/bracken/Dockerfile
+      args:
+        VITE_RELAY_URL: ${VITE_RELAY_URL:?VITE_RELAY_URL must be set in deploy/.env}
+    image: fern/bracken:latest
+    container_name: fern-bracken
+    restart: unless-stopped
+    networks:
+      - fern
+
+networks:
+  fern:
+    name: fern-bracken
+    driver: bridge

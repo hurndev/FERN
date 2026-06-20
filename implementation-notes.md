@@ -323,6 +323,7 @@ Note: `bracken/` is a separate TypeScript SPA (Vite + React) implementing the sa
 - `FERN_HOME` env var: overrides `~/.fern` for CLI data storage
 - Relay log formatter: coloured output by level (INFO=green, WARN=yellow, ERROR=red), `--no-color` to disable
 - Relay metadata endpoint: HTTP GET on same host/port (wss→https scheme swap), returns JSON with CORS headers
+- `fern-relay --key-file PATH`: load the relay's 64-char hex private key from a file instead of generating one. The default behaviour (no flag) mints a fresh keypair every start, which breaks client trust pins and invalidates outstanding receipts — only acceptable for ephemeral/dev use. For a long-lived relay, pass `--key-file` and persist the keyfile outside the container. The `deploy/relay/relay-entrypoint.sh` wrapper handles first-run generation automatically.
 
 ### 9.2 Event type names
 

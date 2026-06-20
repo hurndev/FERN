@@ -41,5 +41,10 @@ bracken/node_modules/
 bracken/dist/
 bracken/.vite/
 
+# Deploy runtime data and secrets
+deploy/.env
+deploy/relay/data/*
+!deploy/relay/data/.gitkeep
+
 # Misc
 .DS_Store
