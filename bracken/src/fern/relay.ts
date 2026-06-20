@@ -319,3 +319,65 @@ export function parseGroupAddress(address: string): {
   }
   return { groupPubkey: addr, relays: [] }
 }
+
+export interface GroupPreview {
+  name: string
+  description: string
+  public: boolean
+  founder: string
+  mods: string[]
+  canonicalRelays: string[]
+  sourceRelay: string
+}
+
+export interface GroupPreviewError {
+  error: string
+  unreachable: string[]
+}
+
+export async function fetchGroupPreview(
+  groupPubkey: string,
+  relays: string[],
+): Promise<GroupPreview | GroupPreviewError> {
+  const unreachable: string[] = []
+  for (const url of relays) {
+    const client = new RelayClient(url)
+    try {
+      await client.connect()
+    } catch {
+      unreachable.push(url)
+      continue
+    }
+    try {
+      const events = await client.sync(groupPubkey)
+      const genesis = events.find((e) => e.type === 'genesis' && e.group === groupPubkey)
+      if (!genesis) {
+        unreachable.push(url)
+        continue
+      }
+      const content = genesis.content as Record<string, unknown>
+      const canonicalRelays = Array.isArray(content['relays'])
+        ? (content['relays'] as unknown[]).filter((r): r is string => typeof r === 'string')
+        : []
+      return {
+        name: typeof content['name'] === 'string' ? (content['name'] as string) : 'Unnamed group',
+        description: typeof content['description'] === 'string' ? (content['description'] as string) : '',
+        public: content['public'] !== false,
+        founder: typeof content['founder'] === 'string' ? (content['founder'] as string) : '',
+        mods: Array.isArray(content['mods'])
+          ? (content['mods'] as unknown[]).filter((m): m is string => typeof m === 'string')
+          : [],
+        canonicalRelays,
+        sourceRelay: url,
+      }
+    } catch {
+      unreachable.push(url)
+    } finally {
+      await client.close()
+    }
+  }
+  return {
+    error: 'Could not load group info from any provided relay.',
+    unreachable,
+  }
+}

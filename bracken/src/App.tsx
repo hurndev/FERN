@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useBracken } from './hooks/useBracken'
 import { IdentitySetup } from './components/IdentitySetup'
+import { InvitePreview, type PendingJoin } from './components/InvitePreview'
 import { Sidebar } from './components/Sidebar'
 import { MessageList } from './components/MessageList'
 import type { SlashCommand } from './components/Composer'
@@ -74,7 +75,7 @@ export default function App() {
   const [showGroupInfo, setShowGroupInfo] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [localEventIds, setLocalEventIds] = useState<Set<string>>(new Set())
-  const [pendingJoin, setPendingJoin] = useState<{ pubkey: string; relays: string[] } | null>(null)
+  const [pendingJoin, setPendingJoin] = useState<PendingJoin | null>(null)
   const [modalInitial, setModalInitial] = useState<{ address?: string; error?: string | null } | null>(null)
 
   const openAddGroup = useCallback((initial?: { address?: string; error?: string | null }) => {
@@ -85,6 +86,10 @@ export default function App() {
   const closeAddGroup = useCallback(() => {
     setShowAddGroup(false)
     setModalInitial(null)
+  }, [])
+
+  const cancelInvite = useCallback(() => {
+    setPendingJoin(null)
   }, [])
 
   useEffect(() => {
@@ -104,36 +109,9 @@ export default function App() {
     window.history.replaceState(null, '', window.location.pathname)
   }, [])
 
-  useEffect(() => {
-    if (!bracken.identity || !pendingJoin) return
-    const { pubkey, relays } = pendingJoin
-    setPendingJoin(null)
-
-    if (bracken.groups.some((g) => g.pubkey === pubkey)) {
-      bracken.setActiveGroup(pubkey)
-      return
-    }
-
-    if (relays.length === 0) {
-      openAddGroup({
-        address: `fern:${pubkey}`,
-        error: 'This invite link has no relay hints. Add at least one relay URL to join.',
-      })
-      return
-    }
-
-    const address = `fern:${pubkey}@${relays.join(',')}`
-    bracken.joinGroup(address).catch((err) => {
-      openAddGroup({ address, error: String(err) })
-    })
-  }, [
-    bracken.identity,
-    pendingJoin,
-    bracken.groups,
-    bracken.joinGroup,
-    bracken.setActiveGroup,
-    openAddGroup,
-  ])
+  const isAlreadyMember =
+    pendingJoin !== null &&
+    bracken.groups.some((g) => g.pubkey === pendingJoin.pubkey)
 
   const rejectedIds = useMemo(() => {
     if (!bracken.events || bracken.events.length === 0) return new Set<string>()
@@ -164,6 +142,20 @@ export default function App() {
       <div className={styles.emptyState}>
         <FernLogo size={28} />
       </div>
+    )
+  }
+
+  if (pendingJoin) {
+    return (
+      <InvitePreview
+        pendingJoin={pendingJoin}
+        hasIdentity={bracken.identity !== null}
+        alreadyMember={isAlreadyMember}
+        onImportIdentity={bracken.importIdentity}
+        onJoin={bracken.joinGroup}
+        onSwitchToGroup={bracken.setActiveGroup}
+        onCancel={cancelInvite}
+      />
     )
   }
 
