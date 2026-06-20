@@ -41,10 +41,18 @@ $EDITOR deploy/.env
 #   (e.g. wss://relay.example.com)
 #   FERN_DATA_DIR can stay at the default unless you want to move it.
 
-# 3a. Start just the relay
+# 3. Symlink the env file into each compose project directory.
+#    Docker Compose looks for `.env` in the same directory as the compose
+#    file when resolving ${VAR} in build args and volumes. The `env_file:
+#    ../.env` directive only affects runtime service env, not parse-time
+#    substitution. Symlinks keep a single source of truth.
+ln -sf ../.env deploy/relay/.env
+ln -sf ../.env deploy/bracken/.env
+
+# 4a. Start just the relay
 cd deploy/relay && docker compose up -d --build && cd ../..
 
-# 3b. Start just Bracken
+# 4b. Start just Bracken
 cd deploy/bracken && docker compose up -d --build && cd ../..
 ```
 
