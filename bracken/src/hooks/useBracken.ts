@@ -692,6 +692,8 @@ export function useBracken() {
         if (!Array.isArray(content['relays'])) return
       } else if (type === 'metadata_update') {
         if (!('name' in content) && !('description' in content)) return
+      } else if (type === 'chat.channel_create' || type === 'chat.channel_delete') {
+        if (!('name' in content)) return
       } else {
         if (!targetPubkey) return
         content['target'] = targetPubkey

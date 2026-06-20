@@ -208,18 +208,16 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
             </div>
 
             <div className={styles.modalField}>
-              <span className={styles.profileLabel}>Channels (comma separated, default: general)</span>
+              <span className={styles.profileLabel}>Channels (OPTIONAL)</span>
               <input
                 className={styles.modalInput}
                 value={channelsInput}
                 onChange={(e) => setChannelsInput(e.target.value)}
-                placeholder="general, announcements"
+                placeholder="general"
                 disabled={createBusy}
                 spellCheck={false}
               />
-              <span className={styles.modalHint}>
-                The "general" channel is always present and cannot be deleted.
-              </span>
+
             </div>
 
             <div className={styles.modalField}>
