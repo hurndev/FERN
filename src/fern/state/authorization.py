@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fern.events.event import Event
 from fern.state.types import GroupState
-from fern.events.types import ProtocolTypes
+from fern.events.types import ChatTypes, ProtocolTypes
 
 
 def is_authorised(state: GroupState, event: Event) -> bool:
@@ -21,6 +21,12 @@ def is_authorised(state: GroupState, event: Event) -> bool:
         ProtocolTypes.MOD_REMOVE,
         ProtocolTypes.RELAY_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
+    ):
+        return event.author in state.mods
+
+    if event.type in (
+        ChatTypes.CHANNEL_CREATE,
+        ChatTypes.CHANNEL_DELETE,
     ):
         return event.author in state.mods
 

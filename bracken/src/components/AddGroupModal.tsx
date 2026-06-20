@@ -7,7 +7,7 @@ interface Props {
   onCreate: (
     name: string,
     relays: string[],
-    options?: { description?: string; public?: boolean },
+    options?: { description?: string; public?: boolean; channels?: string[] },
   ) => Promise<{ ok: number; total: number; error?: string }>
   onClose: () => void
   initialAddress?: string
@@ -46,6 +46,7 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
   const [description, setDescription] = useState('')
   const [relays, setRelays] = useState(DEFAULT_RELAY_HINTS.join(', '))
   const [isPublic, setIsPublic] = useState(true)
+  const [channelsInput, setChannelsInput] = useState('')
   const [createBusy, setCreateBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createProgress, setCreateProgress] = useState<string[]>([])
@@ -97,10 +98,14 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
     try {
       setCreateProgress((p) => [...p, 'Generating group keypair…'])
       setCreateProgress((p) => [...p, 'Publishing genesis to relays…'])
+      const parsedChannels = channelsInput
+        .split(/[\s,]+/)
+        .map((c) => c.trim())
+        .filter(Boolean)
       const result = await onCreate(
         name.trim(),
         parsedRelays,
-        { description: description.trim(), public: isPublic },
+        { description: description.trim(), public: isPublic, channels: parsedChannels },
       )
       if (result.total === 0) {
         throw new Error('No relays configured.')
@@ -200,6 +205,21 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
                 disabled={createBusy}
                 rows={2}
               />
+            </div>
+
+            <div className={styles.modalField}>
+              <span className={styles.profileLabel}>Channels (comma separated, default: general)</span>
+              <input
+                className={styles.modalInput}
+                value={channelsInput}
+                onChange={(e) => setChannelsInput(e.target.value)}
+                placeholder="general, announcements"
+                disabled={createBusy}
+                spellCheck={false}
+              />
+              <span className={styles.modalHint}>
+                The "general" channel is always present and cannot be deleted.
+              </span>
             </div>
 
             <div className={styles.modalField}>

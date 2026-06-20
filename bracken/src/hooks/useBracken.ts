@@ -583,7 +583,7 @@ export function useBracken() {
   )
 
   const sendMessage = useCallback(
-    async (text: string): Promise<boolean> => {
+    async (text: string, channel = 'general'): Promise<boolean> => {
       if (!identity || !activeGroup) return false
       const group = groups.find((g) => g.pubkey === activeGroup)
       if (!group) return false
@@ -596,7 +596,7 @@ export function useBracken() {
         group: activeGroup,
         author: identity.publicKey,
         parents,
-        content: { text, channel: 'general' },
+        content: { text, channel },
         ts: Math.floor(Date.now() / 1000),
         tags: [],
       }
@@ -744,10 +744,14 @@ export function useBracken() {
     async (
       name: string,
       relayUrls: string[],
-      options?: { description?: string; public?: boolean },
+      options?: { description?: string; public?: boolean; channels?: string[] },
     ): Promise<{ ok: number; total: number; error?: string }> => {
       if (!identity) throw new Error('No identity')
       const groupKeypair = generateKeypair()
+      const channelList = new Set(['general'])
+      for (const ch of options?.channels ?? []) {
+        channelList.add(ch.trim())
+      }
       const input: EventInput = {
         type: 'genesis',
         group: groupKeypair.publicKey,
@@ -760,6 +764,8 @@ export function useBracken() {
           founder: identity.publicKey,
           mods: [identity.publicKey],
           relays: relayUrls,
+          app: 'chat',
+          'chat.channels': [...channelList],
         },
         ts: Math.floor(Date.now() / 1000),
         tags: [],

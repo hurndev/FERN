@@ -18,6 +18,8 @@ class ChatTypes:
     MESSAGE = "chat.message"
     REACTION = "chat.reaction"
     NICKNAME_SET = "chat.nickname_set"
+    CHANNEL_CREATE = "chat.channel_create"
+    CHANNEL_DELETE = "chat.channel_delete"
 
 
 PROTOCOL_TYPES: frozenset[str] = frozenset(
@@ -41,6 +43,8 @@ CHAT_TYPES: frozenset[str] = frozenset(
         ChatTypes.MESSAGE,
         ChatTypes.REACTION,
         ChatTypes.NICKNAME_SET,
+        ChatTypes.CHANNEL_CREATE,
+        ChatTypes.CHANNEL_DELETE,
     }
 )
 
@@ -56,6 +60,8 @@ STATE_EVENT_TYPES: frozenset[str] = frozenset(
         ProtocolTypes.MOD_REMOVE,
         ProtocolTypes.RELAY_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
+        ChatTypes.CHANNEL_CREATE,
+        ChatTypes.CHANNEL_DELETE,
     }
 )
 

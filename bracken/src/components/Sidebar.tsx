@@ -9,7 +9,10 @@ interface Props {
   activeGroup: string | null
   identityPubkey: string
   relayConns: RelayConnection[]
+  channels: string[]
+  selectedChannel: string
   onSelectGroup: (pubkey: string) => void
+  onSelectChannel: (channel: string) => void
   onAddGroupClick: () => void
   onIdentityClick: () => void
 }
@@ -19,7 +22,10 @@ export function Sidebar({
   activeGroup,
   identityPubkey,
   relayConns,
+  channels,
+  selectedChannel,
   onSelectGroup,
+  onSelectChannel,
   onAddGroupClick,
   onIdentityClick,
 }: Props) {
@@ -55,7 +61,6 @@ export function Sidebar({
       <div className={styles.groupList}>
         {groups.map((group) => {
           const isExpanded = expanded.has(group.pubkey)
-          const isActive = activeGroup === group.pubkey
           return (
             <div key={group.pubkey} className={styles.groupEntry}>
               <div
@@ -74,16 +79,23 @@ export function Sidebar({
                 </span>
                 {group.name}
               </div>
-              {isExpanded && (
-                <div
-                  className={`${styles.channelItem} ${
-                    isActive ? styles.channelItemActive : ''
-                  }`}
-                  onClick={() => onSelectGroup(group.pubkey)}
-                >
-                  # general
-                </div>
-              )}
+              {isExpanded &&
+                channels.map((ch) => (
+                  <div
+                    key={ch}
+                    className={`${styles.channelItem} ${
+                      activeGroup === group.pubkey && selectedChannel === ch
+                        ? styles.channelItemActive
+                        : ''
+                    }`}
+                    onClick={() => {
+                      onSelectGroup(group.pubkey)
+                      onSelectChannel(ch)
+                    }}
+                  >
+                    # {ch}
+                  </div>
+                ))}
             </div>
           )
         })}

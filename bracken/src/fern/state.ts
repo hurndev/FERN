@@ -14,6 +14,8 @@ export interface GroupState {
   relays: string[]
   metadata: { name: string; description: string }
   public: boolean
+  app: string
+  channels: Set<string>
 }
 
 const PROTOCOL_TYPES = new Set([
@@ -24,6 +26,15 @@ const PROTOCOL_TYPES = new Set([
 function initialiseFromGenesis(genesis: FernEvent): GroupState {
   const c = genesis.content
   const founder = c['founder'] as string
+  const app = (c['app'] as string) || 'chat'
+  let channels = new Set<string>(['general'])
+  if (app === 'chat') {
+    const raw = (c['chat.channels'] as unknown[]) || ['general']
+    for (const ch of raw) {
+      if (typeof ch === 'string' && ch.trim()) channels.add(ch.trim())
+    }
+    channels.add('general')
+  }
   return {
     members: new Set([founder]),
     joined: new Set([founder]),
@@ -35,6 +46,8 @@ function initialiseFromGenesis(genesis: FernEvent): GroupState {
       description: (c['description'] as string) ?? '',
     },
     public: c['public'] as boolean,
+    app,
+    channels,
   }
 }
 
@@ -51,6 +64,7 @@ function isAuthorised(state: GroupState, event: FernEvent): boolean {
   const adminTypes = new Set([
     'invite', 'kick', 'ban', 'unban', 'mod_add', 'mod_remove',
     'relay_update', 'metadata_update',
+    'chat.channel_create', 'chat.channel_delete',
   ])
   if (adminTypes.has(event.type)) return state.mods.has(event.author)
   if (event.type.startsWith('chat.')) {
@@ -68,6 +82,7 @@ function applyEvent(state: GroupState, event: FernEvent): GroupState {
   const mods = new Set(state.mods)
   const relays = [...state.relays]
   const metadata = { ...state.metadata }
+  const channels = new Set(state.channels)
 
   switch (t) {
     case 'invite':
@@ -110,10 +125,23 @@ function applyEvent(state: GroupState, event: FernEvent): GroupState {
       if ('name' in c) metadata.name = c['name'] as string
       if ('description' in c) metadata.description = c['description'] as string
       break
+    case 'chat.channel_create':
+      {
+        const name = c['name'] as string
+        if (name && !channels.has(name)) channels.add(name)
+      }
+      break
+    case 'chat.channel_delete':
+      {
+        const name = c['name'] as string
+        if (name && name !== 'general') channels.delete(name)
+      }
+      break
   }
 
   return {
     members, joined, banned, mods, relays, metadata, public: state.public,
+    app: state.app, channels,
   }
 }
 

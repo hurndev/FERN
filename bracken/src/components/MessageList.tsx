@@ -16,6 +16,7 @@ interface Props {
   banned: Set<string>
   deliveries: Record<string, MessageDelivery>
   viewerPubkey?: string
+  selectedChannel?: string
   onModAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
   onRetryMessage?: (eventId: string) => Promise<void>
 }
@@ -34,7 +35,7 @@ interface MessageDelivery {
   error?: string
 }
 
-const MOD_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'mod_add', 'mod_remove', 'join', 'leave', 'genesis', 'metadata_update', 'relay_update'])
+const MOD_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'mod_add', 'mod_remove', 'join', 'leave', 'genesis', 'metadata_update', 'relay_update', 'chat.channel_create', 'chat.channel_delete'])
 
 function formatModAction(event: FernEvent): { clickable?: boolean; pubkey?: string; text: string }[] {
   const a: { clickable?: boolean; pubkey?: string; text: string }[] = []
@@ -69,6 +70,14 @@ function formatModAction(event: FernEvent): { clickable?: boolean; pubkey?: stri
     const count = relays.filter((r): r is string => typeof r === 'string').length
     a.push(author, { text: ` updated relays (${count} relay${count !== 1 ? 's' : ''})` })
   }
+  else if (t === 'chat.channel_create') {
+    const name = (event.content['name'] as string) || '?'
+    a.push(author, { text: ` created channel #${name}` })
+  }
+  else if (t === 'chat.channel_delete') {
+    const name = (event.content['name'] as string) || '?'
+    a.push(author, { text: ` deleted channel #${name}` })
+  }
   return a
 }
 
@@ -83,6 +92,7 @@ export function MessageList({
   banned,
   deliveries,
   viewerPubkey = '',
+  selectedChannel = 'general',
   onModAction,
   onRetryMessage,
 }: Props) {
@@ -96,6 +106,14 @@ export function MessageList({
     const relevantEvents = events
       .filter((e) => connectedEventIds.has(e.id))
       .filter((e) => e.type === 'chat.message' || MOD_TYPES.has(e.type))
+      .filter((e) => {
+        if (MOD_TYPES.has(e.type)) return true
+        if (e.type === 'chat.message') {
+          const ch = (e.content['channel'] as string) || 'general'
+          return ch === selectedChannel
+        }
+        return true
+      })
       .sort((a, b) => {
         if (a.ts !== b.ts) return a.ts - b.ts
         return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
@@ -123,7 +141,7 @@ export function MessageList({
     }
 
     return displayRows
-  }, [events, connectedEventIds, localEventIds])
+  }, [events, connectedEventIds, localEventIds, selectedChannel])
 
   useEffect(() => {
     if (atBottom && scrollRef.current) {

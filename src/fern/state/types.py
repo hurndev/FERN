@@ -20,6 +20,8 @@ class GroupState:
     relays: tuple[str, ...]
     metadata: Mapping[str, str]
     public: bool
+    app: str = "chat"
+    channels: frozenset[str] = frozenset({"general"})
 
     def is_banned_at(self, pubkey: str, ts: int) -> bool:
         entry = self.banned.get(pubkey)

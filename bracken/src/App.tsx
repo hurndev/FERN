@@ -49,6 +49,8 @@ const MOD_COMMANDS: SlashCommand[] = [
   { cmd: '/relay-remove', desc: 'Remove canonical relays' },
   { cmd: '/name', desc: 'Set group name' },
   { cmd: '/description', desc: 'Set group description' },
+  { cmd: '/channel-create', desc: 'Create a new channel' },
+  { cmd: '/channel-delete', desc: 'Delete a channel' },
 ]
 
 function firstArg(args: string): string {
@@ -132,6 +134,17 @@ export default function App() {
     return bracken.state?.mods ?? new Set<string>()
   }, [bracken.state])
 
+  const [selectedChannel, setSelectedChannel] = useState('general')
+
+  useEffect(() => {
+    setSelectedChannel('general')
+  }, [bracken.activeGroup])
+
+  const channels = useMemo(() => {
+    if (!bracken.state) return ['general']
+    return [...bracken.state.channels].sort()
+  }, [bracken.state])
+
   const isViewerMod = bracken.identity ? mods.has(bracken.identity.publicKey) : false
   const slashCommands = useMemo(() => {
     return isViewerMod ? [...USER_COMMANDS, ...MOD_COMMANDS] : USER_COMMANDS
@@ -200,8 +213,14 @@ export default function App() {
           activeGroup={bracken.activeGroup}
           identityPubkey={bracken.identity.publicKey}
           relayConns={bracken.relayConns}
+          channels={channels}
+          selectedChannel={selectedChannel}
           onSelectGroup={(pk) => {
             bracken.setActiveGroup(pk)
+            setSidebarOpen(false)
+          }}
+          onSelectChannel={(ch) => {
+            setSelectedChannel(ch)
             setSidebarOpen(false)
           }}
           onAddGroupClick={() => {
@@ -226,7 +245,7 @@ export default function App() {
               >
                 ☰
               </button>
-              <span className={styles.channelName}># general</span>
+              <span className={styles.channelName}># {selectedChannel}</span>
               <button
                 className={styles.groupLabelBtn}
                 onClick={() => setShowGroupInfo(true)}
@@ -261,12 +280,13 @@ export default function App() {
               banned={bannedSet}
               deliveries={bracken.messageDeliveries}
               viewerPubkey={userPubkey}
+              selectedChannel={selectedChannel}
               onModAction={bracken.modAction}
               onRetryMessage={bracken.retryMessage}
             />
 
             <Composer
-              channelName="general"
+              channelName={selectedChannel}
               canPost={canPost && !isBanned}
               disabledReason={
                 isBanned
@@ -314,6 +334,10 @@ export default function App() {
                   await bracken.modAction('metadata_update', '', { name: args.trim() })
                 } else if (isViewerMod && cmd === '/description') {
                   await bracken.modAction('metadata_update', '', { description: args.trim() })
+                } else if (isViewerMod && cmd === '/channel-create' && args.trim()) {
+                  await bracken.modAction('chat.channel_create', '', { name: args.trim() })
+                } else if (isViewerMod && cmd === '/channel-delete' && args.trim()) {
+                  await bracken.modAction('chat.channel_delete', '', { name: args.trim() })
                 }
               }}
               commands={slashCommands}

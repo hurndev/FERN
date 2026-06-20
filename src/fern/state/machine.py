@@ -3,14 +3,22 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from fern.events.event import Event
-from fern.events.types import ProtocolTypes
+from fern.events.types import ChatTypes, ProtocolTypes
 from fern.state.authorization import is_authorised
 from fern.state.types import BanEntry, GroupState
+
+_GENERAL = "general"
 
 
 def _initialise_from_genesis(genesis: Event) -> GroupState:
     c = genesis.content
     founder = c["founder"]
+    app = c.get("app", "chat")
+    channels: frozenset[str] = frozenset()
+    if app == "chat":
+        channels = frozenset(c.get("chat.channels", [_GENERAL]))
+        if _GENERAL not in channels:
+            channels = frozenset({_GENERAL, *channels})
     return GroupState(
         members=frozenset({founder}),
         joined=frozenset({founder}),
@@ -19,6 +27,8 @@ def _initialise_from_genesis(genesis: Event) -> GroupState:
         relays=tuple(c["relays"]),
         metadata={"name": c.get("name", ""), "description": c.get("description", "")},
         public=c.get("public", True),
+        app=app,
+        channels=channels,
     )
 
 
@@ -32,6 +42,7 @@ def apply_event(state: GroupState, event: Event) -> GroupState:
     mods = set(state.mods)
     relays = list(state.relays)
     metadata = dict(state.metadata)
+    channels = set(state.channels)
 
     if t == ProtocolTypes.INVITE:
         members.add(c["invitee"])
@@ -71,6 +82,16 @@ def apply_event(state: GroupState, event: Event) -> GroupState:
             if key in c:
                 metadata[key] = c[key]
 
+    elif t == ChatTypes.CHANNEL_CREATE:
+        name = c["name"]
+        if name not in channels:
+            channels.add(name)
+
+    elif t == ChatTypes.CHANNEL_DELETE:
+        name = c["name"]
+        if name != _GENERAL and name in channels:
+            channels.discard(name)
+
     return GroupState(
         members=frozenset(members),
         joined=frozenset(joined),
@@ -79,6 +100,8 @@ def apply_event(state: GroupState, event: Event) -> GroupState:
         relays=tuple(relays),
         metadata={k: v for k, v in metadata.items()},
         public=state.public,
+        app=state.app,
+        channels=frozenset(channels),
     )
 
 

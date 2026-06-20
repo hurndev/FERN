@@ -220,7 +220,9 @@ Content schema:
   "public":      true,
   "founder":     "<founder user pubkey hex>",
   "mods":        ["<founder user pubkey hex>"],
-  "relays":      ["wss://relay1.example.com", "wss://relay2.example.com"]
+  "relays":      ["wss://relay1.example.com", "wss://relay2.example.com"],
+  "app":         "chat",
+  "chat.channels": ["general"]
 }
 ```
 
@@ -232,8 +234,10 @@ Content schema:
 | `founder` | string | Founder's user pubkey (64-char hex). MUST equal the `author` field of this event. |
 | `mods` | array of strings | Initial mod pubkeys. MUST include the founder. Initial list MUST be non-empty. |
 | `relays` | array of strings | Initial canonical relay URLs (e.g., `wss://...`). MUST be non-empty. |
+| `app` | string | The primary app namespace this group uses. All app-level event types MUST be prefixed with `app`. For example `"app": "chat"` means all app event types use the `chat.` prefix (e.g., `chat.message`). A client that does not understand `app` SHOULD NOT engage with the group. MUST be a non-empty string containing at least one `.` or recognised bare name (e.g., `"chat"`). |
+| `chat.channels` | array of strings | Required when `app` is `"chat"`. Initial channel list. MUST contain at least one channel. The `"general"` channel is always present and cannot be deleted later. Default: `["general"]`. |
 
-Verification: `sig` MUST verify against the `group` field as the public key. The `founder` field MUST equal the `author` field. The `mods` array MUST contain the `founder` pubkey.
+Verification: `sig` MUST verify against the `group` field as the public key. The `founder` field MUST equal the `author` field. The `mods` array MUST contain the `founder` pubkey. If `app == "chat"`, `chat.channels` MUST be present and non-empty. `chat.channels` MUST contain `"general"`.
 
 ### 5.2 `join`
 
@@ -458,6 +462,38 @@ Content schema:
 
 Authorisation: `author` MUST be in the `joined` set. The nickname applies to the signing user only; the most recent `chat.nickname_set` event from a given user (in canonical linearisation order) determines their display name.
 
+### 6.4 `chat.channel_create`
+
+A mod creates a new channel in the group.
+
+Content schema:
+
+```json
+{
+  "name": "announcements"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Channel name. Non-empty, case-sensitive, max 50 chars. Alphanumeric, hyphens, and underscores permitted. |
+
+Authorisation: `author` MUST be a mod. The `name` MUST NOT already exist in `channels`. The event is stored but discarded from state on duplicate names.
+
+### 6.5 `chat.channel_delete`
+
+A mod deletes an existing channel.
+
+Content schema:
+
+```json
+{
+  "name": "announcements"
+}
+```
+
+Authorisation: `author` MUST be a mod. The `"general"` channel MUST NOT be deleted. Messages in a deleted channel remain in the DAG but are hidden from normal rendering (the channel name is removed from `channels`, so `chat.message` events with that channel name are filtered from display). Clients MUST NOT delete events from storage when a channel is deleted.
+
 ---
 
 ## 7. The Causal DAG
@@ -520,6 +556,8 @@ mods:       set of pubkey hex strings
 relays:     list of relay URL strings
 metadata:   {name: string, description: string}
 public:     boolean
+app:        string (primary app namespace, e.g. \"chat\")
+channels:   set of channel name strings (when app is \"chat\")
 ```
 
 ### 8.2 Initialisation
@@ -533,6 +571,8 @@ State is initialised from the `genesis` event:
 - `relays = genesis.content.relays`
 - `metadata = {name: genesis.content.name, description: genesis.content.description}`
 - `public = genesis.content.public`
+- `app = genesis.content.app`  (e.g., `"chat"`)
+- `channels = set(genesis.content["chat.channels"])`  (when `app == "chat"`; MUST contain `"general"`)
 
 ### 8.3 Derivation Order
 
@@ -558,6 +598,8 @@ For each event in canonical linearisation order (skipping the genesis, which has
 | `mod_remove` | Remove `content.target` from `mods`. |
 | `relay_update` | Replace `relays` with `content.relays`. |
 | `metadata_update` | For each field present in `content`, update `metadata[field]`. |
+| `chat.channel_create` | Add `content.name` to `channels`. Reject if `content.name` is already in `channels`. |
+| `chat.channel_delete` | Remove `content.name` from `channels`. Reject if `content.name` is `"general"`. |
 | (any other type) | No state effect. The event is stored but does not affect group state. |
 
 ### 8.5 Authorisation
