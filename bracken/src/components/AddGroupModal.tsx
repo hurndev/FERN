@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { DEFAULT_RELAY_HINTS } from '../fern/config'
 import styles from '../styles/components.module.css'
 
 interface Props {
@@ -41,7 +42,7 @@ export function AddGroupModal({ onJoin, onCreate, onClose }: Props) {
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [relays, setRelays] = useState('ws://localhost:8765')
+  const [relays, setRelays] = useState(DEFAULT_RELAY_HINTS.join(', '))
   const [isPublic, setIsPublic] = useState(true)
   const [createBusy, setCreateBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
@@ -200,12 +201,12 @@ export function AddGroupModal({ onJoin, onCreate, onClose }: Props) {
             </div>
 
             <div className={styles.modalField}>
-              <span className={styles.profileLabel}>Relay URLs</span>
+              <span className={styles.profileLabel}>Relay hints</span>
               <input
                 className={styles.modalInput}
                 value={relays}
                 onChange={(e) => setRelays(e.target.value)}
-                placeholder="ws://localhost:8765, wss://relay.example.com"
+                placeholder={`${DEFAULT_RELAY_HINTS[0]}, wss://relay.example.com`}
                 disabled={createBusy}
                 spellCheck={false}
               />
