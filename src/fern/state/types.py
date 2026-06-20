@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BanEntry:
+    until: int | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class GroupState:
+    members: frozenset[str]
+    joined: frozenset[str]
+    banned: Mapping[str, BanEntry]
+    mods: frozenset[str]
+    relays: tuple[str, ...]
+    metadata: Mapping[str, str]
+    public: bool
+
+    def is_banned_at(self, pubkey: str, ts: int) -> bool:
+        entry = self.banned.get(pubkey)
+        if entry is None:
+            return False
+        if entry.until is None:
+            return True
+        return entry.until > ts
+
+    def can_post(self, pubkey: str, ts: int) -> bool:
+        return pubkey in self.joined and not self.is_banned_at(pubkey, ts)
+
+    def can_moderate(self, pubkey: str) -> bool:
+        return pubkey in self.mods

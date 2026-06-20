@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from typing import Protocol
+
+from fern.events.event import Event
+from fern.completeness.receipts import Receipt
+from fern.completeness.attestations import Attestation
+from fern.completeness.fraud_proofs import FraudProof
+
+
+@dataclass(frozen=True)
+class RelayMetadata:
+    name: str = ""
+    description: str = ""
+    pubkey: str = ""
+    software: str = ""
+    version: str = ""
+    groups: tuple[str, ...] = ()
+    retention: str = "full"
+
+
+class RelayTransport(Protocol):
+    url: str
+    relay_pubkey: str
+
+    async def connect(self) -> None: ...
+    async def close(self) -> None: ...
+
+    async def fetch_metadata(self) -> RelayMetadata: ...
+    async def subscribe(self, group: str) -> None: ...
+    async def unsubscribe(self, group: str) -> None: ...
+
+    async def publish(self, event: Event) -> Receipt: ...
+    async def get(self, event_id: str) -> Event | None: ...
+    def sync(self, group: str, since_ts: int | None = None) -> AsyncIterator[Event]: ...
+    async def request_attestation(self, group: str) -> Attestation: ...
+    async def submit_fraud_proof(self, proof: FraudProof) -> str: ...
+    def query_fraud_proofs(
+        self, *, relay: str | None = None, group: str | None = None
+    ) -> AsyncIterator[FraudProof]: ...
+
+    def on_event(self, callback: Callable[[Event], Awaitable[None]]) -> None: ...
+    def on_attestation(self, callback: Callable[[Attestation], Awaitable[None]]) -> None: ...
