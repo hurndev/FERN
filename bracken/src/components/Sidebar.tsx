@@ -81,6 +81,7 @@ export function Sidebar({
                 {group.name}
               </div>
               {isExpanded &&
+                activeGroup === group.pubkey &&
                 channels.map((ch) => (
                   <div
                     key={ch.id}

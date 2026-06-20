@@ -15,6 +15,7 @@ interface Props {
   nicknames: Map<string, string>
   banned: Set<string>
   deliveries: Record<string, MessageDelivery>
+  channelNames: Map<string, string>
   viewerPubkey?: string
   selectedChannel?: string
   onAdminAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
@@ -37,7 +38,10 @@ interface MessageDelivery {
 
 const ADMIN_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'admin_add', 'admin_remove', 'join', 'leave', 'genesis', 'metadata_update', 'relay_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'])
 
-function formatAdminAction(event: FernEvent): { clickable?: boolean; pubkey?: string; text: string }[] {
+function formatAdminAction(
+  event: FernEvent,
+  channelNames: Map<string, string>,
+): { clickable?: boolean; pubkey?: string; text: string }[] {
   const a: { clickable?: boolean; pubkey?: string; text: string }[] = []
   const author = { clickable: true, pubkey: event.author, text: truncateId(event.author) }
   const t = event.type
@@ -75,11 +79,13 @@ function formatAdminAction(event: FernEvent): { clickable?: boolean; pubkey?: st
     a.push(author, { text: ` created channel #${name}` })
   }
   else if (t === 'chat.channel_delete') {
-    const name = (event.content['name'] as string) || (event.content['id'] as string) || '?'
+    const id = (event.content['id'] as string) || ''
+    const name = (event.content['name'] as string) || channelNames.get(id) || truncateId(id) || '?'
     a.push(author, { text: ` deleted channel #${name}` })
   }
   else if (t === 'chat.channel_update') {
-    const name = (event.content['name'] as string) || (event.content['id'] as string) || '?'
+    const id = (event.content['id'] as string) || ''
+    const name = (event.content['name'] as string) || channelNames.get(id) || truncateId(id) || '?'
     a.push(author, { text: ` updated channel #${name}` })
   }
   else if (t === 'chat.settings_update') {
@@ -98,6 +104,7 @@ export function MessageList({
   nicknames,
   banned,
   deliveries,
+  channelNames,
   viewerPubkey = '',
   selectedChannel = 'general',
   onAdminAction,
@@ -206,7 +213,7 @@ export function MessageList({
 
         if (row.type === 'system') {
           lastAuthor = null
-          const parts = formatAdminAction(row.event!)
+          const parts = formatAdminAction(row.event!, channelNames)
           return (
             <div key={`sys-${row.event!.id}`} className={styles.systemRow}>
               <span className={styles.systemText}>

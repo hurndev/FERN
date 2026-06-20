@@ -34,6 +34,44 @@ function computeNicknames(events: FernEvent[]): Map<string, string> {
   return nicknames
 }
 
+function computeChannelNames(events: FernEvent[]): Map<string, string> {
+  const sorted = [...events]
+    .filter((e) => e.type === 'genesis' || e.type === 'chat.channel_create' || e.type === 'chat.channel_update')
+    .sort((a, b) => {
+      if (a.type === 'genesis' && b.type !== 'genesis') return -1
+      if (a.type !== 'genesis' && b.type === 'genesis') return 1
+      if (a.ts !== b.ts) return a.ts - b.ts
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+    })
+  const names = new Map<string, string>()
+  for (const event of sorted) {
+    if (event.type === 'genesis') {
+      const raw = event.content['chat.channels']
+      if (!Array.isArray(raw)) continue
+      for (const entry of raw) {
+        if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+          const record = entry as Record<string, unknown>
+          const id = String(record['id'] ?? '').trim()
+          const name = String(record['name'] ?? id).trim()
+          if (id && name) names.set(id, name)
+        } else {
+          const name = String(entry ?? '').trim()
+          if (name) names.set(name, name)
+        }
+      }
+    } else if (event.type === 'chat.channel_create') {
+      const name = event.content['name'] as string | undefined
+      if (name) names.set(event.id, name)
+    } else if (event.type === 'chat.channel_update') {
+      const id = event.content['id'] as string | undefined
+      const name = event.content['name'] as string | undefined
+      if (id && name) names.set(id, name)
+    }
+  }
+  if (!names.has('general')) names.set('general', 'general')
+  return names
+}
+
 const USER_COMMANDS: SlashCommand[] = [
   { cmd: '/nickname', desc: 'Set your display name' },
 ]
@@ -134,12 +172,16 @@ export default function App() {
     return computeNicknames(bracken.events.filter((event) => connectedEventIds.has(event.id)))
   }, [bracken.events, connectedEventIds])
 
+  const channelNames = useMemo(() => {
+    return computeChannelNames(bracken.events.filter((event) => connectedEventIds.has(event.id)))
+  }, [bracken.events, connectedEventIds])
+
   const admins = useMemo(() => {
     return bracken.state?.admins ?? new Set<string>()
   }, [bracken.state])
 
   const [selectedChannels, setSelectedChannels] = useState<Record<string, string>>({})
-  const selectedChannel = bracken.activeGroup
+  const storedSelectedChannel = bracken.activeGroup
     ? selectedChannels[bracken.activeGroup] ?? 'general'
     : 'general'
 
@@ -147,6 +189,11 @@ export default function App() {
     if (!bracken.state) return [{ id: 'general', name: 'general', description: '', position: 0 }]
     return [...bracken.state.channels.values()].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
   }, [bracken.state])
+  const selectedChannel = bracken.state?.channels.has(storedSelectedChannel)
+    ? storedSelectedChannel
+    : bracken.state?.channels.has(bracken.state.chatSettings.default_channel)
+      ? bracken.state.chatSettings.default_channel
+      : 'general'
 
   const isViewerAdmin = bracken.identity ? admins.has(bracken.identity.publicKey) : false
   const slashCommands = useMemo(() => {
@@ -284,6 +331,7 @@ export default function App() {
               nicknames={nicknames}
               banned={bannedSet}
               deliveries={bracken.messageDeliveries}
+              channelNames={channelNames}
               viewerPubkey={userPubkey}
               selectedChannel={selectedChannel}
               onAdminAction={bracken.adminAction}
@@ -344,7 +392,7 @@ export default function App() {
                   await bracken.adminAction('chat.channel_create', '', { name: args.trim() })
                 } else if (isViewerAdmin && cmd === '/channel-delete' && args.trim()) {
                   const channel = [...(bracken.state?.channels.values() ?? [])].find((ch) => ch.name === args.trim() || ch.id === args.trim())
-                  if (channel) await bracken.adminAction('chat.channel_delete', '', { id: channel.id })
+                  if (channel) await bracken.adminAction('chat.channel_delete', '', { id: channel.id, name: channel.name })
                 }
               }}
               commands={slashCommands}
