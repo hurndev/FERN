@@ -13,10 +13,11 @@ _GENERAL = "general"
 def _initialise_from_genesis(genesis: Event) -> GroupState:
     c = genesis.content
     founder = c["founder"]
-    app = c.get("app", "chat")
+    app = c["app"]
     channels: frozenset[str] = frozenset()
     if app == "chat":
-        channels = frozenset(c.get("chat.channels", [_GENERAL]))
+        raw = c["chat.channels"]
+        channels = frozenset(raw)
         if _GENERAL not in channels:
             channels = frozenset({_GENERAL, *channels})
     return GroupState(

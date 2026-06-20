@@ -52,6 +52,8 @@ async def test_publish_event_to_fake_relay(
             "founder": founder_identity.pubkey,
             "mods": [founder_identity.pubkey],
             "relays": [relay.url],
+            "app": "chat",
+            "chat.channels": ["general"],
         },
         group_keypair=group_keypair.keypair,
     )
@@ -86,6 +88,8 @@ async def test_fake_relay_attestation(
             "founder": founder_identity.pubkey,
             "mods": [founder_identity.pubkey],
             "relays": [relay.url],
+            "app": "chat",
+            "chat.channels": ["general"],
         },
         group_keypair=group_keypair.keypair,
     )

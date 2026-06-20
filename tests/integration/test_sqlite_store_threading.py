@@ -32,6 +32,8 @@ async def test_sqlite_store_allows_concurrent_to_thread_calls(tmp_path) -> None:
                 "founder": founder.pubkey,
                 "mods": [founder.pubkey],
                 "relays": ["ws://localhost:8765"],
+                "app": "chat",
+                "chat.channels": ["general"],
             },
             group_keypair=group_keypair.keypair,
             ts=1,

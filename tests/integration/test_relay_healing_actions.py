@@ -38,6 +38,8 @@ async def test_relay_healing_actions(tmp_path, monkeypatch: pytest.MonkeyPatch) 
                 "founder": founder.pubkey,
                 "mods": [founder.pubkey],
                 "relays": ["ws://localhost:8765"],
+                "app": "chat",
+                "chat.channels": ["general"],
             },
             group_keypair=group_keypair.keypair,
             ts=1,

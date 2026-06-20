@@ -235,7 +235,7 @@ Content schema:
 | `mods` | array of strings | Initial mod pubkeys. MUST include the founder. Initial list MUST be non-empty. |
 | `relays` | array of strings | Initial canonical relay URLs (e.g., `wss://...`). MUST be non-empty. |
 | `app` | string | The primary app namespace this group uses. All app-level event types MUST be prefixed with `app`. For example `"app": "chat"` means all app event types use the `chat.` prefix (e.g., `chat.message`). A client that does not understand `app` SHOULD NOT engage with the group. MUST be a non-empty string containing at least one `.` or recognised bare name (e.g., `"chat"`). |
-| `chat.channels` | array of strings | Required when `app` is `"chat"`. Initial channel list. MUST contain at least one channel. The `"general"` channel is always present and cannot be deleted later. Default: `["general"]`. |
+| `chat.channels` | array of strings | Required when `app` is `"chat"`. Initial channel list. MUST contain at least one channel. MUST contain `"general"`. |
 
 Verification: `sig` MUST verify against the `group` field as the public key. The `founder` field MUST equal the `author` field. The `mods` array MUST contain the `founder` pubkey. If `app == "chat"`, `chat.channels` MUST be present and non-empty. `chat.channels` MUST contain `"general"`.
 

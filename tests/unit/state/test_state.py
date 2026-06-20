@@ -28,6 +28,8 @@ def make_genesis(
             "founder": founder,
             "mods": mods,
             "relays": relays,
+            "app": "chat",
+            "chat.channels": ["general"],
         },
         ts=1,
         tags=(),

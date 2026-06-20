@@ -32,6 +32,8 @@ async def test_censorship_detection_via_attestation_divergence() -> None:
             "founder": founder.pubkey,
             "mods": [founder.pubkey],
             "relays": [relay_a.url, relay_b.url, relay_c.url],
+        "app": "chat",
+        "chat.channels": ["general"],
         },
         group_keypair=group_kp,
     )
@@ -81,6 +83,8 @@ async def test_monitor_pass_detects_missing_event_with_receipt() -> None:
             "founder": founder.pubkey,
             "mods": [founder.pubkey],
             "relays": [relay_a.url, relay_b.url, relay_c.url],
+        "app": "chat",
+        "chat.channels": ["general"],
         },
         group_keypair=group_kp,
     )

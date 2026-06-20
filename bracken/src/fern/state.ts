@@ -26,14 +26,13 @@ const PROTOCOL_TYPES = new Set([
 function initialiseFromGenesis(genesis: FernEvent): GroupState {
   const c = genesis.content
   const founder = c['founder'] as string
-  const app = (c['app'] as string) || 'chat'
-  let channels = new Set<string>(['general'])
+  const app = c['app'] as string
+  const channels = new Set<string>(['general'])
   if (app === 'chat') {
-    const raw = (c['chat.channels'] as unknown[]) || ['general']
+    const raw = c['chat.channels'] as string[]
     for (const ch of raw) {
-      if (typeof ch === 'string' && ch.trim()) channels.add(ch.trim())
+      if (ch && ch.trim()) channels.add(ch.trim())
     }
-    channels.add('general')
   }
   return {
     members: new Set([founder]),

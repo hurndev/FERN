@@ -59,6 +59,8 @@ def sample_genesis(founder_identity: UserIdentity, group_keypair: GroupKeypair) 
             "founder": founder_identity.pubkey,
             "mods": [founder_identity.pubkey],
             "relays": ["wss://relay1.test", "wss://relay2.test"],
+            "app": "chat",
+            "chat.channels": ["general"],
         },
         group_keypair=group_keypair.keypair,
     )

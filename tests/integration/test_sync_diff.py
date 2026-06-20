@@ -43,6 +43,8 @@ def make_genesis(founder: UserIdentity, group_keypair: GroupKeypair, relay: Fake
             "founder": founder.pubkey,
             "mods": [founder.pubkey],
             "relays": [relay.url],
+            "app": "chat",
+            "chat.channels": ["general"],
         },
         group_keypair=group_keypair.keypair,
         ts=1,
