@@ -34,7 +34,7 @@ interface MessageDelivery {
   error?: string
 }
 
-const MOD_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'mod_add', 'mod_remove', 'join', 'leave'])
+const MOD_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'mod_add', 'mod_remove', 'join', 'leave', 'genesis', 'metadata_update', 'relay_update'])
 
 function formatModAction(event: FernEvent): { clickable?: boolean; pubkey?: string; text: string }[] {
   const a: { clickable?: boolean; pubkey?: string; text: string }[] = []
@@ -54,6 +54,21 @@ function formatModAction(event: FernEvent): { clickable?: boolean; pubkey?: stri
   else if (t === 'mod_remove') { a.push(author, { text: ' demoted ' }, target) }
   else if (t === 'join') { a.push(author, { text: ' joined the group' }) }
   else if (t === 'leave') { a.push(author, { text: ' left the group' }) }
+  else if (t === 'genesis') { a.push(author, { text: ' created the group' }) }
+  else if (t === 'metadata_update') {
+    a.push(author, { text: ' updated ' })
+    const name = event.content['name'] as string | undefined
+    const desc = event.content['description'] as string | undefined
+    if (name !== undefined && desc !== undefined) a.push({ text: 'group name and description' })
+    else if (name !== undefined) a.push({ text: `group name to '${name}'` })
+    else if (desc !== undefined) a.push({ text: 'group description' })
+    else a.push({ text: 'group info' })
+  }
+  else if (t === 'relay_update') {
+    const relays = (event.content['relays'] as unknown[]) || []
+    const count = relays.filter((r): r is string => typeof r === 'string').length
+    a.push(author, { text: ` updated relays (${count} relay${count !== 1 ? 's' : ''})` })
+  }
   return a
 }
 
