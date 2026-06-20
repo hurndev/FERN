@@ -10,6 +10,8 @@ interface Props {
     options?: { description?: string; public?: boolean },
   ) => Promise<{ ok: number; total: number; error?: string }>
   onClose: () => void
+  initialAddress?: string
+  initialError?: string | null
 }
 
 function normalizeRelay(url: string): string {
@@ -32,12 +34,12 @@ function parseRelays(input: string): string[] {
   ]
 }
 
-export function AddGroupModal({ onJoin, onCreate, onClose }: Props) {
+export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initialError }: Props) {
   const [mode, setMode] = useState<'join' | 'create'>('join')
 
-  const [address, setAddress] = useState('')
+  const [address, setAddress] = useState(initialAddress ?? '')
   const [joinBusy, setJoinBusy] = useState(false)
-  const [joinError, setJoinError] = useState<string | null>(null)
+  const [joinError, setJoinError] = useState<string | null>(initialError ?? null)
   const [joinProgress, setJoinProgress] = useState<string[]>([])
 
   const [name, setName] = useState('')

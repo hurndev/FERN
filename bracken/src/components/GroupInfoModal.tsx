@@ -13,8 +13,8 @@ export function GroupInfoModal({ name, pubkey, description, relays, onClose }: P
   const [copied, setCopied] = useState<string | null>(null)
 
   const inviteLink = useMemo(() => {
-    if (relays.length === 0) return `fern:${pubkey}`
-    return `fern:${pubkey}@${relays.join(',')}`
+    const relayQuery = relays.length > 0 ? `&relays=${relays.join(',')}` : ''
+    return `${window.location.origin}/?group=${pubkey}${relayQuery}`
   }, [pubkey, relays])
 
   const copy = (label: string, value: string) => {

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useBracken } from './hooks/useBracken'
 import { IdentitySetup } from './components/IdentitySetup'
 import { Sidebar } from './components/Sidebar'
@@ -14,6 +14,7 @@ import { getEventIds } from './fern/db'
 import { deriveGroupState } from './fern/state'
 import { computeConnectedEventIds } from './fern/dag'
 import type { FernEvent } from './fern/events'
+import { isValidPubkey } from './fern/utils'
 import styles from './styles/components.module.css'
 
 function computeNicknames(events: FernEvent[]): Map<string, string> {
@@ -73,10 +74,66 @@ export default function App() {
   const [showGroupInfo, setShowGroupInfo] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [localEventIds, setLocalEventIds] = useState<Set<string>>(new Set())
+  const [pendingJoin, setPendingJoin] = useState<{ pubkey: string; relays: string[] } | null>(null)
+  const [modalInitial, setModalInitial] = useState<{ address?: string; error?: string | null } | null>(null)
+
+  const openAddGroup = useCallback((initial?: { address?: string; error?: string | null }) => {
+    setModalInitial(initial ?? null)
+    setShowAddGroup(true)
+  }, [])
+
+  const closeAddGroup = useCallback(() => {
+    setShowAddGroup(false)
+    setModalInitial(null)
+  }, [])
 
   useEffect(() => {
     getEventIds().then(setLocalEventIds)
   }, [bracken.events])
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const group = params.get('group')?.trim()
+    if (!group || !isValidPubkey(group)) return
+    const relaysParam = params.get('relays') ?? ''
+    const relays = relaysParam
+      .split(/[\s,]+/)
+      .map((r) => r.trim())
+      .filter(Boolean)
+    setPendingJoin({ pubkey: group, relays })
+    window.history.replaceState(null, '', window.location.pathname)
+  }, [])
+
+  useEffect(() => {
+    if (!bracken.identity || !pendingJoin) return
+    const { pubkey, relays } = pendingJoin
+    setPendingJoin(null)
+
+    if (bracken.groups.some((g) => g.pubkey === pubkey)) {
+      bracken.setActiveGroup(pubkey)
+      return
+    }
+
+    if (relays.length === 0) {
+      openAddGroup({
+        address: `fern:${pubkey}`,
+        error: 'This invite link has no relay hints. Add at least one relay URL to join.',
+      })
+      return
+    }
+
+    const address = `fern:${pubkey}@${relays.join(',')}`
+    bracken.joinGroup(address).catch((err) => {
+      openAddGroup({ address, error: String(err) })
+    })
+  }, [
+    bracken.identity,
+    pendingJoin,
+    bracken.groups,
+    bracken.joinGroup,
+    bracken.setActiveGroup,
+    openAddGroup,
+  ])
 
   const rejectedIds = useMemo(() => {
     if (!bracken.events || bracken.events.length === 0) return new Set<string>()
@@ -156,7 +213,7 @@ export default function App() {
             setSidebarOpen(false)
           }}
           onAddGroupClick={() => {
-            setShowAddGroup(true)
+            openAddGroup()
             setSidebarOpen(false)
           }}
           onIdentityClick={() => {
@@ -276,7 +333,7 @@ export default function App() {
             <p className={styles.emptyStateTitle}>No groups yet</p>
             <button
               className={styles.primaryBtn}
-              onClick={() => setShowAddGroup(true)}
+              onClick={() => openAddGroup()}
             >
               Add a group
             </button>
@@ -288,7 +345,9 @@ export default function App() {
         <AddGroupModal
           onJoin={bracken.joinGroup}
           onCreate={bracken.createGroup}
-          onClose={() => setShowAddGroup(false)}
+          onClose={closeAddGroup}
+          initialAddress={modalInitial?.address}
+          initialError={modalInitial?.error ?? null}
         />
       )}
       {showMembers && bracken.state && (
