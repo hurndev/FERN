@@ -14,7 +14,7 @@ from fern.events.event import Event
 from fern.completeness.receipts import Receipt
 from fern.completeness.attestations import Attestation
 from fern.completeness.fraud_proofs import FraudProof
-from fern.transport.interfaces import RelayMetadata
+from fern.transport.interfaces import RelayMetadata, SyncLockResult
 
 
 _PUSH_TYPES = frozenset({"event", "attestation"})
@@ -27,6 +27,9 @@ _RESPONSE_TYPES = frozenset(
         "error",
         "query_complete",
         "fraud_proof",
+        "ids",
+        "sync_lock_granted",
+        "sync_lock_denied",
     }
 )
 
@@ -162,6 +165,21 @@ class WebSocketRelayClient:
             )
         raise ValueError(f"publish failed: {response.get('message', 'unknown error')}")
 
+    async def backfill(self, event: Event) -> Receipt:
+        msg = {"action": "backfill", "event": _event_to_json(event)}
+        await self._send(msg)
+        response = await self._recv_response()
+        if response.get("type") == "receipt":
+            r = response["receipt"]
+            return Receipt(
+                event_id=r["event_id"],
+                group=r["group"],
+                relay=r["relay"],
+                ts=r["ts"],
+                sig=r["sig"],
+            )
+        raise ValueError(f"backfill failed: {response.get('message', 'unknown error')}")
+
     async def get(self, event_id: str) -> Event | None:
         msg = {"action": "get", "id": event_id}
         self._awaiting_response = True
@@ -199,6 +217,75 @@ class WebSocketRelayClient:
                     yield _json_to_event(response["event"])
                 elif r_type in ("attestation",):
                     self._route_push(response)
+        finally:
+            self._awaiting_response = False
+
+    async def sync_ids(self, group: str) -> list[str]:
+        msg = {"action": "sync_ids", "group": group}
+        self._awaiting_response = True
+        try:
+            await self._send(msg)
+            while True:
+                response = await self._recv_response()
+                r_type = response.get("type")
+                if r_type == "ids":
+                    return list(response.get("ids", []))
+                if r_type == "error":
+                    raise ValueError(f"sync_ids failed: {response.get('message')}")
+                if r_type in _PUSH_TYPES:
+                    self._route_push(response)
+                    continue
+                raise ValueError(f"unexpected response: {r_type}")
+        finally:
+            self._awaiting_response = False
+
+    async def sync_lock(self, group: str, client_id: str) -> SyncLockResult:
+        msg = {"action": "sync_lock", "group": group, "client_id": client_id}
+        self._awaiting_response = True
+        try:
+            await self._send(msg)
+            while True:
+                response = await self._recv_response()
+                r_type = response.get("type")
+                if r_type == "sync_lock_granted":
+                    return SyncLockResult(
+                        granted=True,
+                        ttl=int(response["ttl"]) if response.get("ttl") is not None else None,
+                    )
+                if r_type == "sync_lock_denied":
+                    return SyncLockResult(
+                        granted=False,
+                        expires_in=(
+                            int(response["expires_in"])
+                            if response.get("expires_in") is not None
+                            else None
+                        ),
+                    )
+                if r_type == "error":
+                    raise ValueError(f"sync_lock failed: {response.get('message')}")
+                if r_type in _PUSH_TYPES:
+                    self._route_push(response)
+                    continue
+                raise ValueError(f"unexpected response: {r_type}")
+        finally:
+            self._awaiting_response = False
+
+    async def sync_unlock(self, group: str, client_id: str) -> None:
+        msg = {"action": "sync_unlock", "group": group, "client_id": client_id}
+        self._awaiting_response = True
+        try:
+            await self._send(msg)
+            while True:
+                response = await self._recv_response()
+                r_type = response.get("type")
+                if r_type == "ok":
+                    return
+                if r_type == "error":
+                    raise ValueError(f"sync_unlock failed: {response.get('message')}")
+                if r_type in _PUSH_TYPES:
+                    self._route_push(response)
+                    continue
+                raise ValueError(f"unexpected response: {r_type}")
         finally:
             self._awaiting_response = False
 

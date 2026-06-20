@@ -97,6 +97,12 @@ export async function getEventIds(): Promise<Set<string>> {
   return new Set(all as string[])
 }
 
+export async function getGroupEventIds(group: string): Promise<Set<string>> {
+  const d = await getDB()
+  const keys = await d.getAllKeysFromIndex('events', 'by-group', group)
+  return new Set(keys as string[])
+}
+
 export async function getTips(group: string, excludedIds: Set<string> = new Set()): Promise<string[]> {
   const events = await getGroupEvents(group)
   return computeConnectedTips(events, excludedIds)

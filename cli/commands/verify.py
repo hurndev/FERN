@@ -13,8 +13,10 @@ from cli.config import (
     get_cache_path,
     resolve_group,
     connect_transports,
+    get_client_id,
 )
 from cli.output import print_success, print_error
+from cli.sync import sync_group_from_transports
 
 
 @click.command()
@@ -40,7 +42,14 @@ async def _verify(group_id: str) -> None:
     store = SqliteStore(cache_path)
     await store.open()
     known_set: frozenset[str] = frozenset()
+    sync_results = []
     try:
+        sync_results = await sync_group_from_transports(
+            group_pubkey=group_pubkey,
+            transports=transports,
+            store=store,
+            client_id=get_client_id(config),
+        )
         known_set = await store.get_known_set(group_pubkey)
     finally:
         pass
@@ -82,6 +91,15 @@ async def _verify(group_id: str) -> None:
 
     click.echo(f"Verification for group {group_id}:")
     click.echo()
+
+    if sync_results:
+        fetched = sum(r.fetched for r in sync_results)
+        backfilled = sum(r.backfilled for r in sync_results)
+        skipped = sum(1 for r in sync_results if r.skipped_locked)
+        click.echo(
+            f"  Sync pass: fetched {fetched}, backfilled {backfilled}, skipped locked {skipped}"
+        )
+        click.echo()
 
     if not trust_ledger.entries:
         click.echo("  No relay attestations received.")

@@ -4,6 +4,7 @@ from __future__ import annotations
 # This module handles JSON WebSocket messages with untyped dicts.
 
 import asyncio
+from dataclasses import dataclass
 import json
 import logging
 import time
@@ -31,6 +32,13 @@ from fern.storage.sqlite_store import SqliteStore
 
 
 logger = logging.getLogger("fern.relay")
+
+
+@dataclass
+class SyncLockLease:
+    holder: str
+    expires_at: float
+    connection_id: int | None = None
 
 
 def _event_to_json_dict(event: Event) -> dict:
@@ -114,6 +122,7 @@ class RelayServer:
         self._attestation_intervals: dict[str, float] = {}
         self._attestation_tasks: dict[str, asyncio.Task] = {}
         self._hosted_groups: set[str] = set()
+        self._sync_locks: dict[str, SyncLockLease] = {}
         self._started = False
 
     @property
@@ -204,6 +213,15 @@ class RelayServer:
         except Exception as e:
             logger.warning("connection error from %s: %s", peer, e)
         finally:
+            connection_id = id(ws)
+            for group, lease in list(self._sync_locks.items()):
+                if lease.connection_id == connection_id:
+                    del self._sync_locks[group]
+                    logger.info(
+                        "sync_lock group=%s... released after disconnect of %s...",
+                        group[:16],
+                        lease.holder[:16],
+                    )
             for group, subs in list(self._subscribers.items()):
                 if ws in subs:
                     subs.discard(ws)
@@ -221,10 +239,18 @@ class RelayServer:
             return await self._handle_unsubscribe(msg, ws)
         elif action == "publish":
             return await self._handle_publish(msg, ws)
+        elif action == "backfill":
+            return await self._handle_backfill(msg, ws)
         elif action == "get":
             return await self._handle_get(msg)
         elif action == "sync":
             return await self._handle_sync(msg, ws)
+        elif action == "sync_ids":
+            return await self._handle_sync_ids(msg)
+        elif action == "sync_lock":
+            return await self._handle_sync_lock(msg, ws)
+        elif action == "sync_unlock":
+            return await self._handle_sync_unlock(msg)
         elif action == "attestation":
             return await self._handle_attestation_request(msg)
         elif action == "submit_fraud_proof":
@@ -264,28 +290,76 @@ class RelayServer:
         return [{"type": "ok", "message": "unsubscribed"}]
 
     async def _handle_publish(self, msg: dict, ws: ws_server.ServerConnection) -> list[dict] | None:
+        return await self._store_event_message(msg, action="publish", broadcast=True)
+
+    async def _handle_backfill(
+        self, msg: dict, ws: ws_server.ServerConnection
+    ) -> list[dict] | None:
+        return await self._store_event_message(msg, action="backfill", broadcast=False)
+
+    def _receipt_response(self, receipt: Receipt) -> list[dict]:
+        return [
+            {
+                "type": "receipt",
+                "receipt": {
+                    "event_id": receipt.event_id,
+                    "group": receipt.group,
+                    "relay": receipt.relay,
+                    "ts": receipt.ts,
+                    "sig": receipt.sig,
+                },
+            }
+        ]
+
+    async def _store_event_message(
+        self, msg: dict, *, action: str, broadcast: bool
+    ) -> list[dict] | None:
         try:
             event_dict = msg.get("event", {})
             event = _json_to_event_dict(event_dict)
+
+            if event.id and await self._store.has_event(event.id):
+                stored = await self._store.get_event(event.id)
+                if stored is not None:
+                    receipt = build_receipt(
+                        event=stored,
+                        relay_keypair=self._keypair,
+                        ts=int(time.time()),
+                    )
+                    logger.info(
+                        "%s duplicate id=%s... -> receipt (skipped verify/store/broadcast)",
+                        action,
+                        event.id[:16],
+                    )
+                    return self._receipt_response(receipt)
+
             verify_event(event)
 
             is_new_group = event.type == "genesis" and event.group not in self._hosted_groups
             if is_new_group:
                 self._hosted_groups.add(event.group)
-                logger.info("auto-hosting new group %s (genesis by %s)", event.group[:16] + "...", event.author[:16] + "...")
+                logger.info(
+                    "auto-hosting new group %s (genesis by %s)",
+                    event.group[:16] + "...",
+                    event.author[:16] + "...",
+                )
 
             if event.group not in self._hosted_groups:
-                logger.warning("rejecting publish: group %s not hosted", event.group[:16] + "...")
+                logger.warning(
+                    "rejecting %s: group %s not hosted", action, event.group[:16] + "..."
+                )
                 return [{"type": "error", "message": "group not hosted"}]
 
             await self._relay_store.ingest(event)
             eid = event.id[:16] + "..." if event.id else "?"
             logger.info(
-                "publish event type=%s group=%s author=%s id=%s",
+                "%s event type=%s group=%s author=%s id=%s broadcast=%s",
+                action,
                 event.type,
                 event.group[:16] + "...",
                 event.author[:16] + "...",
                 eid,
+                broadcast,
             )
 
             receipt = build_receipt(
@@ -293,24 +367,14 @@ class RelayServer:
                 relay_keypair=self._keypair,
                 ts=int(time.time()),
             )
-            response = [
-                {
-                    "type": "receipt",
-                    "receipt": {
-                        "event_id": receipt.event_id,
-                        "group": receipt.group,
-                        "relay": receipt.relay,
-                        "ts": receipt.ts,
-                        "sig": receipt.sig,
-                    },
-                }
-            ]
+            response = self._receipt_response(receipt)
 
-            await self._broadcast_event(event)
+            if broadcast:
+                await self._broadcast_event(event)
 
             return response
         except Exception as e:
-            logger.warning("publish failed: %s", e)
+            logger.warning("%s failed: %s", action, e)
             return [{"type": "error", "message": str(e)}]
 
     async def _handle_get(self, msg: dict) -> list[dict] | None:
@@ -341,9 +405,66 @@ class RelayServer:
         responses.append({"type": "sync_complete", "group": group, "count": count})
         return responses
 
+    async def _handle_sync_ids(self, msg: dict) -> list[dict] | None:
+        group = msg.get("group", "")
+        if not group:
+            return [{"type": "error", "message": "group required"}]
+        if group not in self._hosted_groups:
+            return [{"type": "error", "message": "group not hosted"}]
+
+        known_set = await self._store.get_known_set(group)
+        ids = sorted(known_set)
+        logger.info("sync_ids group=%s... -> %d ids", group[:16], len(ids))
+        return [{"type": "ids", "group": group, "ids": ids}]
+
+    async def _handle_sync_lock(
+        self, msg: dict, ws: ws_server.ServerConnection | None = None
+    ) -> list[dict]:
+        group = msg.get("group", "")
+        client_id = msg.get("client_id", "")
+        if not group or not client_id:
+            return [{"type": "error", "message": "group and client_id required"}]
+        if group not in self._hosted_groups:
+            return [{"type": "error", "message": "group not hosted"}]
+
+        now = time.time()
+        ttl = 30
+        existing = self._sync_locks.get(group)
+        if existing is not None:
+            if existing.expires_at > now and existing.holder != client_id:
+                return [
+                    {
+                        "type": "sync_lock_denied",
+                        "group": group,
+                        "expires_in": max(1, int(existing.expires_at - now)),
+                    }
+                ]
+            if existing.expires_at > now:
+                remaining = max(1, int(existing.expires_at - now))
+                return [{"type": "sync_lock_granted", "group": group, "ttl": remaining}]
+
+        self._sync_locks[group] = SyncLockLease(
+            holder=client_id,
+            expires_at=now + ttl,
+            connection_id=id(ws) if ws is not None else None,
+        )
+        logger.info("sync_lock group=%s... granted to %s...", group[:16], client_id[:16])
+        return [{"type": "sync_lock_granted", "group": group, "ttl": ttl}]
+
+    async def _handle_sync_unlock(self, msg: dict) -> list[dict]:
+        group = msg.get("group", "")
+        client_id = msg.get("client_id", "")
+        existing = self._sync_locks.get(group)
+        if existing and existing.holder == client_id:
+            del self._sync_locks[group]
+            logger.info("sync_unlock group=%s... released by %s...", group[:16], client_id[:16])
+        return [{"type": "ok", "message": "unlocked"}]
+
     async def _handle_attestation_request(self, msg: dict) -> list[dict] | None:
         group = msg.get("group", "")
         logger.info("attestation request group=%s...", group[:16])
+        if group not in self._hosted_groups:
+            return [{"type": "error", "message": "group not hosted"}]
         att = await self._build_and_store_attestation(group)
         return [{"type": "attestation", "attestation": _attestation_to_json(att)}]
 

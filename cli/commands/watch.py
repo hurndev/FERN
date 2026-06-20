@@ -7,13 +7,16 @@ import click
 from fern.storage.sqlite_store import SqliteStore
 from fern.state.machine import derive_group_state
 from fern.events.event import Event
+from fern.events.validation import verify_event
 from cli.config import (
     load_config,
     get_cache_path,
     resolve_group,
     connect_transports,
+    get_client_id,
 )
 from cli.commands.read import MOD_TYPES, _compute_nicknames, _display_name, _format_mod_action
+from cli.sync import sync_group_from_transports
 
 
 @click.command()
@@ -34,6 +37,19 @@ async def _watch(channel: str | None, show_rejected: bool, group_id: str) -> Non
 
     cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
 
+    transports = await connect_transports(relay_urls)
+    store = SqliteStore(cache_path)
+    await store.open()
+    try:
+        await sync_group_from_transports(
+            group_pubkey=group_pubkey,
+            transports=transports,
+            store=store,
+            client_id=get_client_id(config),
+        )
+    finally:
+        await store.close()
+
     store = SqliteStore(cache_path)
     await store.open()
     events = []
@@ -49,6 +65,17 @@ async def _watch(channel: str | None, show_rejected: bool, group_id: str) -> Non
     nicknames = _compute_nicknames(events)
 
     async def handle_event(event: Event) -> None:
+        try:
+            verify_event(event)
+            live_store = SqliteStore(cache_path)
+            await live_store.open()
+            try:
+                await live_store.put_event(event)
+            finally:
+                await live_store.close()
+        except Exception:
+            return
+
         if event.type in MOD_TYPES:
             formatted = _format_mod_action(event, nicknames)
             if formatted:
@@ -92,7 +119,6 @@ async def _watch(channel: str | None, show_rejected: bool, group_id: str) -> Non
         channel_tag = f"#{msg_channel}" if msg_channel else ""
         click.echo(f"[{channel_tag}] <{author}> {text}{tag}")
 
-    transports = await connect_transports(relay_urls)
     for t in transports:
         t.on_event(handle_event)
         await t.subscribe(group_pubkey)

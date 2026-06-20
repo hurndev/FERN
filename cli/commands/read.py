@@ -5,8 +5,10 @@ import asyncio
 import click
 
 from fern.storage.sqlite_store import SqliteStore
+from fern.identity.user import UserIdentity
+from fern.events.event import Event
 from fern.state.machine import derive_group_state
-from fern.client.bootstrap import initial_sync
+from cli.sync import sync_group_from_transports
 from cli.config import (
     load_config,
     get_cache_path,
@@ -19,7 +21,7 @@ from cli.output import print_error
 MOD_TYPES = {"kick", "ban", "unban", "invite", "mod_add", "mod_remove", "join", "leave"}
 
 
-def _compute_nicknames(events: list) -> dict[str, str]:
+def _compute_nicknames(events: list[Event]) -> dict[str, str]:
     nicknames: dict[str, str] = {}
     claimed_by: dict[str, str] = {}
     for e in sorted(
@@ -44,7 +46,7 @@ def _display_name(pubkey: str, nicknames: dict[str, str]) -> str:
     return nicknames.get(pubkey) or f"{pubkey[:12]}..."
 
 
-def _format_mod_action(event, nicknames: dict[str, str]) -> str | None:
+def _format_mod_action(event: Event, nicknames: dict[str, str]) -> str | None:
     t = event.type
     target = event.content.get("target", "")
     target_name = _display_name(target, nicknames) if target else ""
@@ -90,6 +92,7 @@ async def _read(channel: str | None, count: int, show_rejected: bool, group_id: 
     if not privkey:
         print_error("No identity found. Run `fern init` first.")
         return
+    user = UserIdentity.from_privkey_hex(privkey)
 
     group_pubkey, group_info = resolve_group(group_id, config)
     cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
@@ -101,7 +104,12 @@ async def _read(channel: str | None, count: int, show_rejected: bool, group_id: 
         store = SqliteStore(cache_path)
         await store.open()
         try:
-            await initial_sync(group_pubkey, transports, store)
+            await sync_group_from_transports(
+                group_pubkey=group_pubkey,
+                transports=transports,
+                store=store,
+                client_id=user.pubkey,
+            )
         finally:
             await store.close()
 

@@ -10,7 +10,7 @@ interface Props {
   identityPubkey: string
   relayConns: RelayConnection[]
   onSelectGroup: (pubkey: string) => void
-  onJoinClick: () => void
+  onAddGroupClick: () => void
   onIdentityClick: () => void
 }
 
@@ -20,7 +20,7 @@ export function Sidebar({
   identityPubkey,
   relayConns,
   onSelectGroup,
-  onJoinClick,
+  onAddGroupClick,
   onIdentityClick,
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(
@@ -87,8 +87,8 @@ export function Sidebar({
             </div>
           )
         })}
-        <button className={styles.joinBtn} onClick={onJoinClick}>
-          + Join group
+        <button className={styles.joinBtn} onClick={onAddGroupClick}>
+          + Add group
         </button>
       </div>
 

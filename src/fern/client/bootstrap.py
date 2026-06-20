@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 from fern.events.event import Event
 from fern.events.validation import verify_event
+from fern.client.sync import sync_diff
 from fern.storage.interfaces import EventStore
 from fern.transport.interfaces import RelayTransport
 
@@ -43,16 +44,36 @@ async def initial_sync(
     group_pubkey: str,
     transports: Sequence[RelayTransport],
     store: EventStore,
+    *,
+    client_id: str | None = None,
+    wait_on_lock: bool = False,
 ) -> list[Event]:
-    all_events: dict[str, Event] = {}
-    for transport in transports:
-        try:
-            async for event in transport.sync(group_pubkey):
-                eid = event.id
-                if eid is not None and eid not in all_events:
+    if client_id is not None:
+        for transport in transports:
+            try:
+                await sync_diff(
+                    transport=transport,
+                    group=group_pubkey,
+                    store=store,
+                    client_id=client_id,
+                    wait_on_lock=wait_on_lock,
+                )
+            except Exception:
+                continue
+    else:
+        for transport in transports:
+            try:
+                async for event in transport.sync(group_pubkey):
+                    eid = event.id
+                    if eid is None:
+                        continue
                     verify_event(event)
-                    all_events[eid] = event
                     await store.put_event(event)
-        except Exception:
-            continue
+            except Exception:
+                continue
+
+    all_events: dict[str, Event] = {}
+    async for event in store.iter_group_events(group_pubkey):
+        if event.id is not None:
+            all_events[event.id] = event
     return list(all_events.values())

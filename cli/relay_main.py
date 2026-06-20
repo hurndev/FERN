@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import ClassVar
 
 import click
 
@@ -15,7 +16,7 @@ def _display_relay_url(host: str, port: int) -> str:
 
 
 class _ColorFormatter(logging.Formatter):
-    COLORS = {
+    COLORS: ClassVar[dict[str, str]] = {
         "DEBUG": "\033[36m",
         "INFO": "\033[32m",
         "WARNING": "\033[33m",
@@ -32,7 +33,7 @@ class _ColorFormatter(logging.Formatter):
     BLUE = "\033[34m"
     RED = "\033[31m"
 
-    EVENT_TYPE_COLORS = {
+    EVENT_TYPE_COLORS: ClassVar[dict[str, str]] = {
         "genesis": MAGENTA,
         "join": GREEN,
         "leave": DIM,
@@ -46,7 +47,7 @@ class _ColorFormatter(logging.Formatter):
         "metadata_update": CYAN,
     }
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         color = self.COLORS.get(record.levelname, "")
         time_str = self.formatTime(record, "%H:%M:%S")
         level = f"{color}{record.levelname:<7}{self.RESET}"
@@ -54,7 +55,7 @@ class _ColorFormatter(logging.Formatter):
         msg = self._colorize(record.getMessage())
         return f"{self.DIM}{time_str}{self.RESET} {level} {name}: {msg}"
 
-    def _colorize(self, msg):
+    def _colorize(self, msg: str) -> str:
         msg = msg.replace("type=", f"{self.DIM}type={self.RESET}")
         for etype, color in self.EVENT_TYPE_COLORS.items():
             msg = msg.replace(f"type={etype}", f"type={color}{etype}{self.RESET}")

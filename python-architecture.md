@@ -11,8 +11,8 @@ See `spec.md` for the wire-level protocol details and `architecture.md` for the 
 ### 1.1 Pure / Impure Boundary
 
 - **Pure**: crypto, hashing, canonical serialization, signature verification, event construction, DAG operations, state machine fold, attestation/receipt/fraud-proof building and verification. All synchronous. Trivially testable (input → expected output).
-- **Impure-async**: WebSocket relay client/server, SQLite storage (wrapped in `asyncio.to_thread`), client orchestration (`GroupSession`, publishing, subscribing, monitor runner).
-- **Impure-sync**: the `sqlite3` module itself — wrapped via `asyncio.to_thread` in `SqliteStore`.
+- **Impure-async**: WebSocket relay client/server, SQLite storage behind async store interfaces, client orchestration (`GroupSession`, publishing, subscribing, monitor runner).
+- **Impure-sync**: the `sqlite3` module itself — used synchronously inside `SqliteStore` under a store-local lock with short-lived connections.
 
 ~80% of the code is pure. Tests target pure functions directly; only integration tests need I/O.
 
@@ -94,7 +94,7 @@ src/fern/
 ├── storage/
 │   ├── interfaces.py            # EventStore Protocol, ReceiptStore Protocol
 │   ├── memory.py                # MemoryStore (in-memory, used in tests)
-│   └── sqlite_store.py          # SqliteStore (disk-backed, uses asyncio.to_thread)
+│   └── sqlite_store.py          # SqliteStore (disk-backed, async API over locked sync sqlite)
 ├── transport/
 │   ├── interfaces.py            # RelayTransport Protocol, RelayMetadata dataclass
 │   ├── websocket_client.py      # WebSocketRelayClient (single-reader model, response queue)
@@ -339,7 +339,7 @@ class ReceiptStore(Protocol):
 
 Two implementations:
 - `MemoryStore` — in-memory dicts. Used in tests and ephemeral CLI invocations.
-- `SqliteStore` — SQLite-backed. All sync `sqlite3` calls wrapped in `asyncio.to_thread()`. Schema includes tables for `events`, `parent_refs`, `receipts`, `fraud_proofs`, and `attestations_issued`. Used both as relay event store and per-group client cache at `~/.fern/cache/<pubkey>.sqlite`. `get_hosted_groups()` queries distinct `group_pubkey` values so the relay can reconstruct its hosted groups from disk on startup.
+- `SqliteStore` — SQLite-backed. Methods are async to satisfy the storage protocols, but SQLite calls run synchronously under a store-local lock with short-lived connections. Schema includes tables for `events`, `parent_refs`, `receipts`, `fraud_proofs`, and `attestations_issued`. Used both as relay event store and per-group client cache at `~/.fern/cache/<pubkey>.sqlite`. `get_hosted_groups()` queries distinct `group_pubkey` values so the relay can reconstruct its hosted groups from disk on startup.
 
 ### 3.7 `fern.transport` (I/O with Protocols)
 
@@ -352,8 +352,12 @@ class RelayTransport(Protocol):
     async def fetch_metadata(self) -> RelayMetadata: ...
     async def subscribe(self, group: str) -> None: ...
     async def publish(self, event: Event) -> Receipt: ...
+    async def backfill(self, event: Event) -> Receipt: ...
     async def get(self, event_id: str) -> Event | None: ...
     def sync(self, group: str, since_ts=None) -> AsyncIterator[Event]: ...
+    async def sync_ids(self, group: str) -> list[str]: ...
+    async def sync_lock(self, group: str, client_id: str) -> SyncLockResult: ...
+    async def sync_unlock(self, group: str, client_id: str) -> None: ...
     async def request_attestation(self, group: str) -> Attestation: ...
     async def submit_fraud_proof(self, proof: FraudProof) -> str: ...
     def query_fraud_proofs(self, *, relay=None, group=None) -> AsyncIterator[FraudProof]: ...
@@ -363,7 +367,7 @@ class RelayTransport(Protocol):
 
 Three implementations:
 - `WebSocketRelayClient` — real WSS/WS client. Uses a single-reader model: a `_listen_loop` reads all messages, pushes route to callbacks, responses go to an `asyncio.Queue` for request-response correlation. Uses `_awaiting_response` flag so `sync`/`get`/`request_attestation` responses are correctly routed to the queue rather than being swallowed by push callbacks.
-- `RelayServer` — real WSS/WS server. Implements subscribe (tracks connections, pushes events/attestations), sync (streams events + `sync_complete`), query_fraud_proofs (streams + `query_complete`). Auto-hosts groups on valid genesis. Serves an HTTP metadata endpoint (with CORS headers) for browser clients. Reconstructs `_hosted_groups` from the database on startup via `get_hosted_groups()`. Uses structured logging with a coloured formatter.
+- `RelayServer` — real WSS/WS server. Implements subscribe (tracks connections, pushes events/attestations), sync (streams events + `sync_complete`), sync_ids (ID-only set fetch), sync_lock/sync_unlock (advisory per-group backfill coordination), backfill (store without broadcast), and query_fraud_proofs (streams + `query_complete`). Auto-hosts groups on valid genesis. Serves an HTTP metadata endpoint (with CORS headers) for browser clients. Reconstructs `_hosted_groups` from the database on startup via `get_hosted_groups()`. Uses structured logging with a coloured formatter.
 - `FakeRelay` — in-process relay for tests. Implements the same `RelayTransport` Protocol. Tracks `_last_attestations` per group for the prev chain.
 
 ### 3.8 `fern.client` (Async Orchestration)
@@ -390,7 +394,8 @@ class GroupSession:
 
 Helper modules:
 - `publisher.py` — `publish_event()`: parallel publish to all transports via `asyncio.gather`, collects receipts, stores them if a receipt store is provided.
-- `bootstrap.py` — `fetch_genesis()` walks DAG tips back to genesis via `get` requests; falls back to `sync`. `initial_sync()` fetches all events from all transports into a local store.
+- `bootstrap.py` — `fetch_genesis()` walks DAG tips back to genesis via `get` requests; falls back to `sync`. `initial_sync()` uses attestation-gated `sync_diff()` when a client identity is available, otherwise falls back to full `sync`.
+- `sync.py` — `sync_diff()` compares relay attestations to the local known set, uses `sync_ids` to compute differences, fetches missing local events with `get`, and repairs missing relay events with `backfill`. CLI callers use non-waiting lock behavior; long-lived clients may retry after leases.
 - `subscriber.py` — `subscribe_to_relays()` calls `transport.subscribe(group)` on each transport.
 - `monitor_runner.py` — `run_monitor_pass()`: runs pure `monitor_pass`, then asynchronously investigates candidate events by querying the relay, writes faults to trust ledger.
 
@@ -474,7 +479,7 @@ Two entry points in `pyproject.toml`:
 
 Only the I/O boundary is async:
 - `WebSocketRelayClient` / `RelayServer` (connect, subscribe, publish, sync)
-- `SqliteStore` (wrapped in `asyncio.to_thread`)
+- `SqliteStore` (async API over locked synchronous SQLite)
 - `GroupSession` (orchestration)
 - `FakeRelay` (in-memory, async to match the Protocol)
 
@@ -482,7 +487,7 @@ Everything else (crypto, events, dag, state, completeness pure logic, chat handl
 
 The CLI uses `asyncio.run()` at the top of each command. Tests use `pytest-asyncio` with `asyncio_mode = "auto"`.
 
-The `WebSocketRelayClient` uses a single-reader model: a `_listen_loop` task reads all incoming messages. Push messages (`event`, `attestation`) are dispatched to callbacks via `asyncio.ensure_future`. Response messages (`receipt`, `not_found`, `sync_complete`, `ok`, `error`, `query_complete`) go to an `asyncio.Queue` where blocking request-response methods (`publish`, `get`, `request_attestation`, `submit_fraud_proof`, `sync`, `query_fraud_proofs`) consume them.
+The `WebSocketRelayClient` uses a single-reader model: a `_listen_loop` task reads all incoming messages. Push messages (`event`, `attestation`) are dispatched to callbacks via `asyncio.ensure_future`. Response messages (`receipt`, `not_found`, `sync_complete`, `ok`, `error`, `query_complete`, `ids`, `sync_lock_granted`, `sync_lock_denied`) go to an `asyncio.Queue` where request-response methods (`publish`, `backfill`, `get`, `request_attestation`, `sync_ids`, `sync_lock`, `sync_unlock`, `submit_fraud_proof`, `sync`, `query_fraud_proofs`) consume them.
 
 ---
 
@@ -619,7 +624,7 @@ The library assumes no particular UI runtime — no `print()`, no `@app.route`, 
 | Frozen dataclasses | Prevent aliasing bugs, enable dict/set membership |
 | Async at edge, sync in core | ~80% of code testable without event loop |
 | Single-reader model for WebSocket client | Avoids race between request/response and pushed messages |
-| `asyncio.to_thread` for SQLite | Prevents event-loop blocking |
+| Locked short-lived SQLite connections | Avoids cross-thread SQLite connection failures during concurrent backfill |
 | Author-local receipts, shared on-demand | Zero ongoing traffic; only published as fraud proof evidence |
 | Fraud proofs not in DAG | Audit evidence, not group history |
 | DAG for completeness propagation, not replies | Separate concerns; replies are `content.reply_to` |

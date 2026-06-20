@@ -382,12 +382,11 @@ Because attestations are signed, two clients comparing the attestations they rec
 
 ### 9.4 Backfill — The Network Self-Heals
 
-When a client notices a relay is missing an event (detected via attestation divergence or via a gap in the DAG), it doesn't just flag the fault — it fetches the missing event from a sibling relay that has it and republishes it to the lagging relay. The lagging relay either:
+When a client notices a relay is missing events (detected via attestation divergence or via a gap in the DAG), it doesn't just flag the fault — it fetches the missing events from a sibling relay and republishes them to the lagging relay via the `backfill` action. `backfill` stores and receipts events without broadcasting them to subscribers, because these are historical events being repaired rather than newly-created events.
 
-- Integrates it (its next attestation converges), or
-- Refuses (and is caught as persistently divergent on the next audit pass, flagged in the trust ledger)
+Clients coordinate this repair with an advisory per-group sync lock. If another client already holds the lock, short-lived clients (like CLI commands) skip that relay for the current pass, while long-lived clients (like Bracken) retry on future attestation or sync triggers after the lease window. Relay-side deduplication means uncoordinated fallback remains safe, just less efficient.
 
-This means every reader who notices a gap is also repairing it. The network drifts toward completeness over time — seconds to minutes, depending on how many clients are active.
+For efficiency, clients use `sync_ids` to fetch only event IDs and compute set differences. If attestation `set_hash` already matches the local known set, no event transfer is needed. The lagging relay either integrates the backfilled events (its next attestation converges) or refuses (caught as persistently divergent and flagged in the trust ledger).
 
 ### 9.5 Fraud Proofs
 
@@ -544,11 +543,30 @@ Relays expose a WebSocket interface. Core actions:
 {"action": "attestation", "group": "<group pubkey>"}
 ```
 
+**Fetch event IDs only:**
+```json
+{"action": "sync_ids", "group": "<group pubkey>"}
+```
+
+**Acquire / release a backfill coordination lock:**
+```json
+{"action": "sync_lock", "group": "<group pubkey>", "client_id": "<user pubkey>"}
+{"action": "sync_unlock", "group": "<group pubkey>", "client_id": "<user pubkey>"}
+```
+
+**Backfill historical event without broadcasting:**
+```json
+{"action": "backfill", "event": { ... }}
+```
+
 Relay responses:
 ```json
 {"type": "event", "event": { ... }}
 {"type": "receipt", "receipt": { ... }}
 {"type": "attestation", "attestation": { ... }}
+{"type": "ids", "group": "<group pubkey>", "ids": ["<event id>", "..."]}
+{"type": "sync_lock_granted", "group": "<group pubkey>", "ttl": 30}
+{"type": "sync_lock_denied", "group": "<group pubkey>", "expires_in": 15}
 {"type": "not_found", "id": "<event id>"}
 {"type": "error", "message": "..."}
 ```
@@ -624,7 +642,7 @@ Clients must persist their full local event history to disk. This cache is essen
 2. Connect to hint relays, fetch and verify the `genesis` event
 3. Derive the canonical relay list from genesis, connect to all canonical relays
 4. Sync from all canonical relays using the `sync` action; merge results
-5. Verify completeness: if all canonical relays agree on the same `set_hash`, `tips`, and `count`, the client has the full history. If not, fetch and republish differences (backfill).
+5. Verify completeness by comparing relay attestations to the local known set. If a relay's `set_hash` differs, use `sync_ids` to compute differences, fetch missing events with `get`, and repair missing relay events with `backfill`.
 6. Walk the DAG from genesis:
    - Verify signatures and parent references
    - Compute the genesis-connected event set
@@ -655,7 +673,7 @@ Clients maintain persistent WebSocket connections to all canonical relays for ea
 After initial sync, the client continuously:
 
 - **Receives new events**: verify, store, recompute connectedness, trigger gap healing for disconnected events, and render connected events per client policy (hide banned/unauthorised if configured).
-- **Receives attestation pushes**: run the monitor audit pass (Section 9.3). Compare relay state to local known-set and to other relays. Trigger backfill for missing events. Flag persistent divergence in local trust ledger.
+- **Receives attestation pushes**: verify the attestation, compare relay state to local known-set and to other relays, then trigger ID-diff sync/backfill for missing events. Short-lived clients skip held sync locks; long-lived clients retry on later attestation/sync triggers. Flag persistent divergence in local trust ledger.
 - **Maintains a local trust ledger**: `{relay_pubkey → {observed_faults, last_attestation}}`. This is local state, not network-consensus. Different clients may have different views of which relays are trustworthy.
 
 Trust propagation is **social, not protocol-enforced**. The protocol does not dictate that faulted relays are de-listed across clients. The protocol guarantees misconduct is *provable*; the social response (drop relay R from your config) is up to the client/operator.

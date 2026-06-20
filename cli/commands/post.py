@@ -9,7 +9,7 @@ from fern.identity.user import UserIdentity
 from fern.chat.messages import build_chat_message
 from fern.storage.sqlite_store import SqliteStore
 from fern.state.machine import derive_group_state
-from fern.client.bootstrap import initial_sync
+from cli.sync import sync_group_from_transports
 from cli.config import (
     load_config,
     save_config,
@@ -51,7 +51,12 @@ async def _post(channel: str, reply_to: str | None, group_id: str, text: str) ->
     store = SqliteStore(cache_path)
     await store.open()
     try:
-        await initial_sync(group_pubkey, transports, store)
+        await sync_group_from_transports(
+            group_pubkey=group_pubkey,
+            transports=transports,
+            store=store,
+            client_id=user.pubkey,
+        )
 
         events = []
         async for e in store.iter_group_events(group_pubkey):

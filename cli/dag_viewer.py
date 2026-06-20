@@ -7,14 +7,15 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 
-def _query_db(db_path: str) -> dict:
+def _query_db(db_path: str) -> dict[str, Any]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        events = []
+        events: list[dict[str, Any]] = []
         for row in conn.execute("SELECT * FROM events ORDER BY ts, id"):
             events.append({
                 "id": row["id"],
@@ -28,11 +29,11 @@ def _query_db(db_path: str) -> dict:
                 "sig": row["sig"],
             })
 
-        edges = []
+        edges: list[dict[str, str]] = []
         for row in conn.execute("SELECT parent_id, child_id FROM parent_refs"):
             edges.append({"from": row["parent_id"], "to": row["child_id"]})
 
-        groups = {}
+        groups: dict[str, dict[str, int]] = {}
         for row in conn.execute("SELECT DISTINCT group_pubkey FROM events"):
             gp = row["group_pubkey"]
             groups[gp] = {
@@ -41,7 +42,7 @@ def _query_db(db_path: str) -> dict:
                 ).fetchone()[0],
             }
 
-        receipts = []
+        receipts: list[dict[str, Any]] = []
         try:
             for row in conn.execute("SELECT event_id, relay_pubkey, receipt_json FROM receipts"):
                 receipts.append({
@@ -466,13 +467,13 @@ fetchInitial().then(connectSSE);
 
 class _DAGHandler(BaseHTTPRequestHandler):
     db_path: str = ""
-    _watchers: list = []
+    _watchers: list[_DAGHandler] = []
     _lock = threading.Lock()
 
-    def log_message(self, fmt, *args):
+    def log_message(self, fmt: str, *args: object) -> None:
         pass
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         parsed = urlparse(self.path)
 
         if parsed.path == "/" or parsed.path == "/index.html":
@@ -486,7 +487,7 @@ class _DAGHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def _send_html(self, html):
+    def _send_html(self, html: str) -> None:
         body = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -494,7 +495,7 @@ class _DAGHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, data):
+    def _send_json(self, data: object) -> None:
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -502,14 +503,14 @@ class _DAGHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_graph(self):
+    def _send_graph(self) -> None:
         try:
             data = _query_db(self.db_path)
             self._send_json(data)
         except Exception as e:
             self._send_json({"error": str(e), "events": [], "edges": [], "groups": {}, "receipts": []})
 
-    def _handle_sse(self):
+    def _handle_sse(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -535,12 +536,12 @@ class _DAGHandler(BaseHTTPRequestHandler):
                 if self in self._watchers:
                     self._watchers.remove(self)
 
-    def _get_event_count(self):
+    def _get_event_count(self) -> int:
         try:
             conn = sqlite3.connect(self.db_path)
             try:
                 cursor = conn.execute("SELECT COUNT(*) FROM events")
-                return cursor.fetchone()[0]
+                return int(cursor.fetchone()[0])
             finally:
                 conn.close()
         except Exception:

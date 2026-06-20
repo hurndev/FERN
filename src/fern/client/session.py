@@ -17,6 +17,7 @@ from fern.storage.interfaces import EventStore, ReceiptStore
 from fern.transport.interfaces import RelayTransport
 from fern.client.bootstrap import fetch_genesis, initial_sync
 from fern.client.publisher import publish_event
+from fern.client.sync import sync_diff
 from fern.client.subscriber import subscribe_to_relays
 from fern.client.monitor_runner import run_monitor_pass
 
@@ -41,6 +42,7 @@ class GroupSession:
         self._attestation_callbacks: list[Callable[[Attestation], Awaitable[None]]] = []
         self._state_callbacks: list[Callable[[GroupState], Awaitable[None]]] = []
         self._state_events_seen: set[str] = set()
+        self._syncs_in_flight: set[tuple[str, str]] = set()
 
     @property
     def user(self) -> UserIdentity:
@@ -75,7 +77,12 @@ class GroupSession:
         await self._store.put_event(genesis)
         self._state_events_seen.add(genesis.id or "")
 
-        events = await initial_sync(group_pubkey, self._transports, self._store)
+        events = await initial_sync(
+            group_pubkey,
+            self._transports,
+            self._store,
+            client_id=self._user.pubkey,
+        )
 
         for transport in self._transports:
             transport.on_event(self._handle_event)
@@ -190,6 +197,24 @@ class GroupSession:
                     )
                 except Exception:
                     pass
+
+                key = (transport.relay_pubkey, self._group_pubkey)
+                if key not in self._syncs_in_flight:
+                    self._syncs_in_flight.add(key)
+                    try:
+                        result = await sync_diff(
+                            transport=transport,
+                            group=self._group_pubkey,
+                            store=self._store,
+                            client_id=self._user.pubkey,
+                            wait_on_lock=False,
+                        )
+                        if result.fetched > 0:
+                            await self.refresh_state()
+                    except Exception:
+                        pass
+                    finally:
+                        self._syncs_in_flight.discard(key)
                 break
 
         for cb in self._attestation_callbacks:

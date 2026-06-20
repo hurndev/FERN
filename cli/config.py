@@ -84,6 +84,15 @@ def add_group_to_order(group_pubkey: str, config: dict[str, Any]) -> int:
     return group_order.index(group_pubkey) + 1
 
 
+def get_client_id(config: dict[str, Any]) -> str:
+    privkey = config.get("user_privkey_hex")
+    if privkey:
+        from fern.identity.user import UserIdentity
+
+        return UserIdentity.from_privkey_hex(str(privkey)).pubkey
+    return "0" * 64
+
+
 async def connect_transports(urls: list[str]) -> list[WebSocketRelayClient]:
     from fern.transport.websocket_client import WebSocketRelayClient
 

@@ -12,7 +12,8 @@ from fern.events.types import ProtocolTypes
 from fern.state.machine import derive_group_state
 from fern.storage.sqlite_store import SqliteStore
 from fern.transport.websocket_client import WebSocketRelayClient
-from fern.client.bootstrap import initial_sync
+from fern.client.bootstrap import fetch_genesis
+from cli.sync import sync_group_from_transports
 from cli.config import (
     load_config,
     save_config,
@@ -22,6 +23,7 @@ from cli.config import (
     resolve_group,
     add_group_to_order,
     connect_transports,
+    get_client_id,
 )
 from cli.output import print_success, print_error
 
@@ -193,18 +195,10 @@ async def _join(address: str) -> None:
     genesis: Any = None
     sync_error: str | None = None
     try:
-        for t in transports:
-            try:
-                async for event in t.sync(group_pubkey):
-                    if event.type == "genesis":
-                        genesis = event
-                        break
-            except Exception as e:
-                if sync_error is None:
-                    sync_error = str(e)
-                continue
-            if genesis is not None:
-                break
+        try:
+            genesis = await fetch_genesis(group_pubkey, transports)
+        except Exception as e:
+            sync_error = str(e)
 
         if genesis is None:
             hint = f": {sync_error}" if sync_error else ""
@@ -221,7 +215,12 @@ async def _join(address: str) -> None:
         await store.open()
         try:
             await store.put_event(genesis)
-            await initial_sync(group_pubkey, transports, store)
+            await sync_group_from_transports(
+                group_pubkey=group_pubkey,
+                transports=transports,
+                store=store,
+                client_id=user.pubkey,
+            )
             tips = await store.get_tips(group_pubkey)
         finally:
             await store.close()
@@ -303,7 +302,12 @@ async def _info(group_id: str) -> None:
         if relay_urls:
             transports = await connect_transports(relay_urls)
             try:
-                await initial_sync(group_pubkey, transports, store)
+                await sync_group_from_transports(
+                    group_pubkey=group_pubkey,
+                    transports=transports,
+                    store=store,
+                    client_id=get_client_id(config),
+                )
             finally:
                 await _close_transports(transports)
 
@@ -354,7 +358,12 @@ async def _members(group_id: str) -> None:
         if relay_urls:
             transports = await connect_transports(relay_urls)
             try:
-                await initial_sync(group_pubkey, transports, store)
+                await sync_group_from_transports(
+                    group_pubkey=group_pubkey,
+                    transports=transports,
+                    store=store,
+                    client_id=get_client_id(config),
+                )
             finally:
                 await _close_transports(transports)
 
@@ -413,13 +422,32 @@ async def _leave(group_id: str) -> None:
         print_error("No relays configured for this group.")
         return
 
+    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
     transports = await connect_transports(relay_urls)
     try:
+        store = SqliteStore(cache_path)
+        await store.open()
+        try:
+            await sync_group_from_transports(
+                group_pubkey=group_pubkey,
+                transports=transports,
+                store=store,
+                client_id=user.pubkey,
+            )
+            tips = await store.get_tips(group_pubkey)
+        finally:
+            await store.close()
+
+        parents = tuple(tips) if tips else ()
+        if not parents:
+            print_error("No tips in local cache. Run `fern read <group>` to sync first.")
+            return
+
         leave_event = build_event(
             type=ProtocolTypes.LEAVE,
             group=group_pubkey,
             author_keypair=user.keypair,
-            parents=(),
+            parents=parents,
             content={},
         )
         sent = 0
@@ -470,10 +498,17 @@ async def _relay_update(group_id: str, urls: list[str]) -> None:
     old_relays = list(group_info.get("relays", []))
     cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
 
+    transports = await connect_transports(old_relays)
     try:
         store = SqliteStore(cache_path)
         await store.open()
         try:
+            await sync_group_from_transports(
+                group_pubkey=group_pubkey,
+                transports=transports,
+                store=store,
+                client_id=user.pubkey,
+            )
             tips = await store.get_tips(group_pubkey)
         finally:
             await store.close()
@@ -486,7 +521,6 @@ async def _relay_update(group_id: str, urls: list[str]) -> None:
         print_error("No tips in local cache. Run `fern read <group>` to sync first.")
         return
 
-    transports = await connect_transports(old_relays)
     try:
         event = build_event(
             type=ProtocolTypes.RELAY_UPDATE,
@@ -536,7 +570,7 @@ async def _relay_update(group_id: str, urls: list[str]) -> None:
 async def _publish_mod_event(
     group_id: str,
     event_type: str,
-    content: dict,
+    content: dict[str, object],
     success_msg: str,
 ) -> None:
     config = load_config()
@@ -548,10 +582,17 @@ async def _publish_mod_event(
     if not relay_urls:
         relay_urls = [DEFAULT_RELAY]
 
+    transports = await connect_transports(relay_urls)
     try:
         store = SqliteStore(cache_path)
         await store.open()
         try:
+            await sync_group_from_transports(
+                group_pubkey=group_pubkey,
+                transports=transports,
+                store=store,
+                client_id=user.pubkey,
+            )
             tips = await store.get_tips(group_pubkey)
         finally:
             await store.close()
@@ -564,7 +605,6 @@ async def _publish_mod_event(
         print_error("No tips in local cache. Run `fern read <group>` to sync first.")
         return
 
-    transports = await connect_transports(relay_urls)
     try:
         event = build_event(
             type=event_type,
@@ -624,7 +664,7 @@ def kick(group_id: str, target_pubkey: str) -> None:
 @click.option("--until", type=int, default=None, help="Unix timestamp when ban expires")
 @click.option("--reason", default="", help="Reason for ban")
 def ban(group_id: str, target_pubkey: str, until: int | None, reason: str) -> None:
-    content: dict = {"target": target_pubkey, "until": until, "reason": reason}
+    content: dict[str, object] = {"target": target_pubkey, "until": until, "reason": reason}
     asyncio.run(_publish_mod_event(
         group_id,
         ProtocolTypes.BAN,
@@ -698,10 +738,17 @@ async def _nickname(group_id: str, name: str) -> None:
     if not relay_urls:
         relay_urls = [DEFAULT_RELAY]
 
+    transports = await connect_transports(relay_urls)
     try:
         store = SqliteStore(cache_path)
         await store.open()
         try:
+            await sync_group_from_transports(
+                group_pubkey=group_pubkey,
+                transports=transports,
+                store=store,
+                client_id=user.pubkey,
+            )
             tips = await store.get_tips(group_pubkey)
         finally:
             await store.close()
@@ -722,7 +769,6 @@ async def _nickname(group_id: str, name: str) -> None:
         content={"nickname": name},
     )
 
-    transports = await connect_transports(relay_urls)
     try:
         receipts = 0
         first_error: str | None = None

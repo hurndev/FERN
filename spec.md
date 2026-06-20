@@ -775,13 +775,22 @@ The protocol does not specify how clients act on faults. Different clients may h
 
 ### 9.4 Backfill
 
-When a client notices (via monitor pass or gap detection) that a relay R is missing an event E:
+When a client notices (via monitor pass or gap detection) that a relay R is missing event(s):
 
-1. Fetch E from a sibling relay that has it (e.g., via `get`).
-2. Verify E.
-3. Republish E to R via `publish` (Section 10.4).
-4. R either:
-   - Stores and integrates E (its next attestation converges), or
+1. Fetch the missing event(s) from a sibling relay that has them (e.g., via `get`
+   or `sync_ids`).
+2. Verify each event (Section 3.5).
+3. Acquire a sync lock on R (Section 10.4.10) to coordinate with other clients
+   that may also be backfilling. If the lock is denied, short-lived clients MAY
+   skip this relay for the current pass; long-lived clients SHOULD retry after
+   the lease window by re-checking R's attestation first.
+4. Republish the missing events to R via `backfill` (Section 10.4.12), NOT
+   `publish`. The `backfill` action stores the event without broadcasting it to
+   subscribers, since all subscribers either already have the event or will
+   obtain it via their own sync.
+5. Release the sync lock (Section 10.4.11).
+6. R either:
+   - Stores and integrates the events (its next attestation converges), or
    - Refuses to integrate (caught on the next monitor pass; recorded as a fault).
 
 Backfill is performed by any client that notices a gap. The network drifts toward completeness over time without requiring dedicated monitor infrastructure.
@@ -879,7 +888,7 @@ Anyone can run a relay for an existing group at any time: fetch the log from exi
 
 ### 10.3 Relay Validation
 
-When a relay receives an event via `publish` (from a client), it MUST:
+When a relay receives an event via `publish` or `backfill` (from a client), it MUST:
 
 1. Perform structural validation (Section 3.2). If invalid, reject without storing.
 2. Check the maximum event size. Relays SHOULD reject events whose serialised size exceeds 64 KiB. (This protects against DoS via oversized events; see Section 16.5.)
@@ -889,9 +898,17 @@ When a relay receives an event via `publish` (from a client), it MUST:
    - If the event is a valid `genesis` event (type is `genesis`, signature verifies against `group` field, all content fields present and valid), the relay SHOULD auto-host the group, subject to the relay operator's configured policy (Section 10.3.1). If auto-hosting is enabled and policy allows, the relay begins hosting the group and proceeds to step 6. Otherwise, reject.
    - For non-`genesis` events, reject.
 6. Store the event.
-7. Return a receipt to the publishing client (only for `publish` actions; not for events the relay fetches from other relays for its own backfill).
+7. Return a receipt to the publishing client. For `publish` actions, also
+   broadcast the event to subscribed clients (Section 10.4.2). For `backfill`
+   actions, do NOT broadcast (Section 10.4.12).
 
 Relays MUST store events regardless of whether they hold the parent events. Relays MUST store events regardless of authorisation (i.e., a non-mod attempting a `kick` is stored, even though clients will reject it). Only structural and signature checks gate storage.
+
+Relays SHOULD check whether an event is already stored before performing
+expensive signature verification. If the event is already stored, the relay
+returns a receipt without re-verifying, re-storing, or broadcasting. This is an
+optimisation for backfill scenarios where many clients may republish the same
+events to a recovering relay.
 
 #### 10.3.1 Auto-Hosting Policy
 
@@ -1057,6 +1074,94 @@ Relay → Client (multiple messages):
 
 Returns all fraud proofs the relay has stored, optionally filtered by accused relay pubkey or by group. Clients use this to discover censorship incidents they weren't present for.
 
+#### 10.4.9 Sync IDs (Bulk ID Fetch)
+
+Client -> Relay:
+```json
+{"action": "sync_ids", "group": "<group pubkey hex>"}
+```
+
+Relay -> Client:
+```json
+{"type": "ids", "group": "<group pubkey hex>", "ids": ["<event id hex>", "..."]}
+```
+
+Returns all event IDs the relay has stored for the group, without full event
+bodies. Clients use this to compute a set difference against their local known
+set, then fetch only missing full events via `get` (Section 10.4.3) and
+backfill only events the relay is missing via `backfill` (Section 10.4.12).
+
+If the relay does not host the group, it returns:
+```json
+{"type": "error", "message": "group not hosted"}
+```
+
+#### 10.4.10 Sync Lock
+
+A sync lock coordinates backfill so multiple clients discovering the same relay
+divergence do not all backfill simultaneously. The lock is per-group,
+lease-based, and advisory.
+
+Client -> Relay:
+```json
+{"action": "sync_lock", "group": "<group pubkey hex>", "client_id": "<user pubkey hex>"}
+```
+
+Relay -> Client (granted):
+```json
+{"type": "sync_lock_granted", "group": "<group pubkey hex>", "ttl": 30}
+```
+
+Relay -> Client (denied):
+```json
+{"type": "sync_lock_denied", "group": "<group pubkey hex>", "expires_in": 15}
+```
+
+Rules:
+- The lock is per-group.
+- `client_id` is the client's user pubkey when available.
+- TTL is 30 seconds. A holder SHOULD renew at roughly 60% of TTL during long
+  backfills.
+- If the same `client_id` requests the lock again, the lease is renewed.
+- Expiry is lazy; relays do not set timers.
+- The lock is advisory. Clients that do not support it fall back to
+  uncoordinated backfill, which is safe due to relay-side deduplication.
+
+#### 10.4.11 Sync Unlock
+
+Client -> Relay:
+```json
+{"action": "sync_unlock", "group": "<group pubkey hex>", "client_id": "<user pubkey hex>"}
+```
+
+Relay -> Client:
+```json
+{"type": "ok", "message": "unlocked"}
+```
+
+Releases the sync lock for the group if `client_id` matches the current holder.
+If the holder does not match or no lock exists, the relay still returns `ok`.
+
+#### 10.4.12 Backfill
+
+Client -> Relay:
+```json
+{"action": "backfill", "event": { "...": "full event object" }}
+```
+
+Relay -> Client:
+```json
+{"type": "receipt", "receipt": { "...": "receipt object" }}
+```
+or
+```json
+{"type": "error", "message": "<human-readable reason>"}
+```
+
+`backfill` is identical to `publish` except the relay does NOT broadcast the
+event to subscribed clients. It is used for historical events during healing and
+new relay seeding. `publish` remains the action for newly-created events.
+
 ### 10.5 Attestation Push
 
 In addition to on-demand requests (Section 10.4.5), relays SHOULD push new attestations to all subscribed clients automatically when they issue them:
@@ -1136,13 +1241,18 @@ A canonical relay MUST:
 - Store all events it receives (subject to GC).
 - Issue attestations periodically (Section 9.2.5).
 - Return receipts for `publish` actions.
-- Serve all stored events via `get` and `sync`.
+- Return receipts for `backfill` actions without broadcasting.
+- Serve all stored events via `get`, `sync`, and `sync_ids`.
 - Push new events and attestations to subscribed clients.
 
 A canonical relay MAY:
 - Choose its own GC threshold.
 - Choose its own attestation cadence (within reason).
 - Decline to host a group (it should then not be a canonical relay).
+
+A canonical relay SHOULD:
+- Check `has_event` before expensive verification on `publish` and `backfill`.
+- Support `sync_lock` and `sync_unlock` for coordinated backfill.
 
 ---
 
@@ -1221,7 +1331,7 @@ When a client observes a `relay_update` adding a new relay to the canonical list
 2. Subscribe to the group on the new relay.
 3. Request its latest attestation.
 4. Compare its attestation to the client's local known-set.
-5. Publish any events the new relay is missing (via `publish`) — these are not "new events", they are old events the relay hasn't seen yet.
+5. Backfill any events the new relay is missing (via `backfill`) — these are not "new events", they are old events the relay hasn't seen yet.
 6. Confirm the new relay's next attestation converges with the other relays' attestations.
 
 Clients MUST perform this seeding before sending new messages to the group. The migration is not complete until all canonical relays' attestations converge.
@@ -1242,10 +1352,13 @@ The local cache is also where receipts are stored (author-local, per-section 9.1
 2. Connect to hint relays via WSS; fetch metadata; pin relay pubkeys.
 3. Perform the genesis fetch procedure (Section 12.3) — verify the genesis signature against the `group` pubkey.
 4. Derive the canonical relay list from genesis (and subsequent `relay_update` events as they are received). Connect to all canonical relays not already connected, fetch their metadata, pin their pubkeys.
-5. Sync from all canonical relays using `sync`. Merge results (deduplicate by event ID).
+5. Sync from all canonical relays. Use attestation comparison as a sync gate:
+   request each relay's attestation, compare its `set_hash` to the local known
+   set, and use `sync_ids` for efficient ID-only comparison when hashes differ.
+   Relays that do not support the newer actions fall back to `sync`.
 6. Verify all events (Section 3.5).
 7. Request the latest attestation from each canonical relay using the `attestation` action (Section 10.4.5).
-8. Verify completeness via attestation comparison across all canonical relays. If attestations diverge, investigate via monitor pass (Section 9.3) and backfill (Section 9.4).
+8. Verify completeness via attestation comparison across all canonical relays. If attestations diverge, investigate via monitor pass (Section 9.3) and backfill (Section 9.4), using sync locks to coordinate where supported.
 9. Compute the genesis-connected event set. Store disconnected events as pending/gappy events and start gap healing for their missing parents.
 10. Walk only the connected DAG in canonical linearisation order, applying state events to compute current group state.
 11. Open live subscriptions on all canonical relays. This also begins receiving attestation pushes.
@@ -1280,9 +1393,14 @@ On receiving a new event:
 7. Render connected events per client policy (hide banned/unauthorised if configured; show gaps prominently).
 
 On receiving a new attestation:
-1. Run the monitor pass (Section 9.3).
-2. Trigger backfill if divergences detected.
-3. Update local trust ledger.
+1. Verify the attestation (Section 9.2.4).
+2. Compare `set_hash` to the local known set.
+3. If hashes match, the relay is in sync.
+4. If hashes differ, run the monitor pass (Section 9.3) and trigger backfill
+   (Section 9.4). Short-lived clients MAY skip relays whose sync lock is held;
+   long-lived clients SHOULD retry after the lock lease using future
+   attestation/sync triggers.
+5. Update local trust ledger.
 
 ### 13.5 Displaying Gaps
 
@@ -1308,7 +1426,7 @@ Each client maintains a local trust ledger (Section 9.3.3). Trust propagation is
 
 This specification defines three conformance classes:
 
-- **FERN Client**: implements event creation, signing, verification, DAG operations, group state derivation, the monitor pass, backfill, and the WebSocket client actions (`subscribe`, `publish`, `get`, `sync`, `attestation`).
+- **FERN Client**: implements event creation, signing, verification, DAG operations, group state derivation, the monitor pass, backfill, and the WebSocket client actions (`subscribe`, `publish`, `backfill`, `get`, `sync`, `sync_ids`, `sync_lock`, `sync_unlock`, `attestation`).
 - **FERN Relay**: implements event validation, storage, GC, attestation issuance, receipt issuance, and the WebSocket server actions, plus the metadata HTTPS endpoint.
 - **FERN Chat App**: a FERN Client that additionally implements the `chat.*` event types (Section 6), rendering, and user interaction (CLI/GUI/Web).
 
@@ -1468,7 +1586,7 @@ function monitor_pass(client, relay, new_attestation):
                 # Trigger backfill
                 event = sibling_relays.fetch_event(event_id)
                 if event is not None:
-                    relay.publish(event)
+                    relay.backfill(event)
                 client.trust_ledger[relay.pubkey].add_fault("missing_event_no_receipt", event_id)
     
     # 4. Compare to other relays' attestations

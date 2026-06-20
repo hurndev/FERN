@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import sqlite3
+import threading
+from collections.abc import Callable
 from collections.abc import AsyncIterator, Mapping
+from typing import TypeVar
 
 from fern.events.event import Event
 from fern.completeness.receipts import Receipt
+
+
+T = TypeVar("T")
 
 
 _SCHEMA = """
@@ -131,23 +136,37 @@ class SqliteStore:
     def __init__(self, path: str) -> None:
         self._path = path
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.RLock()
 
     async def open(self) -> None:
-        def _open() -> sqlite3.Connection:
-            conn = sqlite3.connect(self._path)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript(_SCHEMA)
-            conn.commit()
-            return conn
-
-        self._conn = await asyncio.to_thread(_open)
+        conn = sqlite3.connect(self._path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(_SCHEMA)
+        conn.commit()
+        conn.close()
 
     async def close(self) -> None:
         if self._conn:
             conn = self._conn
             self._conn = None
-            await asyncio.to_thread(conn.close)
+            with self._lock:
+                conn.close()
+
+    async def _run(self, fn: Callable[[], T]) -> T:
+        def _locked() -> T:
+            with self._lock:
+                conn = sqlite3.connect(self._path)
+                conn.execute("PRAGMA foreign_keys=ON")
+                previous = self._conn
+                self._conn = conn
+                try:
+                    return fn()
+                finally:
+                    self._conn = previous
+                    conn.close()
+
+        return _locked()
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -171,7 +190,7 @@ class SqliteStore:
                 )
             self.conn.commit()
 
-        await asyncio.to_thread(_put)
+        await self._run(_put)
 
     async def get_event(self, event_id: str) -> Event | None:
         def _get() -> Event | None:
@@ -182,14 +201,14 @@ class SqliteStore:
             columns = [d[0] for d in cursor.description]
             return _row_to_event(dict(zip(columns, row)))
 
-        return await asyncio.to_thread(_get)
+        return await self._run(_get)
 
     async def has_event(self, event_id: str) -> bool:
         def _has() -> bool:
             cursor = self.conn.execute("SELECT 1 FROM events WHERE id = ?", (event_id,))
             return cursor.fetchone() is not None
 
-        return await asyncio.to_thread(_has)
+        return await self._run(_has)
 
     async def iter_all_events(self) -> AsyncIterator[Event]:
         def _fetch_all() -> list[Event]:
@@ -197,7 +216,7 @@ class SqliteStore:
             columns = [d[0] for d in cursor.description]
             return [_row_to_event(dict(zip(columns, row))) for row in cursor]
 
-        events = await asyncio.to_thread(_fetch_all)
+        events = await self._run(_fetch_all)
         for event in events:
             yield event
 
@@ -209,7 +228,7 @@ class SqliteStore:
             columns = [d[0] for d in cursor.description]
             return [_row_to_event(dict(zip(columns, row))) for row in cursor]
 
-        events = await asyncio.to_thread(_fetch_group)
+        events = await self._run(_fetch_group)
         for event in events:
             yield event
 
@@ -222,7 +241,7 @@ class SqliteStore:
             columns = [d[0] for d in cursor.description]
             return [_row_to_event(dict(zip(columns, row))) for row in cursor]
 
-        events = await asyncio.to_thread(_fetch_since)
+        events = await self._run(_fetch_since)
         for event in events:
             yield event
 
@@ -234,7 +253,7 @@ class SqliteStore:
             row = cursor.fetchone()
             return int(str(row[0]))
 
-        return await asyncio.to_thread(_count)
+        return await self._run(_count)
 
     async def get_tips(self, group: str) -> list[str]:
         def _tips() -> list[str]:
@@ -246,14 +265,14 @@ class SqliteStore:
             )
             return [str(row[0]) for row in cursor]
 
-        return await asyncio.to_thread(_tips)
+        return await self._run(_tips)
 
     async def get_known_set(self, group: str) -> frozenset[str]:
         def _get_set() -> frozenset[str]:
             cursor = self.conn.execute("SELECT id FROM events WHERE group_pubkey = ?", (group,))
             return frozenset(str(row[0]) for row in cursor)
 
-        return await asyncio.to_thread(_get_set)
+        return await self._run(_get_set)
 
     async def get_parent_map(self, group: str) -> Mapping[str, frozenset[str]]:
         def _get_map() -> dict[str, frozenset[str]]:
@@ -270,7 +289,7 @@ class SqliteStore:
                 mapping[key].add(str(child_id))
             return {k: frozenset(v) for k, v in mapping.items()}
 
-        return await asyncio.to_thread(_get_map)
+        return await self._run(_get_map)
 
     async def delete_event(self, event_id: str) -> None:
         def _delete() -> None:
@@ -279,14 +298,14 @@ class SqliteStore:
             self.conn.execute("DELETE FROM parent_refs WHERE parent_id = ?", (event_id,))
             self.conn.commit()
 
-        await asyncio.to_thread(_delete)
+        await self._run(_delete)
 
     async def get_hosted_groups(self) -> list[str]:
         def _get_groups() -> list[str]:
             cursor = self.conn.execute("SELECT DISTINCT group_pubkey FROM events")
             return [str(row[0]) for row in cursor]
 
-        return await asyncio.to_thread(_get_groups)
+        return await self._run(_get_groups)
 
     async def put_receipt(self, event_id: str, relay_pubkey: str, receipt: Receipt) -> None:
         def _put() -> None:
@@ -297,7 +316,7 @@ class SqliteStore:
             )
             self.conn.commit()
 
-        await asyncio.to_thread(_put)
+        await self._run(_put)
 
     async def get_receipt(self, event_id: str, relay_pubkey: str) -> Receipt | None:
         def _get() -> Receipt | None:
@@ -310,7 +329,7 @@ class SqliteStore:
                 return None
             return _json_to_receipt(json.loads(str(row[0])))
 
-        return await asyncio.to_thread(_get)
+        return await self._run(_get)
 
     async def iter_receipts_for_event(self, event_id: str) -> AsyncIterator[Receipt]:
         def _fetch_receipts() -> list[Receipt]:
@@ -319,7 +338,7 @@ class SqliteStore:
             )
             return [_json_to_receipt(json.loads(str(row[0]))) for row in cursor]
 
-        receipts = await asyncio.to_thread(_fetch_receipts)
+        receipts = await self._run(_fetch_receipts)
         for receipt in receipts:
             yield receipt
 
@@ -337,7 +356,7 @@ class SqliteStore:
             )
             self.conn.commit()
 
-        await asyncio.to_thread(_put)
+        await self._run(_put)
 
     async def query_fraud_proofs(
         self, *, relay: str | None = None, group: str | None = None
@@ -354,7 +373,7 @@ class SqliteStore:
             cursor = self.conn.execute(query, params)
             return [(str(row[0]), str(row[1])) for row in cursor]
 
-        return await asyncio.to_thread(_query)
+        return await self._run(_query)
 
     async def save_attestation(self, relay_pubkey: str, group: str, att_json: str, ts: int) -> None:
         def _save() -> None:
@@ -366,7 +385,7 @@ class SqliteStore:
             )
             self.conn.commit()
 
-        await asyncio.to_thread(_save)
+        await self._run(_save)
 
     async def get_last_attestation(self, relay_pubkey: str, group: str) -> str | None:
         def _get() -> str | None:
@@ -379,4 +398,4 @@ class SqliteStore:
                 return None
             return str(row[0])
 
-        return await asyncio.to_thread(_get)
+        return await self._run(_get)

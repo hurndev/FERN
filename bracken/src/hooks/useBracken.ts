@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { FernEvent, EventInput } from '../fern/events'
 import { buildEvent, verifyEvent } from '../fern/events'
 import type { Keypair } from '../fern/crypto'
@@ -8,10 +8,11 @@ import { deriveGroupState } from '../fern/state'
 import {
   getIdentity, saveIdentity, putEvent, getGroupEvents,
   getTips, putReceipt, putRelayPin, setMeta, getMeta,
-  clearLocalData,
+  clearLocalData, getGroupEventIds,
 } from '../fern/db'
 import { RelayClient, parseGroupAddress } from '../fern/relay'
-import type { Receipt } from '../fern/relay'
+import type { Attestation, Receipt } from '../fern/relay'
+import { computeSetHash, verifyAttestation } from '../fern/completeness'
 
 export interface GroupEntry {
   pubkey: string
@@ -20,7 +21,8 @@ export interface GroupEntry {
 }
 
 export interface RelayConnection {
-  client: RelayClient
+  url: string
+  client?: RelayClient
   connected: boolean
   pubkey: string
 }
@@ -32,41 +34,171 @@ export interface MessageDelivery {
   error?: string
 }
 
-async function publishToRelays(
+async function publishToRelaysWith(
   event: FernEvent,
-  relays: string[],
-): Promise<{ ok: number; total: number; error?: string }> {
-  if (relays.length === 0) {
-    return { ok: 0, total: 0, error: 'No relays configured for this group.' }
+  client: RelayClient,
+): Promise<boolean> {
+  try {
+    const receipt: Receipt = await client.publish(event)
+    await putReceipt({
+      event_id: receipt.event_id,
+      group: receipt.group,
+      relay: receipt.relay,
+      ts: receipt.ts,
+      sig: receipt.sig,
+    })
+    return true
+  } catch {
+    return false
   }
+}
 
-  const results = await Promise.all(
-    relays.map(async (url) => {
-      const client = new RelayClient(url)
+async function publishToRelaysEphemeral(
+  event: FernEvent,
+  url: string,
+): Promise<boolean> {
+  const client = new RelayClient(url)
+  try {
+    await client.connect()
+    return await publishToRelaysWith(event, client)
+  } catch {
+    return false
+  } finally {
+    await client.close()
+  }
+}
+
+async function fallbackFullSync(
+  client: RelayClient,
+  groupPubkey: string,
+): Promise<{ fetched: number; backfilled: number }> {
+  const syncEvents = await client.sync(groupPubkey)
+  let fetched = 0
+  for (const event of syncEvents) {
+    try {
+      await verifyEvent(event)
+      await putEvent(event)
+      fetched += 1
+    } catch (e) {
+      console.error('fallback sync verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
+    }
+  }
+  return { fetched, backfilled: 0 }
+}
+
+async function batchBackfill(
+  events: FernEvent[],
+  client: RelayClient,
+  batchSize = 10,
+): Promise<number> {
+  let backfilled = 0
+  for (let i = 0; i < events.length; i += batchSize) {
+    const batch = events.slice(i, i + batchSize)
+    const results = await Promise.all(batch.map(async (event) => {
       try {
-        await client.connect()
-        const receipt: Receipt = await client.publish(event)
-        await putReceipt({
-          event_id: receipt.event_id,
-          group: receipt.group,
-          relay: receipt.relay,
-          ts: receipt.ts,
-          sig: receipt.sig,
-        })
+        await client.backfill(event)
         return true
       } catch {
-        return false
-      } finally {
-        await client.close()
+        try {
+          await client.publish(event)
+          return true
+        } catch {
+          return false
+        }
       }
-    }),
-  )
+    }))
+    backfilled += results.filter(Boolean).length
+  }
+  return backfilled
+}
 
-  const ok = results.filter(Boolean).length
-  return {
-    ok,
-    total: relays.length,
-    error: ok === relays.length ? undefined : `${ok}/${relays.length} relays accepted the message.`,
+function sortForBackfill(events: FernEvent[]): FernEvent[] {
+  return [...events].sort((a, b) => {
+    if (a.type === 'genesis' && b.type !== 'genesis') return -1
+    if (a.type !== 'genesis' && b.type === 'genesis') return 1
+    return a.ts - b.ts || a.id.localeCompare(b.id)
+  })
+}
+
+async function syncDiff(
+  client: RelayClient,
+  groupPubkey: string,
+  identityPubkey: string,
+  onLockDenied?: (expiresIn: number) => void,
+): Promise<{ fetched: number; backfilled: number }> {
+  let att: Attestation
+  try {
+    att = await client.requestAttestation(groupPubkey)
+  } catch (e) {
+    if (String(e).toLowerCase().includes('group not hosted')) {
+      const localEvents = sortForBackfill(await getGroupEvents(groupPubkey))
+      return { fetched: 0, backfilled: await batchBackfill(localEvents, client) }
+    }
+    return fallbackFullSync(client, groupPubkey)
+  }
+
+  if (!verifyAttestation(att)) {
+    console.error('attestation verification failed for', client.url)
+    return fallbackFullSync(client, groupPubkey)
+  }
+
+  const localIds = await getGroupEventIds(groupPubkey)
+  const localHash = await computeSetHash(localIds)
+  if (att.set_hash === localHash) return { fetched: 0, backfilled: 0 }
+
+  try {
+    const lock = await client.syncLock(groupPubkey, identityPubkey)
+    if (!lock.granted) {
+      onLockDenied?.(lock.expiresIn ?? 30)
+      return { fetched: 0, backfilled: 0 }
+    }
+  } catch {
+    // Older relays may not support advisory locks. Relay-side dedup keeps
+    // uncoordinated backfill safe, though less efficient.
+  }
+
+  try {
+    let relayIds: Set<string>
+    try {
+      relayIds = new Set(await client.syncIds(groupPubkey))
+    } catch (e) {
+      if (String(e).toLowerCase().includes('group not hosted')) {
+        const localEvents = sortForBackfill(await getGroupEvents(groupPubkey))
+        return { fetched: 0, backfilled: await batchBackfill(localEvents, client) }
+      }
+      return fallbackFullSync(client, groupPubkey)
+    }
+
+    const latestLocalIds = await getGroupEventIds(groupPubkey)
+    const missingLocally = [...relayIds].filter((id) => !latestLocalIds.has(id))
+    const missingOnRelay = [...latestLocalIds].filter((id) => !relayIds.has(id))
+
+    let fetched = 0
+    for (const id of missingLocally) {
+      try {
+        const event = await client.get(id)
+        if (event) {
+          await verifyEvent(event)
+          await putEvent(event)
+          fetched += 1
+        }
+      } catch (e) {
+        console.error('syncDiff get failed for', id.slice(0, 16), e)
+      }
+    }
+
+    const missingSet = new Set(missingOnRelay)
+    const localEvents = sortForBackfill(
+      (await getGroupEvents(groupPubkey)).filter((event) => missingSet.has(event.id)),
+    )
+    const backfilled = await batchBackfill(localEvents, client)
+    return { fetched, backfilled }
+  } finally {
+    try {
+      await client.syncUnlock(groupPubkey, identityPubkey)
+    } catch {
+      // Best effort; the lease expires lazily if unlock fails.
+    }
   }
 }
 
@@ -76,10 +208,25 @@ export function useBracken() {
   const [activeGroup, setActiveGroup] = useState<string | null>(null)
   const [events, setEvents] = useState<FernEvent[]>([])
   const [state, setState] = useState<GroupState | null>(null)
-  const [relayConns, setRelayConns] = useState<RelayConnection[]>([])
+  const [connStates, setConnStates] = useState<RelayConnection[]>([])
   const [loading, setLoading] = useState(true)
   const [messageDeliveries, setMessageDeliveries] = useState<Record<string, MessageDelivery>>({})
   const clientsRef = useRef<Map<string, RelayClient>>(new Map())
+  const reconnectRef = useRef<((url: string) => void) | null>(null)
+  const healInFlightRef = useRef<Set<string>>(new Set())
+  const healRetryGateRef = useRef<Map<string, number>>(new Map())
+
+  // Derive the full relay list from the active group's canonical relays, merged
+  // with live connection status. This ensures all canonical relays are always
+  // shown (never hidden), even before or after connection attempts.
+  const relayConns = useMemo(() => {
+    const group = groups.find((g) => g.pubkey === activeGroup)
+    const canonical = group?.relays ?? []
+    const byUrl = new Map(connStates.map((c) => [c.url, c]))
+    return canonical.map(
+      (url) => byUrl.get(url) ?? { url, connected: false, pubkey: '' },
+    )
+  }, [groups, activeGroup, connStates])
 
   // Load identity on mount
   useEffect(() => {
@@ -125,85 +272,158 @@ export function useBracken() {
   // Subscribe to active group relays
   useEffect(() => {
     if (!activeGroup || groups.length === 0) return
-    const group = groups.find((g) => g.pubkey === activeGroup)
+    const groupPubkey = activeGroup
+    const group = groups.find((g) => g.pubkey === groupPubkey)
     if (!group) return
 
-    const newConns: RelayConnection[] = []
     const clientMap = clientsRef.current
     let cancelled = false
+    const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const healKey = (url: string) => `${url}|${groupPubkey}`
 
-    ;(async () => {
-      for (const url of group.relays) {
-        try {
-          const client = new RelayClient(url)
-          await client.connect()
-
-          try {
-            const meta = await client.fetchMetadata()
-            if (meta.pubkey) {
-              await putRelayPin(url, meta.pubkey)
-            }
-            client.relayPubkey = meta.pubkey
-          } catch {
-            // metadata fetch failed (CORS, relay down, etc.) — continue without it
-          }
-
-          if (!cancelled) {
-            client.onEvent(async (event) => {
-              try {
-                await verifyEvent(event)
-                await putEvent(event)
-                if (event.group === activeGroup) {
-                  const updated = await getGroupEvents(activeGroup)
-                  setEvents(updated)
-                  const { state: derived } = deriveGroupState(updated)
-                  setState(derived)
-                }
-              } catch (e) {
-                console.error('verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
-              }
-            })
-            await client.subscribe(activeGroup)
-
-            const syncEvents = await client.sync(activeGroup)
-            for (const event of syncEvents) {
-              try {
-                await verifyEvent(event)
-                await putEvent(event)
-              } catch (e) {
-                console.error('catch-up sync verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
-              }
-            }
-            if (syncEvents.length > 0) {
-              const updated = await getGroupEvents(activeGroup)
-              setEvents(updated)
-              const { state: derived } = deriveGroupState(updated)
-              setState(derived)
-            }
-
-            newConns.push({
-              client,
-              connected: true,
-              pubkey: client.relayPubkey,
-            })
-            clientMap.set(url, client)
-          }
-        } catch {
-          // Connection failed — skip
+    const upsertConn = (url: string, patch: Partial<RelayConnection>) => {
+      if (cancelled) return
+      setConnStates((prev) => {
+        const idx = prev.findIndex((c) => c.url === url)
+        if (idx === -1) {
+          return [...prev, { url, connected: false, pubkey: '', ...patch }]
         }
+        return prev.map((c, i) => (i === idx ? { ...c, ...patch } : c))
+      })
+    }
+
+    const scheduleReconnect = (url: string, attempt = 0) => {
+      if (cancelled) return
+      const existing = reconnectTimers.get(url)
+      if (existing) clearTimeout(existing)
+      const delay = Math.min(2000 * 2 ** attempt, 30000)
+      const timer = setTimeout(() => {
+        reconnectTimers.delete(url)
+        void setupRelay(url, attempt)
+      }, delay)
+      reconnectTimers.set(url, timer)
+    }
+
+    reconnectRef.current = (url: string) => scheduleReconnect(url, 0)
+
+    async function setupRelay(url: string, attempt = 0) {
+      if (cancelled) return
+      try {
+        const client = new RelayClient(url)
+        await client.connect()
+
+        try {
+          const meta = await client.fetchMetadata()
+          if (meta.pubkey) {
+            await putRelayPin(url, meta.pubkey)
+          }
+          client.relayPubkey = meta.pubkey
+        } catch {
+          // metadata fetch failed (CORS, relay down, etc.) — continue without it
+        }
+
+        if (cancelled) {
+          await client.close()
+          return
+        }
+
+        const refreshGroup = async () => {
+          const updated = await getGroupEvents(groupPubkey)
+          setEvents(updated)
+          const { state: derived } = deriveGroupState(updated)
+          setState(derived)
+        }
+
+        const canRetryHeal = () => {
+          const retryAt = healRetryGateRef.current.get(healKey(url))
+          return retryAt === undefined || Date.now() >= retryAt
+        }
+
+        const runHeal = async () => {
+          const key = healKey(url)
+          if (healInFlightRef.current.has(key) || !canRetryHeal()) return
+          healInFlightRef.current.add(key)
+          try {
+            const result = await syncDiff(
+              client,
+              groupPubkey,
+              identity?.publicKey ?? '0'.repeat(64),
+              (expiresIn) => {
+                healRetryGateRef.current.set(key, Date.now() + expiresIn * 1000)
+              },
+            )
+            if (result.fetched > 0 || result.backfilled > 0) {
+              healRetryGateRef.current.delete(key)
+              await refreshGroup()
+            }
+          } finally {
+            healInFlightRef.current.delete(key)
+          }
+        }
+
+        client.onClose(() => {
+          clientMap.delete(url)
+          healInFlightRef.current.delete(healKey(url))
+          healRetryGateRef.current.delete(healKey(url))
+          upsertConn(url, { connected: false, client: undefined })
+          scheduleReconnect(url)
+        })
+        client.onEvent(async (event) => {
+          try {
+            await verifyEvent(event)
+            await putEvent(event)
+            if (event.group === groupPubkey) {
+              await refreshGroup()
+            }
+          } catch (e) {
+            console.error('verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
+          }
+        })
+        client.onAttestation(async (att) => {
+          if (att.group !== groupPubkey) return
+          if (!verifyAttestation(att)) {
+            console.error('attestation push verification failed for', client.url)
+            return
+          }
+          const localHash = await computeSetHash(await getGroupEventIds(groupPubkey))
+          if (att.set_hash !== localHash) {
+            void runHeal()
+          } else {
+            healRetryGateRef.current.delete(healKey(url))
+          }
+        })
+        await client.subscribe(groupPubkey)
+
+        await runHeal()
+
+        clientMap.set(url, client)
+        upsertConn(url, { client, connected: true, pubkey: client.relayPubkey })
+      } catch {
+        upsertConn(url, { connected: false })
+        scheduleReconnect(url, attempt + 1)
       }
-      if (!cancelled) {
-        setRelayConns(newConns)
-      }
-    })()
+    }
+
+    for (const url of group.relays) {
+      void setupRelay(url)
+    }
 
     return () => {
       cancelled = true
-      for (const conn of newConns) {
-        conn.client.close()
+      reconnectRef.current = null
+      for (const timer of reconnectTimers.values()) {
+        clearTimeout(timer)
+      }
+      reconnectTimers.clear()
+      for (const client of clientMap.values()) {
+        client.close()
+      }
+      for (const url of group.relays) {
+        healInFlightRef.current.delete(healKey(url))
+        healRetryGateRef.current.delete(healKey(url))
       }
       clientMap.clear()
-      setRelayConns([])
+      setConnStates([])
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeGroup, groups.map((g) => g.relays.join(',')).join('|')])
@@ -247,6 +467,41 @@ export function useBracken() {
     [getFailedDeliveryIds],
   )
 
+  const publishToGroupRelays = useCallback(
+    async (event: FernEvent, relays: string[]): Promise<{ ok: number; total: number; error?: string }> => {
+      if (relays.length === 0) {
+        return { ok: 0, total: 0, error: 'No relays configured for this group.' }
+      }
+
+      const results = await Promise.all(
+        relays.map(async (url) => {
+          const existing = clientsRef.current.get(url)
+          if (existing && existing.isConnected) {
+            const ok = await publishToRelaysWith(event, existing)
+            if (!ok) {
+              clientsRef.current.delete(url)
+              reconnectRef.current?.(url)
+            }
+            return ok
+          }
+          const ok = await publishToRelaysEphemeral(event, url)
+          if (ok) {
+            reconnectRef.current?.(url)
+          }
+          return ok
+        }),
+      )
+
+      const ok = results.filter(Boolean).length
+      return {
+        ok,
+        total: relays.length,
+        error: ok === relays.length ? undefined : `${ok}/${relays.length} relays accepted the message.`,
+      }
+    },
+    [],
+  )
+
   const logout = useCallback(async () => {
     for (const client of clientsRef.current.values()) {
       await client.close()
@@ -258,7 +513,7 @@ export function useBracken() {
     setActiveGroup(null)
     setEvents([])
     setState(null)
-    setRelayConns([])
+    setConnStates([])
     setMessageDeliveries({})
   }, [])
 
@@ -273,15 +528,7 @@ export function useBracken() {
         try {
           const client = new RelayClient(url)
           await client.connect()
-          const syncedEvents = await client.sync(groupPubkey)
-          for (const event of syncedEvents) {
-            try {
-              await verifyEvent(event)
-              await putEvent(event)
-            } catch (e) {
-              console.error('sync verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
-            }
-          }
+          await syncDiff(client, groupPubkey, identity.publicKey)
           await client.close()
           break
         } catch {
@@ -370,10 +617,10 @@ export function useBracken() {
       setState(derived)
 
       void (async () => {
-        const result = await publishToRelays(event, group.relays)
+        const result = await publishToGroupRelays(event, group.relays)
         setMessageDeliveries((prev) => {
           const next = { ...prev }
-          if (result.total > 0 && result.ok === result.total) {
+          if (result.ok >= 1) {
             delete next[event.id]
           } else {
             next[event.id] = {
@@ -389,7 +636,7 @@ export function useBracken() {
 
       return true
     },
-    [identity, activeGroup, groups, getPublishParents],
+    [identity, activeGroup, groups, getPublishParents, publishToGroupRelays],
   )
 
   const retryMessage = useCallback(
@@ -408,10 +655,10 @@ export function useBracken() {
         },
       }))
 
-      const result = await publishToRelays(event, group.relays)
+      const result = await publishToGroupRelays(event, group.relays)
       setMessageDeliveries((prev) => {
         const next = { ...prev }
-        if (result.total > 0 && result.ok === result.total) {
+        if (result.ok >= 1) {
           delete next[event.id]
         } else {
           next[event.id] = {
@@ -424,7 +671,7 @@ export function useBracken() {
         return next
       })
     },
-    [events, groups],
+    [events, groups, publishToGroupRelays],
   )
 
   const modAction = useCallback(
@@ -494,7 +741,11 @@ export function useBracken() {
   )
 
   const createGroup = useCallback(
-    async (name: string, relayUrls: string[]): Promise<void> => {
+    async (
+      name: string,
+      relayUrls: string[],
+      options?: { description?: string; public?: boolean },
+    ): Promise<{ ok: number; total: number; error?: string }> => {
       if (!identity) throw new Error('No identity')
       const groupKeypair = generateKeypair()
       const input: EventInput = {
@@ -504,8 +755,8 @@ export function useBracken() {
         parents: [],
         content: {
           name,
-          description: '',
-          public: true,
+          description: options?.description ?? '',
+          public: options?.public ?? true,
           founder: identity.publicKey,
           mods: [identity.publicKey],
           relays: relayUrls,
@@ -516,16 +767,7 @@ export function useBracken() {
       const genesis = await buildEvent(input, identity, groupKeypair)
       await putEvent(genesis)
 
-      for (const url of relayUrls) {
-        try {
-          const client = new RelayClient(url)
-          await client.connect()
-          await client.publish(genesis)
-          await client.close()
-        } catch {
-          // best effort
-        }
-      }
+      const result = await publishToGroupRelays(genesis, relayUrls)
 
       const groupEntry: GroupEntry = {
         pubkey: groupKeypair.publicKey,
@@ -536,8 +778,10 @@ export function useBracken() {
       setGroups(updatedGroups)
       await setMeta('groups', updatedGroups)
       setActiveGroup(groupKeypair.publicKey)
+
+      return result
     },
-    [identity, groups],
+    [identity, groups, publishToGroupRelays],
   )
 
   const setNickname = useCallback(

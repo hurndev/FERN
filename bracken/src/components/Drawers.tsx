@@ -119,13 +119,13 @@ export function RelayDrawer({ relayConns, onClose }: RelayDrawerProps) {
           {relayConns.map((conn, i) => (
             <div key={i} className={styles.drawerItem}>
               <span className="mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>
-                {conn.client.url}
+                {conn.url}
               </span>
               <span
                 className={styles.drawerItemSub}
                 style={{ color: conn.connected ? 'var(--accent)' : 'var(--danger)' }}
               >
-                {conn.connected ? 'Connected' : 'Disconnected'}
+                {conn.connected ? 'Connected' : 'Not connected'}
               </span>
               {conn.pubkey && (
                 <span className="mono" style={{ fontSize: 11, color: 'var(--text-ghost)' }}>

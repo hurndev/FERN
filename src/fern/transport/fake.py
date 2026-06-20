@@ -15,7 +15,7 @@ from fern.completeness.fraud_proofs import (
 )
 from fern.crypto.keys import Keypair
 from fern.storage.memory import MemoryStore
-from fern.transport.interfaces import RelayMetadata
+from fern.transport.interfaces import RelayMetadata, SyncLockResult
 
 
 class FakeRelay:
@@ -32,6 +32,7 @@ class FakeRelay:
         self._subscribed_groups: set[str] = set()
         self._last_attestations: dict[str, Attestation] = {}
         self._publish_lock = asyncio.Lock()
+        self._sync_locks: dict[str, tuple[str, float]] = {}
 
     @property
     def url(self) -> str:
@@ -85,6 +86,19 @@ class FakeRelay:
 
             return receipt
 
+    async def backfill(self, event: Event) -> Receipt:
+        async with self._publish_lock:
+            verify_event(event)
+            await self._store.put_event(event)
+            receipt = build_receipt(
+                event=event,
+                relay_keypair=self._keypair,
+                ts=int(time.time()),
+            )
+            assert event.id is not None
+            self._receipts[(event.id, self.relay_pubkey)] = receipt
+            return receipt
+
     async def get(self, event_id: str) -> Event | None:
         if event_id in self._deleted_events:
             return None
@@ -94,6 +108,28 @@ class FakeRelay:
         async for event in self._store.iter_group_events(group):
             if since_ts is None or event.ts > since_ts:
                 yield event
+
+    async def sync_ids(self, group: str) -> list[str]:
+        return sorted(await self._store.get_known_set(group))
+
+    async def sync_lock(self, group: str, client_id: str) -> SyncLockResult:
+        now = time.time()
+        ttl = 30
+        existing = self._sync_locks.get(group)
+        if existing is not None:
+            holder, expires_at = existing
+            if expires_at > now and holder != client_id:
+                return SyncLockResult(granted=False, expires_in=max(1, int(expires_at - now)))
+            if expires_at > now:
+                return SyncLockResult(granted=True, ttl=max(1, int(expires_at - now)))
+
+        self._sync_locks[group] = (client_id, now + ttl)
+        return SyncLockResult(granted=True, ttl=ttl)
+
+    async def sync_unlock(self, group: str, client_id: str) -> None:
+        existing = self._sync_locks.get(group)
+        if existing and existing[0] == client_id:
+            del self._sync_locks[group]
 
     async def request_attestation(self, group: str) -> Attestation:
         known_set = await self._store.get_known_set(group)

@@ -29,6 +29,12 @@ export interface RelayMetadata {
   retention: string
 }
 
+export interface SyncLockResult {
+  granted: boolean
+  ttl?: number
+  expiresIn?: number
+}
+
 type EventCallback = (event: FernEvent) => void
 type AttestationCallback = (att: Attestation) => void
 
@@ -38,6 +44,7 @@ export class RelayClient {
   private ws: WebSocket | null = null
   private eventCallbacks: EventCallback[] = []
   private attestationCallbacks: AttestationCallback[] = []
+  private closeCallbacks: (() => void)[] = []
   private connected = false
 
   constructor(url: string) {
@@ -61,6 +68,7 @@ export class RelayClient {
       }
       this.ws.onclose = () => {
         this.connected = false
+        this.closeCallbacks.forEach((cb) => cb())
       }
       this.ws.onmessage = (ev) => this.handleMessage(ev)
     })
@@ -72,6 +80,7 @@ export class RelayClient {
 
   async close(): Promise<void> {
     this.connected = false
+    this.closeCallbacks = []
     if (this.ws) {
       this.ws.close()
       this.ws = null
@@ -86,6 +95,10 @@ export class RelayClient {
     this.attestationCallbacks.push(cb)
   }
 
+  onClose(cb: () => void): void {
+    this.closeCallbacks.push(cb)
+  }
+
   private handleMessage(ev: MessageEvent): void {
     let msg: Record<string, unknown>
     try {
@@ -94,45 +107,48 @@ export class RelayClient {
       return
     }
     const type = msg['type'] as string
-    if (type === 'event') {
+    const resolver =
+      this.pendingResolvers.get(type) ??
+      (type === 'error' ? [...this.pendingResolvers.values()][0] : undefined)
+    if (resolver) {
+      resolver(msg)
+    } else if (type === 'event') {
       const event = msg['event'] as FernEvent
       this.eventCallbacks.forEach((cb) => cb(event))
     } else if (type === 'attestation') {
       const att = msg['attestation'] as Attestation
       this.attestationCallbacks.forEach((cb) => cb(att))
-    } else {
-      const resolver =
-        this.pendingResolvers.get(type) ??
-        (type === 'error' ? [...this.pendingResolvers.values()][0] : undefined)
-      if (resolver) {
-        resolver(msg)
-      }
     }
   }
 
   private pendingResolvers = new Map<string, (msg: Record<string, unknown>) => void>()
 
   private async sendRequest<T>(
-    expectedType: string,
+    expectedType: string | string[],
     action: string,
     extra?: Record<string, unknown>,
     timeout = 10000,
   ): Promise<T> {
     if (!this.ws || !this.isConnected) throw new Error('Not connected')
     return new Promise<T>((resolve, reject) => {
+      const expectedTypes = Array.isArray(expectedType) ? expectedType : [expectedType]
+      const cleanup = () => {
+        for (const type of expectedTypes) this.pendingResolvers.delete(type)
+      }
       const timer = setTimeout(() => {
-        this.pendingResolvers.delete(expectedType)
-        reject(new Error(`Timeout waiting for ${expectedType}`))
+        cleanup()
+        reject(new Error(`Timeout waiting for ${expectedTypes.join(' or ')}`))
       }, timeout)
-      this.pendingResolvers.set(expectedType, (msg) => {
+      const resolver = (msg: Record<string, unknown>) => {
         clearTimeout(timer)
-        this.pendingResolvers.delete(expectedType)
+        cleanup()
         if (msg['type'] === 'error') {
           reject(new Error(msg['message'] as string))
         } else {
           resolve(msg as unknown as T)
         }
-      })
+      }
+      for (const type of expectedTypes) this.pendingResolvers.set(type, resolver)
       const payload = { action, ...extra }
       this.ws!.send(JSON.stringify(payload))
     })
@@ -157,6 +173,15 @@ export class RelayClient {
     return msg.receipt
   }
 
+  async backfill(event: FernEvent): Promise<Receipt> {
+    const msg = await this.sendRequest<{ receipt: Receipt }>(
+      'receipt',
+      'backfill',
+      { event },
+    )
+    return msg.receipt
+  }
+
   async get(eventId: string): Promise<FernEvent | null> {
     try {
       const msg = await this.sendRequest<{ event?: FernEvent }>(
@@ -174,25 +199,24 @@ export class RelayClient {
     if (!this.ws || !this.isConnected) throw new Error('Not connected')
     return new Promise((resolve, reject) => {
       const events: FernEvent[] = []
+      const cleanup = () => {
+        this.pendingResolvers.delete('event')
+        this.pendingResolvers.delete('sync_complete')
+      }
       const timer = setTimeout(() => {
+        cleanup()
         reject(new Error('Sync timeout'))
       }, 30000)
-      const handler = (ev: MessageEvent) => {
-        let msg: Record<string, unknown>
-        try {
-          msg = JSON.parse(ev.data as string)
-        } catch {
-          return
-        }
+      const resolver = (msg: Record<string, unknown>) => {
         if (msg['type'] === 'event') {
           events.push(msg['event'] as FernEvent)
         } else if (msg['type'] === 'sync_complete') {
           clearTimeout(timer)
-          this.ws?.removeEventListener('message', handler)
+          cleanup()
           resolve(events)
         } else if (msg['type'] === 'error') {
           clearTimeout(timer)
-          this.ws?.removeEventListener('message', handler)
+          cleanup()
           reject(new Error(msg['message'] as string))
         }
       }
@@ -202,11 +226,38 @@ export class RelayClient {
         reject(new Error('Not connected'))
         return
       }
-      ws.addEventListener('message', handler)
+      this.pendingResolvers.set('event', resolver)
+      this.pendingResolvers.set('sync_complete', resolver)
       const payload: Record<string, unknown> = { action: 'sync', group }
       if (sinceTs !== undefined) payload['since'] = sinceTs
       ws.send(JSON.stringify(payload))
     })
+  }
+
+  async syncIds(group: string): Promise<string[]> {
+    const msg = await this.sendRequest<{ ids?: string[] }>(
+      'ids',
+      'sync_ids',
+      { group },
+    )
+    return msg.ids ?? []
+  }
+
+  async syncLock(group: string, clientId: string): Promise<SyncLockResult> {
+    const msg = await this.sendRequest<
+      { type: string; ttl?: number; expires_in?: number }
+    >(['sync_lock_granted', 'sync_lock_denied'], 'sync_lock', {
+      group,
+      client_id: clientId,
+    })
+    if (msg.type === 'sync_lock_granted') {
+      return { granted: true, ttl: msg.ttl }
+    }
+    return { granted: false, expiresIn: msg.expires_in }
+  }
+
+  async syncUnlock(group: string, clientId: string): Promise<void> {
+    await this.sendRequest('ok', 'sync_unlock', { group, client_id: clientId })
   }
 
   async requestAttestation(group: string): Promise<Attestation> {

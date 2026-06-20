@@ -21,7 +21,7 @@ The library is in `src/fern/`. The CLI is in `cli/`. Both are installed as an ed
 
 ## 2. Thread Model
 
-**There is only one event-loop thread.** All async code runs on the same asyncio event loop. Sync pure functions are called directly from async code. `SqliteStore` uses `asyncio.to_thread()` to push blocking `sqlite3` calls off the loop. Do not add threads without a strong reason.
+**There is only one event-loop thread.** All async code runs on the same asyncio event loop. Sync pure functions are called directly from async code. `SqliteStore` exposes async methods for API consistency, but SQLite operations are executed synchronously under a store-local lock with short-lived connections. Do not add threads without a strong reason.
 
 The `WebSocketRelayClient` uses a single-reader model: a `_listen_loop` task reads all Websocket messages. Push messages go to callbacks via `asyncio.ensure_future`. Response messages go to an `asyncio.Queue` where request-response methods block until the matching response arrives.
 
@@ -114,9 +114,9 @@ Per spec § 10.4.1, the relay responds to `subscribe` with the latest attestatio
 
 The `RelayServer._handle_publish()` checks if an event is a `genesis` for an unknown group and auto-hosts it. This avoids the chicken-and-egg problem where a founder couldn't bootstrap a new group.
 
-### 3.15 SqliteStore uses `asyncio.to_thread`
+### 3.15 SqliteStore is synchronous behind an async API
 
-ALL `sqlite3` operations are wrapped in `asyncio.to_thread()`. This prevents the sync `sqlite3` calls from blocking the event loop. The `MemoryStore` doesn't need this since it's purely in-memory dict operations.
+`SqliteStore` methods are async to match the `EventStore` / `ReceiptStore` protocols, but the SQLite calls themselves run synchronously under a store-local lock. Each operation opens a short-lived SQLite connection inside that lock. Do not share a single SQLite connection across `asyncio.to_thread()` worker threads: Python's sqlite connection/thread behavior is easy to break under concurrent relay backfill.
 
 ### 3.16 WebSocket connection scheme
 
@@ -135,6 +135,16 @@ Bracken's browser relay client has a related trap: pending request resolvers mus
 ### 3.19 `FERN_HOME` env var
 
 `cli/config.py` uses `FERN_HOME` env var to override the default `~/.fern` directory. All CLI data (config + per-group SQLite caches) lives under that path. When unset, falls back to `~/.fern`. This allows running multiple isolated CLI instances on the same machine:
+
+### 3.20 Backfill vs Publish
+
+`backfill` stores an event without broadcasting. `publish` stores and broadcasts. Use `backfill` when healing or seeding a relay with historical events. Use `publish` for newly-created local events. The relay deduplicates both: if it already has the event, it returns a receipt without re-verifying, re-storing, or broadcasting.
+
+### 3.21 Sync lock is advisory and lease-based
+
+The sync lock prevents thundering herd during backfill. It is per-group, lease-based (30s TTL, lazy expiry), and advisory. Clients that do not support it can still backfill; relay-side dedup makes this safe but less efficient.
+
+CLI commands use opportunistic lock behavior: if another client holds the lock, they skip that relay and exit promptly. Bracken uses event-driven retry gates: when denied, it records `nextRetryAt` and retries on a later attestation/reconnect/manual sync trigger after the lease window.
 
 ---
 
@@ -305,6 +315,9 @@ Note: `bracken/` is a separate TypeScript SPA (Vite + React) implementing the sa
 - Empty-set `set_hash`: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
 - Suggested relay GC threshold: N=1000
 - Suggested attestation interval: 5 seconds or 100 events
+- Sync lock TTL: 30 seconds
+- Sync lock renewal interval: 60% of TTL
+- Backfill batch size: 10 concurrent events
 - Default K (relays per publish): 3 (all canonical relays)
 - Default K_min (receipts for safe ack): 2
 - `FERN_HOME` env var: overrides `~/.fern` for CLI data storage
@@ -334,6 +347,10 @@ Future namespaces: `<appname>.<type>` (e.g., `poll.vote`, `schedule.event`)
 | `publish` | Submit an event; relay validates and returns receipt |
 | `get` | Request a specific event by ID |
 | `sync` | Bulk-fetch events since a timestamp |
+| `sync_ids` | Bulk-fetch event IDs only (no event bodies) |
+| `sync_lock` | Acquire/renew per-group backfill coordination lock |
+| `sync_unlock` | Release sync lock |
+| `backfill` | Store an event without broadcasting to subscribers |
 | `attestation` | Request relay's latest attestation |
 | `submit_fraud_proof` | Submit a fraud proof for storage and gossip |
 | `query_fraud_proofs` | Query stored fraud proofs |

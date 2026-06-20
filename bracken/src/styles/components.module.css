@@ -709,6 +709,57 @@
   font-size: var(--text-sm);
 }
 
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modalField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modalTextarea {
+  width: 100%;
+  font-size: var(--text-sm);
+  resize: vertical;
+  min-height: 48px;
+}
+
+.modalHint {
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+}
+
+.modalTabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin: -4px 0 4px;
+}
+
+.modalTab {
+  padding: 8px 14px;
+  font-size: var(--text-sm);
+  color: var(--text-ghost);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.modalTab:hover:not(:disabled) {
+  color: var(--text-secondary);
+}
+.modalTab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.modalTabActive {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
 .progressLine {
   font-size: var(--text-sm);
   color: var(--text-secondary);
@@ -769,6 +820,7 @@
   font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .groupInfoValue {

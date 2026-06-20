@@ -5,7 +5,7 @@ import { Sidebar } from './components/Sidebar'
 import { MessageList } from './components/MessageList'
 import type { SlashCommand } from './components/Composer'
 import { Composer } from './components/Composer'
-import { JoinModal } from './components/JoinModal'
+import { AddGroupModal } from './components/AddGroupModal'
 import { MemberDrawer, RelayDrawer } from './components/Drawers'
 import { FernLogo } from './components/FernLogo'
 import { SettingsModal } from './components/SettingsModal'
@@ -66,7 +66,7 @@ function uniqueRelays(relays: string[]): string[] {
 
 export default function App() {
   const bracken = useBracken()
-  const [showJoin, setShowJoin] = useState(false)
+  const [showAddGroup, setShowAddGroup] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
   const [showRelays, setShowRelays] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -125,11 +125,13 @@ export default function App() {
   const activeGroupEntry = bracken.groups.find(
     (g) => g.pubkey === bracken.activeGroup,
   )
-  const relayCount = bracken.state?.relays.length ?? activeGroupEntry?.relays.length ?? 0
+  const totalRelays = bracken.relayConns.length
+    || (bracken.state?.relays.length ?? activeGroupEntry?.relays.length ?? 0)
+  const connectedRelays = bracken.relayConns.filter((c) => c.connected).length
   const relayCountClass =
-    relayCount >= 3
+    connectedRelays >= 3
       ? styles.relayCountGreen
-      : relayCount === 2
+      : connectedRelays === 2
         ? styles.relayCountAmber
         : styles.relayCountRed
   const canPost =
@@ -153,8 +155,8 @@ export default function App() {
             bracken.setActiveGroup(pk)
             setSidebarOpen(false)
           }}
-          onJoinClick={() => {
-            setShowJoin(true)
+          onAddGroupClick={() => {
+            setShowAddGroup(true)
             setSidebarOpen(false)
           }}
           onIdentityClick={() => {
@@ -192,9 +194,9 @@ export default function App() {
                 <button
                   className={`${styles.relayCountBadge} ${relayCountClass}`}
                   onClick={() => setShowRelays(true)}
-                  title={`${relayCount} canonical relay${relayCount === 1 ? '' : 's'}`}
+                  title={`${connectedRelays} of ${totalRelays} canonical relay${totalRelays === 1 ? '' : 's'} connected`}
                 >
-                  {relayCount}
+                  {connectedRelays}/{totalRelays}
                 </button>
               </div>
             </div>
@@ -274,18 +276,19 @@ export default function App() {
             <p className={styles.emptyStateTitle}>No groups yet</p>
             <button
               className={styles.primaryBtn}
-              onClick={() => setShowJoin(true)}
+              onClick={() => setShowAddGroup(true)}
             >
-              Join a group
+              Add a group
             </button>
           </div>
         )}
       </div>
 
-      {showJoin && (
-        <JoinModal
+      {showAddGroup && (
+        <AddGroupModal
           onJoin={bracken.joinGroup}
-          onClose={() => setShowJoin(false)}
+          onCreate={bracken.createGroup}
+          onClose={() => setShowAddGroup(false)}
         />
       )}
       {showMembers && bracken.state && (
