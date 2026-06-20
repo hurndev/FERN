@@ -151,7 +151,7 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
               className={styles.modalInput}
               value={address}
               onChange={(e) => setAddress(e.target.value)}
-              placeholder="fern:<pubkey>@<relay>,<relay>"
+              placeholder="fern:<pubkey>@<relay>,<relay>  or  https://bracken.example.com/?group=<pubkey>&relays="
               disabled={joinBusy}
               autoFocus
               onKeyDown={(e) => {

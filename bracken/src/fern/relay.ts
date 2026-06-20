@@ -307,7 +307,23 @@ export function parseGroupAddress(address: string): {
   groupPubkey: string
   relays: string[]
 } {
-  let addr = address
+  let addr = address.trim()
+
+  if (addr.startsWith('http://') || addr.startsWith('https://')) {
+    try {
+      const url = new URL(addr)
+      const groupPubkey = (url.searchParams.get('group') ?? '').trim()
+      const relaysParam = (url.searchParams.get('relays') ?? '').trim()
+      const relays = relaysParam
+        .split(/[\s,]+/)
+        .map((r) => r.trim())
+        .filter(Boolean)
+      return { groupPubkey, relays }
+    } catch {
+      return { groupPubkey: '', relays: [] }
+    }
+  }
+
   if (addr.startsWith('fern:')) addr = addr.slice(5)
   if (addr.includes('@')) {
     const [groupPubkey, relaysPart] = addr.split('@', 2)

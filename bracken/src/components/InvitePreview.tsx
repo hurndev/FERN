@@ -87,6 +87,15 @@ export function InvitePreview({
     }
   }
 
+  useEffect(() => {
+    if (!alreadyMember || !preview) return
+    const timer = setTimeout(() => {
+      onSwitchToGroup(pendingJoin.pubkey)
+      onCancel()
+    }, 600)
+    return () => clearTimeout(timer)
+  }, [alreadyMember, preview, pendingJoin.pubkey, onSwitchToGroup, onCancel])
+
   const showCard = preview !== null
   const showJoinActions =
     hasIdentity && !alreadyMember && loadPhase === 'preview' && joinPhase === 'idle'
@@ -179,18 +188,7 @@ export function InvitePreview({
 
         {showAlreadyMemberActions && (
           <div className={styles.inviteAlreadyMember}>
-            <p>You're already in this group.</p>
-            <div className={styles.inviteActions}>
-              <button
-                className={styles.primaryBtn}
-                onClick={() => onSwitchToGroup(pendingJoin.pubkey)}
-              >
-                Go to group
-              </button>
-              <button className={styles.secondaryBtn} onClick={onCancel}>
-                Cancel
-              </button>
-            </div>
+            <p>You're already in this group. Opening it now…</p>
           </div>
         )}
 
