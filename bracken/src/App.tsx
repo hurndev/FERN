@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { Suspense, lazy, useState, useMemo, useEffect, useCallback } from 'react'
 import { useBracken } from './hooks/useBracken'
 import { IdentitySetup } from './components/IdentitySetup'
 import { InvitePreview, type PendingJoin } from './components/InvitePreview'
@@ -17,6 +17,10 @@ import { computeConnectedEventIds } from './fern/dag'
 import type { FernEvent } from './fern/events'
 import { isValidPubkey } from './fern/utils'
 import styles from './styles/components.module.css'
+
+const DagViewer = lazy(() =>
+  import('./components/DagViewer').then((module) => ({ default: module.DagViewer })),
+)
 
 function computeNicknames(events: FernEvent[]): Map<string, string> {
   const sorted = [...events]
@@ -118,6 +122,15 @@ function pendingJoinFromLocation(): PendingJoin | null {
   return { pubkey: group, relays }
 }
 
+function dagGroupFromLocation(): string | null {
+  const match = window.location.pathname.match(/^\/dag\/([0-9a-f]{64})$/)
+  return match && isValidPubkey(match[1]) ? match[1] : null
+}
+
+function dagPath(groupPubkey: string): string {
+  return `/dag/${groupPubkey}`
+}
+
 export default function App() {
   const bracken = useBracken()
   const [showAddGroup, setShowAddGroup] = useState(false)
@@ -125,6 +138,7 @@ export default function App() {
   const [showRelays, setShowRelays] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showGroupInfo, setShowGroupInfo] = useState(false)
+  const [dagGroupPubkey, setDagGroupPubkey] = useState<string | null>(() => dagGroupFromLocation())
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [localEventIds, setLocalEventIds] = useState<Set<string>>(new Set())
   const [pendingJoin, setPendingJoin] = useState<PendingJoin | null>(() => pendingJoinFromLocation())
@@ -144,9 +158,25 @@ export default function App() {
     setPendingJoin(null)
   }, [])
 
+  const openDag = useCallback((groupPubkey: string) => {
+    window.history.pushState(null, '', dagPath(groupPubkey))
+    setDagGroupPubkey(groupPubkey)
+  }, [])
+
+  const closeDag = useCallback(() => {
+    window.history.pushState(null, '', '/')
+    setDagGroupPubkey(null)
+  }, [])
+
   useEffect(() => {
     getEventIds().then(setLocalEventIds)
   }, [bracken.events])
+
+  useEffect(() => {
+    const syncDagRoute = () => setDagGroupPubkey(dagGroupFromLocation())
+    window.addEventListener('popstate', syncDagRoute)
+    return () => window.removeEventListener('popstate', syncDagRoute)
+  }, [])
 
   useEffect(() => {
     if (!pendingJoin) return
@@ -156,6 +186,14 @@ export default function App() {
   const isAlreadyMember =
     pendingJoin !== null &&
     bracken.groups.some((g) => g.pubkey === pendingJoin.pubkey)
+  const dagGroupEntry = dagGroupPubkey
+    ? bracken.groups.find((g) => g.pubkey === dagGroupPubkey) ?? null
+    : null
+
+  useEffect(() => {
+    if (!dagGroupPubkey || !dagGroupEntry || bracken.activeGroup === dagGroupPubkey) return
+    bracken.setActiveGroup(dagGroupPubkey)
+  }, [bracken, dagGroupEntry, dagGroupPubkey])
 
   const rejectedIds = useMemo(() => {
     if (!bracken.events || bracken.events.length === 0) return new Set<string>()
@@ -208,6 +246,15 @@ export default function App() {
     )
   }
 
+  if (dagGroupPubkey && !dagGroupEntry) {
+    return (
+      <div className={styles.emptyState}>
+        <p className={styles.emptyStateTitle}>You're not in that group</p>
+        <button className={styles.secondaryBtn} onClick={closeDag}>Back to chat</button>
+      </div>
+    )
+  }
+
   if (pendingJoin) {
     return (
       <InvitePreview
@@ -237,6 +284,28 @@ export default function App() {
   const activeGroupEntry = bracken.groups.find(
     (g) => g.pubkey === bracken.activeGroup,
   )
+
+  if (dagGroupPubkey && dagGroupEntry && activeGroupEntry?.pubkey !== dagGroupPubkey) {
+    return (
+      <div className={styles.emptyState}>
+        <FernLogo size={28} />
+      </div>
+    )
+  }
+
+  if (dagGroupPubkey && dagGroupEntry && activeGroupEntry?.pubkey === dagGroupPubkey) {
+    return (
+      <Suspense fallback={<div className={styles.emptyState}><FernLogo size={28} /></div>}>
+        <DagViewer
+          groupName={bracken.state?.metadata.name || dagGroupEntry.name}
+          groupPubkey={dagGroupEntry.pubkey}
+          events={bracken.events}
+          onClose={closeDag}
+        />
+      </Suspense>
+    )
+  }
+
   const totalRelays = bracken.relayConns.length
     || (bracken.state?.relays.length ?? activeGroupEntry?.relays.length ?? 0)
   const connectedRelays = bracken.relayConns.filter((c) => c.connected).length
@@ -442,6 +511,10 @@ export default function App() {
           pubkey={activeGroupEntry.pubkey}
           description={bracken.state?.metadata.description ?? ''}
           relays={bracken.state?.relays ?? activeGroupEntry.relays}
+          onViewDag={() => {
+            setShowGroupInfo(false)
+            openDag(activeGroupEntry.pubkey)
+          }}
           onClose={() => setShowGroupInfo(false)}
         />
       )}

@@ -6,10 +6,11 @@ interface Props {
   pubkey: string
   description: string
   relays: string[]
+  onViewDag?: () => void
   onClose: () => void
 }
 
-export function GroupInfoModal({ name, pubkey, description, relays, onClose }: Props) {
+export function GroupInfoModal({ name, pubkey, description, relays, onViewDag, onClose }: Props) {
   const [copied, setCopied] = useState<string | null>(null)
 
   const inviteLink = useMemo(() => {
@@ -73,6 +74,12 @@ export function GroupInfoModal({ name, pubkey, description, relays, onClose }: P
             <span className={styles.groupInfoText}>No relay hints are configured.</span>
           )}
         </div>
+
+        {onViewDag && (
+          <button className={styles.groupInfoActionBtn} onClick={onViewDag}>
+            View DAG
+          </button>
+        )}
       </div>
     </div>
   )
