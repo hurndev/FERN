@@ -1,4 +1,4 @@
-export const MAX_EVENT_BYTES = 32 * 1024 * 1024
+export const MAX_EVENT_BYTES = 32 * 1024
 export const MAX_TYPE_BYTES = 128
 export const MAX_PARENTS = 64
 export const MAX_TAGS = 64

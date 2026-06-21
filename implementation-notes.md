@@ -309,7 +309,7 @@ Note: `bracken/` is a separate TypeScript SPA (Vite + React) implementing the sa
 
 ### 9.1 Key constants
 
-- Max event size: 64 KiB (enforced by relay, not client)
+- Max event size: 32 KiB (enforced by relay, not client)
 - Pubkey: 32 bytes → 64-char lowercase hex
 - Signature: 64 bytes → 128-char lowercase hex
 - Hash output: 32 bytes → 64-char lowercase hex

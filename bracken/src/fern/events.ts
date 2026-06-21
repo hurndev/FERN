@@ -93,7 +93,7 @@ export async function verifyEvent(event: FernEvent): Promise<void> {
     if (!EVENT_FIELDS.has(key)) throw new VerificationError(`unsigned extra field: ${key}`)
   }
   if (textEncoder.encode(JSON.stringify(event)).length > MAX_EVENT_BYTES)
-    throw new VerificationError('event exceeds 32 MiB')
+    throw new VerificationError('event exceeds 32 KiB')
   if (!event.type || typeof event.type !== 'string')
     throw new VerificationError('type must be a non-empty string')
   if (textEncoder.encode(event.type).length > MAX_TYPE_BYTES)

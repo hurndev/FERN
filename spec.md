@@ -94,7 +94,7 @@ An event is a JSON object with exactly these fields:
 | `sig` | string | 128-char lowercase hex (Ed25519 signature). MUST be a valid signature over the canonical serialisation (Section 3.4). |
 
 The complete UTF-8 JSON encoding of an event object, as received by a relay or
-client, MUST NOT exceed 32 MiB. Implementations MAY set lower local policy
+client, MUST NOT exceed 32 KiB. Implementations MAY set lower local policy
 limits, but canonical relays SHOULD advertise lower limits if they use them.
 
 ### 3.3 Canonical Serialisation
@@ -1108,7 +1108,7 @@ Anyone can run a relay for an existing group at any time: fetch the log from exi
 When a relay receives an event via `publish` or `backfill` (from a client), it MUST:
 
 1. Check the maximum event size. Relays MUST reject events whose received UTF-8
-   JSON encoding exceeds 32 MiB. Relays MAY enforce lower local policy limits.
+   JSON encoding exceeds 32 KiB. Relays MAY enforce lower local policy limits.
 2. Perform integrity validation (Section 3.5): structural validation, hash
    check, and signature check. If invalid, reject without storing.
 5. Verify the event belongs to a group the relay is hosting (i.e., the `group` field matches a known group). If not:
@@ -1866,7 +1866,7 @@ A malicious replay of a captured event by a relay (e.g., re-publishing an old ev
 
 - **Event flooding**: a malicious user could publish many events to overwhelm relays. Mitigation: relay-side admission policies (PoW, rate limits, IP limits) — out of scope of this protocol version; left to relay operators.
 - **Receipt flooding**: a relay could be forced to issue many receipts (and thus be liable for many censorship proofs). Same mitigation — relay-side admission.
-- **Large content**: a malicious user could publish events with enormous `content`. Relays MUST reject events larger than the 32 MiB protocol maximum and SHOULD enforce lower advertised local policy limits where appropriate.
+- **Large content**: a malicious user could publish events with enormous `content`. Relays MUST reject events larger than the 32 KiB protocol maximum and SHOULD enforce lower advertised local policy limits where appropriate.
 
 ### 16.6 IP Exposure
 

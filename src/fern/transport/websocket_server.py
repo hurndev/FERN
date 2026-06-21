@@ -226,7 +226,7 @@ class RelayServer:
                 try:
                     raw_size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
                     if raw_size > MAX_EVENT_BYTES:
-                        await ws.send(json.dumps({"type": "error", "message": "message exceeds 32 MiB"}))
+                        await ws.send(json.dumps({"type": "error", "message": "message exceeds 32 KiB"}))
                         continue
                     msg = json.loads(raw)
                     responses = await self._process_message(msg, ws)
