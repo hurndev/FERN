@@ -14,6 +14,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Response
 
 from fern.events.event import Event
+from fern.events.limits import MAX_EVENT_BYTES
 from fern.events.validation import verify_event
 from fern.completeness.receipts import Receipt, build_receipt
 from fern.completeness.attestations import (
@@ -55,10 +56,30 @@ def _event_to_json_dict(event: Event) -> dict:
     }
 
 
+EVENT_FIELDS = {"id", "type", "group", "author", "parents", "content", "ts", "tags", "sig"}
+
+
 def _json_to_event_dict(d: dict) -> Event:
-    parents = tuple(d.get("parents", []))
-    content = d.get("content", {})
-    tags = tuple(tuple(t) for t in d.get("tags", []))
+    if not isinstance(d, dict):
+        raise ValueError("event must be an object")
+    keys = set(d.keys())
+    if keys != EVENT_FIELDS:
+        missing = EVENT_FIELDS - keys
+        extra = keys - EVENT_FIELDS
+        if missing:
+            raise ValueError(f"event missing field: {sorted(missing)[0]}")
+        raise ValueError(f"event has unsigned extra field: {sorted(extra)[0]}")
+    if not isinstance(d["parents"], list):
+        raise ValueError("parents must be an array")
+    if not isinstance(d["content"], dict):
+        raise ValueError("content must be an object")
+    if not isinstance(d["tags"], list):
+        raise ValueError("tags must be an array")
+    if any(not isinstance(t, list) for t in d["tags"]):
+        raise ValueError("each tag must be an array")
+    parents = tuple(d["parents"])
+    content = d["content"]
+    tags = tuple(tuple(t) for t in d["tags"])
     return Event(
         type=d["type"],
         group=d["group"],
@@ -154,6 +175,7 @@ class RelayServer:
             self.host,
             self.port,
             process_request=self._handle_http_request,
+            max_size=MAX_EVENT_BYTES,
         ):
             await asyncio.get_running_loop().create_future()
 
@@ -202,6 +224,10 @@ class RelayServer:
         try:
             async for raw in ws:
                 try:
+                    raw_size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
+                    if raw_size > MAX_EVENT_BYTES:
+                        await ws.send(json.dumps({"type": "error", "message": "message exceeds 32 MiB"}))
+                        continue
                     msg = json.loads(raw)
                     responses = await self._process_message(msg, ws)
                     if responses is not None:

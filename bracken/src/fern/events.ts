@@ -1,5 +1,6 @@
 import type { Keypair } from './crypto'
 import { sign, verifySignature } from './crypto'
+import { MAX_EVENT_BYTES, MAX_PARENTS, MAX_TAG_ITEMS, MAX_TAG_STRING_BYTES, MAX_TAGS, MAX_TYPE_BYTES } from './limits'
 import { sha256Hex, isValidPubkey, isValidEventId, isValidSig } from './utils'
 
 export interface FernEvent {
@@ -78,9 +79,25 @@ export class VerificationError extends Error {
   }
 }
 
+const EVENT_FIELDS = new Set(['id', 'type', 'group', 'author', 'parents', 'content', 'ts', 'tags', 'sig'])
+const textEncoder = new TextEncoder()
+
 export async function verifyEvent(event: FernEvent): Promise<void> {
+  if (typeof event !== 'object' || event === null || Array.isArray(event))
+    throw new VerificationError('event must be an object')
+  const keys = Object.keys(event)
+  for (const field of EVENT_FIELDS) {
+    if (!keys.includes(field)) throw new VerificationError(`missing field: ${field}`)
+  }
+  for (const key of keys) {
+    if (!EVENT_FIELDS.has(key)) throw new VerificationError(`unsigned extra field: ${key}`)
+  }
+  if (textEncoder.encode(JSON.stringify(event)).length > MAX_EVENT_BYTES)
+    throw new VerificationError('event exceeds 32 MiB')
   if (!event.type || typeof event.type !== 'string')
     throw new VerificationError('type must be a non-empty string')
+  if (textEncoder.encode(event.type).length > MAX_TYPE_BYTES)
+    throw new VerificationError('type exceeds maximum length')
   if (!isValidPubkey(event.group))
     throw new VerificationError('group must be 64-char lowercase hex')
   if (!isValidPubkey(event.author))
@@ -91,7 +108,7 @@ export async function verifyEvent(event: FernEvent): Promise<void> {
     throw new VerificationError('sig must be 128-char lowercase hex')
   if (!Number.isInteger(event.ts) || event.ts <= 0)
     throw new VerificationError('ts must be a positive integer')
-  if (typeof event.content !== 'object' || event.content === null)
+  if (typeof event.content !== 'object' || event.content === null || Array.isArray(event.content))
     throw new VerificationError('content must be a JSON object')
   if (!Array.isArray(event.parents))
     throw new VerificationError('parents must be an array')
@@ -99,12 +116,30 @@ export async function verifyEvent(event: FernEvent): Promise<void> {
     throw new VerificationError('genesis must have empty parents')
   if (event.type !== 'genesis' && event.parents.length === 0)
     throw new VerificationError('non-genesis event must have at least one parent')
+  if (event.type !== 'genesis' && event.parents.length > MAX_PARENTS)
+    throw new VerificationError('too many parents')
   const uniqueParents = new Set(event.parents)
   if (uniqueParents.size !== event.parents.length)
     throw new VerificationError('parents must be unique')
   for (const p of event.parents) {
     if (!isValidEventId(p))
       throw new VerificationError(`parent '${p.slice(0, 20)}...' must be 64-char lowercase hex`)
+  }
+  if (!Array.isArray(event.tags))
+    throw new VerificationError('tags must be an array')
+  if (event.tags.length > MAX_TAGS)
+    throw new VerificationError('too many tags')
+  for (const tag of event.tags) {
+    if (!Array.isArray(tag))
+      throw new VerificationError('each tag must be an array')
+    if (tag.length > MAX_TAG_ITEMS)
+      throw new VerificationError('tag has too many elements')
+    for (const elem of tag) {
+      if (typeof elem !== 'string')
+        throw new VerificationError('each tag element must be a string')
+      if (textEncoder.encode(elem).length > MAX_TAG_STRING_BYTES)
+        throw new VerificationError('tag string exceeds maximum length')
+    }
   }
 
   const computedId = await computeId(event)

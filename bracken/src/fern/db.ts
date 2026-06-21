@@ -1,6 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import type { FernEvent } from './events'
-import { computeConnectedTips } from './dag'
+import { deriveGroupState } from './state'
 
 interface BrackenDB extends DBSchema {
   events: {
@@ -105,7 +105,16 @@ export async function getGroupEventIds(group: string): Promise<Set<string>> {
 
 export async function getTips(group: string, excludedIds: Set<string> = new Set()): Promise<string[]> {
   const events = await getGroupEvents(group)
-  return computeConnectedTips(events, excludedIds)
+  const { acceptedIds } = deriveGroupState(events)
+  const eligibleIds = new Set([...acceptedIds].filter((id) => !excludedIds.has(id)))
+  const referenced = new Set<string>()
+  for (const event of events) {
+    if (!eligibleIds.has(event.id)) continue
+    for (const parentId of event.parents) {
+      if (eligibleIds.has(parentId)) referenced.add(parentId)
+    }
+  }
+  return [...eligibleIds].filter((id) => !referenced.has(id)).sort()
 }
 
 export async function putReceipt(receipt: {

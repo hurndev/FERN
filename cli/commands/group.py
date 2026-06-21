@@ -9,7 +9,7 @@ from fern.identity.user import UserIdentity
 from fern.identity.group import GroupKeypair
 from fern.events.build import build_event
 from fern.events.types import ProtocolTypes
-from fern.state.machine import derive_group_state
+from fern.state.machine import compute_accepted_heads, derive_group_state
 from fern.storage.sqlite_store import SqliteStore
 from fern.transport.websocket_client import WebSocketRelayClient
 from fern.client.bootstrap import fetch_genesis
@@ -32,6 +32,13 @@ from typing import Any
 
 
 DEFAULT_RELAY = "ws://localhost:8765"
+
+
+async def _accepted_tips(store: SqliteStore, group_pubkey: str) -> list[str]:
+    events = []
+    async for event in store.iter_group_events(group_pubkey):
+        events.append(event)
+    return list(compute_accepted_heads(events)) if events else []
 
 
 def _get_user(config: dict[str, Any]) -> UserIdentity:
@@ -225,7 +232,7 @@ async def _join(address: str) -> None:
                 store=store,
                 client_id=user.pubkey,
             )
-            tips = await store.get_tips(group_pubkey)
+            tips = await _accepted_tips(store, group_pubkey)
         finally:
             await store.close()
 
@@ -438,7 +445,7 @@ async def _leave(group_id: str) -> None:
                 store=store,
                 client_id=user.pubkey,
             )
-            tips = await store.get_tips(group_pubkey)
+            tips = await _accepted_tips(store, group_pubkey)
         finally:
             await store.close()
 
@@ -513,7 +520,7 @@ async def _relay_update(group_id: str, urls: list[str]) -> None:
                 store=store,
                 client_id=user.pubkey,
             )
-            tips = await store.get_tips(group_pubkey)
+            tips = await _accepted_tips(store, group_pubkey)
         finally:
             await store.close()
     except Exception as e:
@@ -597,7 +604,7 @@ async def _publish_admin_event(
                 store=store,
                 client_id=user.pubkey,
             )
-            tips = await store.get_tips(group_pubkey)
+            tips = await _accepted_tips(store, group_pubkey)
         finally:
             await store.close()
     except Exception as e:
@@ -753,7 +760,7 @@ async def _nickname(group_id: str, name: str) -> None:
                 store=store,
                 client_id=user.pubkey,
             )
-            tips = await store.get_tips(group_pubkey)
+            tips = await _accepted_tips(store, group_pubkey)
         finally:
             await store.close()
     except Exception as e:

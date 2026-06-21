@@ -8,6 +8,7 @@ from fern.events.validation import (
     MalformedEventError,
     InvalidHashError,
 )
+from fern.events.limits import MAX_PARENTS, MAX_TAG_STRING_BYTES
 from fern.events.build import build_event
 from fern.events.types import ProtocolTypes, ChatTypes
 from fern.identity.user import UserIdentity
@@ -207,3 +208,33 @@ class TestVerifyEvent:
     def test_compute_id_matches(self, sample_genesis: Event) -> None:
         computed = compute_id(sample_genesis)
         assert computed == sample_genesis.id
+
+    def test_rejects_too_many_parents(self) -> None:
+        event = Event(
+            type=ChatTypes.MESSAGE,
+            group="a" * 64,
+            author="b" * 64,
+            parents=tuple(f"{i:064x}" for i in range(MAX_PARENTS + 1)),
+            content={"text": "hi", "channel": "general"},
+            ts=1000,
+            tags=(),
+            id="c" * 64,
+            sig="d" * 128,
+        )
+        with pytest.raises(MalformedEventError):
+            verify_event(event)
+
+    def test_rejects_oversized_tag_string(self) -> None:
+        event = Event(
+            type=ChatTypes.MESSAGE,
+            group="a" * 64,
+            author="b" * 64,
+            parents=("a" * 64,),
+            content={"text": "hi", "channel": "general"},
+            ts=1000,
+            tags=(("x" * (MAX_TAG_STRING_BYTES + 1),),),
+            id="c" * 64,
+            sig="d" * 128,
+        )
+        with pytest.raises(MalformedEventError):
+            verify_event(event)

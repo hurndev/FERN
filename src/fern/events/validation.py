@@ -2,6 +2,13 @@ from __future__ import annotations
 
 
 from fern.events.event import Event
+from fern.events.limits import (
+    MAX_PARENTS,
+    MAX_TAG_ITEMS,
+    MAX_TAG_STRING_BYTES,
+    MAX_TAGS,
+    MAX_TYPE_BYTES,
+)
 from fern.events.serialization import canonical_serialization, compute_id
 from fern.crypto.encoding import (
     is_valid_event_id_hex,
@@ -14,6 +21,8 @@ from fern.errors import MalformedEventError, InvalidHashError, InvalidSignatureE
 def _validate_structural(event: Event) -> None:
     if not event.type or not isinstance(event.type, str):
         raise MalformedEventError("Event type must be a non-empty string")
+    if len(event.type.encode("utf-8")) > MAX_TYPE_BYTES:
+        raise MalformedEventError("Event type exceeds maximum length")
 
     if not is_valid_pubkey_hex(event.group):
         raise MalformedEventError("group must be 64-char lowercase hex")
@@ -42,6 +51,8 @@ def _validate_structural(event: Event) -> None:
     else:
         if len(event.parents) == 0:
             raise MalformedEventError("non-genesis event must have at least one parent")
+        if len(event.parents) > MAX_PARENTS:
+            raise MalformedEventError("too many parents")
 
     unique_parents = set(event.parents)
     if len(unique_parents) != len(event.parents):
@@ -51,12 +62,19 @@ def _validate_structural(event: Event) -> None:
         if not is_valid_event_id_hex(p):
             raise MalformedEventError(f"parent '{p[:20]}...' must be 64-char lowercase hex")
 
+    if len(event.tags) > MAX_TAGS:
+        raise MalformedEventError("too many tags")
+
     for tag in event.tags:
         if not isinstance(tag, (tuple, list)):
             raise MalformedEventError("each tag must be an array")
+        if len(tag) > MAX_TAG_ITEMS:
+            raise MalformedEventError("tag has too many elements")
         for elem in tag:
             if not isinstance(elem, str):
                 raise MalformedEventError("each tag element must be a string")
+            if len(elem.encode("utf-8")) > MAX_TAG_STRING_BYTES:
+                raise MalformedEventError("tag string exceeds maximum length")
 
 
 def verify_event(event: Event) -> None:

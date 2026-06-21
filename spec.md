@@ -84,14 +84,18 @@ An event is a JSON object with exactly these fields:
 | Field | Type | Constraints |
 |---|---|---|
 | `id` | string | 64-char lowercase hex (SHA-256 output). MUST equal `compute_id(event)` (Section 3.4). |
-| `type` | string | Non-empty. See Section 4 for namespacing rules. |
+| `type` | string | Non-empty, max 128 UTF-8 bytes. See Section 4 for namespacing rules. |
 | `group` | string | 64-char lowercase hex (the group's public key). |
 | `author` | string | 64-char lowercase hex (the author's user pubkey). For `genesis` events, this is the founder's user pubkey (not the group key). |
-| `parents` | array of strings | Each element MUST be a 64-char lowercase hex event ID. For `genesis`, this array MUST be empty. For all other events, this array MUST contain at least one element. Elements MUST be unique within the array. |
+| `parents` | array of strings | Each element MUST be a 64-char lowercase hex event ID. For `genesis`, this array MUST be empty. For all other events, this array MUST contain at least one element. Elements MUST be unique within the array. Non-genesis events MUST NOT have more than 64 parents. |
 | `content` | object | MUST be a JSON object (never a bare string, number, array, or null). Schema is determined by `type`. |
 | `ts` | integer | Unix timestamp in seconds. MUST be a positive integer. |
-| `tags` | array | Reserved for protocol-level extensions. Implementations MUST set this to `[]` if unused. Each element, when present, MUST be an array of strings. See Section 3.6. |
+| `tags` | array | Reserved for protocol-level extensions. Implementations MUST set this to `[]` if unused. MUST contain at most 64 tags. Each element, when present, MUST be an array of at most 16 strings; each tag string MUST be at most 256 UTF-8 bytes. See Section 3.7. |
 | `sig` | string | 128-char lowercase hex (Ed25519 signature). MUST be a valid signature over the canonical serialisation (Section 3.4). |
+
+The complete UTF-8 JSON encoding of an event object, as received by a relay or
+client, MUST NOT exceed 32 MiB. Implementations MAY set lower local policy
+limits, but canonical relays SHOULD advertise lower limits if they use them.
 
 ### 3.3 Canonical Serialisation
 
@@ -148,9 +152,13 @@ sig = lowercase_hex( Ed25519Sign( privkey, canonical_serialisation_bytes ) )
 
 For `genesis` events, the signing key is the **group private key** (the key corresponding to the `group` field's public key). For all other events, the signing key is the **author's user private key** (the key corresponding to the `author` field's public key).
 
-### 3.5 Verification Algorithm
+### 3.5 Integrity Verification Algorithm
 
-To verify an event, an implementation MUST perform these checks in order:
+Integrity verification determines whether an object is a signed FERN event that
+may be stored and included in relay attestations. It does not determine whether
+the event is meaningful group state.
+
+To integrity-verify an event, an implementation MUST perform these checks in order:
 
 1. **Structural validation**: all fields from Section 3.2 are present and conform to their type constraints (hex length, format, etc.). If invalid, reject as `malformed`.
 
@@ -161,11 +169,36 @@ To verify an event, an implementation MUST perform these checks in order:
    - Otherwise: verify `sig` is a valid Ed25519 signature over the canonical serialisation using the public key in the `author` field.
    - If invalid, reject as `invalid_signature`.
 
-4. **Authorisation check** (state-dependent; see Section 8.5): for state-change events, verify the `author` is authorised to perform this action at this point in the DAG. If not, reject as `unauthorised` (but the event is still stored by relays — see Section 10.3).
+Events that fail structural, size, hash, or signature checks MUST NOT be stored
+by relays and MUST NOT be stored by clients. They are not FERN events.
 
-Events that fail structural or hash or signature checks MUST NOT be stored by relays or included in client state. Events that fail authorisation are stored by relays but rejected from client state (see Section 10.3).
+### 3.6 Semantic Validation
 
-### 3.6 Tags
+Semantic validation determines whether an integrity-valid event may enter the
+client's accepted DAG and affect protocol or app state. Relays MUST NOT perform
+semantic validation as part of the base relay protocol because relays cannot be
+assumed to have the full DAG history or any app-specific validators.
+
+Clients MUST semantically validate every integrity-valid event before accepting
+it. Semantic validation includes:
+
+1. **Content schema validation**: the event's `content` MUST match the schema
+   for its `type`. Protocol event schemas are defined in Section 5. Official
+   `chat.*` schemas and limits are defined in Section 6. Unknown app namespaces
+   are stored but not accepted by clients that do not understand them.
+2. **Accepted-parent validation**: `genesis` has no parents. Every non-genesis
+   event MUST have all of its parents present in the client's accepted DAG.
+   If any parent is absent, disconnected, or semantically rejected, the event is
+   stored but not accepted.
+3. **Authorisation validation**: the event author MUST be authorised at this
+   point in the accepted DAG (Section 8.5).
+
+Events that fail semantic validation MUST be retained by clients as rejected
+signed events when practical, so relay attestations and gap analysis can be
+reconciled. Rejected events MUST NOT be applied to state, rendered as ordinary
+app history, or selected as parents for future events.
+
+### 3.7 Tags
 
 The `tags` field is reserved for protocol-level extensions. As of this specification, no tag names are defined. Implementations MUST set `tags` to `[]` when constructing events and MUST preserve any tags received (for forward compatibility).
 
@@ -197,13 +230,31 @@ Other namespaces (e.g., `poll`, `schedule`, `whiteboard`) can be defined by anyo
 
 ### 4.3 Unknown Type Handling
 
-The protocol treats all events uniformly for transport, validation, and completeness — it does not interpret `content`. Implementations MUST store and transport events of unknown types. Client applications SHOULD ignore unknown types when rendering (forward compatibility).
+The relay protocol treats all integrity-valid events uniformly for transport,
+storage, and attestations; relays do not interpret `content`. Relays MUST store
+and transport integrity-valid events of unknown types.
+
+Clients that do not understand an event type MUST store the event as a rejected
+signed event when practical, but MUST NOT accept it into the accepted DAG,
+render it as ordinary app history, or select it as a parent.
 
 ---
 
 ## 5. Protocol Event Types
 
 These event types are defined by the protocol and handle group lifecycle, membership, root authority, and infrastructure. They are bare strings (no dot).
+
+Protocol event content limits:
+
+| Field kind | Limit |
+|---|---|
+| Group name / metadata `name` | 100 UTF-8 bytes, non-empty where required |
+| Group description / metadata `description` | 2000 UTF-8 bytes |
+| App profile name | 64 UTF-8 bytes, non-empty |
+| Relay URL | 2048 UTF-8 bytes, `ws://` or `wss://`; public production relays SHOULD use `wss://` |
+| Relay list | 1 to 32 URLs |
+| Admin list in genesis | 1 to 256 pubkeys |
+| Ban reason | 500 UTF-8 bytes |
 
 ### 5.1 `genesis`
 
@@ -395,7 +446,8 @@ Content schema:
 }
 ```
 
-The `relays` array MUST be non-empty. All URLs MUST use the `wss://` scheme.
+The `relays` array MUST be non-empty. All URLs MUST use the `ws://` or
+`wss://` scheme. Public production relays SHOULD use `wss://`.
 
 Authorisation: `author` MUST be an admin.
 
@@ -413,6 +465,7 @@ Content schema:
 ```
 
 Both fields are optional. Only fields present in the content are updated; absent fields are left unchanged.
+At least one of `name` or `description` MUST be present.
 
 Authorisation: `author` MUST be an admin.
 
@@ -421,6 +474,17 @@ Authorisation: `author` MUST be an admin.
 ## 6. The `chat` Namespace (Default App)
 
 These event types cover basic group chat features and are part of the protocol's default app namespace. They use the `chat.` prefix.
+
+`chat` content limits:
+
+| Field kind | Limit |
+|---|---|
+| Message text | 16,000 UTF-8 bytes, non-empty |
+| Channel ID | 128 UTF-8 bytes, non-empty |
+| Channel name | 80 UTF-8 bytes, non-empty |
+| Channel description | 500 UTF-8 bytes |
+| Nickname | 80 UTF-8 bytes, non-empty |
+| Reaction emoji/text | 64 UTF-8 bytes, non-empty |
 
 ### 6.1 `chat.message`
 
@@ -438,7 +502,7 @@ Content schema:
 
 | Field | Type | Description |
 |---|---|---|
-| `text` | string | Message text. Non-empty. |
+| `text` | string | Message text. Non-empty, max 16,000 UTF-8 bytes. |
 | `channel` | string | Stable channel ID within the group. Non-empty. For the initial general channel this is `"general"`; for channels created after genesis this is the ID of the `chat.channel_create` event. |
 | `reply_to` | string or null | Optional event ID of the message being replied to. If present, MUST be a valid event ID (64-char hex). If absent or `null`, the message is not a reply. |
 
@@ -460,7 +524,7 @@ Content schema:
 | Field | Type | Description |
 |---|---|---|
 | `target` | string | Event ID of the message being reacted to. |
-| `emoji` | string | Emoji or short text representing the reaction. Non-empty. |
+| `emoji` | string | Emoji or short text representing the reaction. Non-empty, max 64 UTF-8 bytes. |
 
 Authorisation: `author` MUST be in the `joined` set and not in the `banned` set.
 
@@ -478,7 +542,7 @@ Content schema:
 
 | Field | Type | Description |
 |---|---|---|
-| `nickname` | string | The nickname the user is asserting for themselves. Non-empty. |
+| `nickname` | string | The nickname the user is asserting for themselves. Non-empty, max 80 UTF-8 bytes. |
 
 Authorisation: `author` MUST be in the `joined` set. The nickname applies to the signing user only; the most recent `chat.nickname_set` event from a given user (in canonical linearisation order) determines their display name.
 
@@ -498,8 +562,8 @@ Content schema:
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | Channel name. Non-empty, case-sensitive, max 50 chars. Alphanumeric, hyphens, and underscores permitted. |
-| `description` | string | Optional channel description. Defaults to `""`. |
+| `name` | string | Channel name. Non-empty, case-sensitive, max 80 UTF-8 bytes. Alphanumeric, hyphens, and underscores permitted. |
+| `description` | string | Optional channel description. Defaults to `""`. Max 500 UTF-8 bytes. |
 | `position` | integer | Optional display ordering hint. Defaults to append order. |
 
 The stable channel ID for a created channel is the event ID of the
@@ -526,11 +590,12 @@ Content schema:
 | Field | Type | Description |
 |---|---|---|
 | `id` | string | Stable channel ID. Required. |
-| `name` | string | Optional replacement channel name. |
-| `description` | string | Optional replacement description. |
+| `name` | string | Optional replacement channel name. Non-empty if present, max 80 UTF-8 bytes. |
+| `description` | string | Optional replacement description. Max 500 UTF-8 bytes. |
 | `position` | integer | Optional replacement display ordering hint. |
 
 Only fields present in `content` are updated. Unknown channel IDs are ignored for app state.
+At least one of `name`, `description`, or `position` MUST be present.
 
 Authorisation: `author` MUST be an admin.
 
@@ -542,9 +607,15 @@ Content schema:
 
 ```json
 {
-  "id": "<channel id>"
+  "id":   "<channel id>",
+  "name": "general"
 }
 ```
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Stable channel ID. Required. |
+| `name` | string | Optional channel-name snapshot for display after deletion. If present, non-empty and max 80 UTF-8 bytes. |
 
 Authorisation: `author` MUST be an admin. The reserved `"general"` channel ID MUST NOT be deleted. Messages in a deleted channel remain in the DAG but are hidden from normal rendering. Clients MUST NOT delete events from storage when a channel is deleted.
 
@@ -564,6 +635,7 @@ Content schema:
 Both fields are optional. Only fields present in the content are updated.
 Clients MUST ignore channel-setting values that do not refer to an existing
 channel ID.
+At least one of `default_channel` or `system_channel` MUST be present.
 
 Authorisation: `author` MUST be an admin.
 
@@ -585,11 +657,24 @@ Rules:
 
 A **connected event** is an event in the same connected component as the group's `genesis` event: either the genesis event itself, or an event whose full parent set is already connected. Events with absent parents are **not connected** until every missing parent chain has been healed back to genesis.
 
-A **head** is a connected event that no other connected event extends. When composing an event, the author SHOULD include all current connected heads as parents (and only those heads). This pattern maximises completeness propagation while preventing orphan or locally failed events from poisoning future parent selection.
+An **accepted event** is an integrity-valid event that passes client semantic
+validation (Section 3.6). For non-genesis events, every parent MUST already be
+accepted. Events with rejected parents are not accepted even if their own
+content would otherwise be valid.
 
-Clients MUST NOT select an event as a parent unless that event is connected to genesis in the client's local store. Clients SHOULD NOT select locally-created events that have not been accepted by any canonical relay; such events remain retryable local drafts until delivery succeeds.
+A **head** is an accepted event that no other accepted event extends. When
+composing an event, the author SHOULD include all current accepted heads as
+parents (and only those heads). This pattern maximises completeness propagation
+while preventing orphan, failed, semantically invalid, or unauthorised events
+from poisoning future parent selection.
 
-Other parent-selection strategies are valid only if every selected parent is connected to genesis. Selecting disconnected parents is non-conformant.
+Clients MUST NOT select an event as a parent unless that event is accepted in
+the client's local store. Clients SHOULD NOT select locally-created events that
+have not been accepted by any canonical relay; such events remain retryable
+local drafts until delivery succeeds.
+
+Other parent-selection strategies are valid only if every selected parent is
+accepted. Selecting disconnected, rejected, or unknown parents is non-conformant.
 
 ### 7.3 Gaps
 
@@ -599,7 +684,7 @@ Gap rules:
 - Gaps are **visible**: the missing hash is known from the child's `parents`.
 - Gaps are **addressable**: a client can request the missing event by its exact ID via `get` (Section 10.4.3).
 - Gaps are **not fatal to storage**: events that depend on a gap may still be stored and used as evidence that a missing parent exists.
-- Gappy/disconnected events are **not normal history**: until connected, they MUST NOT be applied to group state, rendered as ordinary messages, or selected as parents by subsequent events.
+- Gappy/disconnected events are **not normal history**: until connected and semantically accepted, they MUST NOT be applied to group state, rendered as ordinary messages, or selected as parents by subsequent events.
 - Clients MUST NOT discard events solely because their parents are absent.
 
 ### 7.4 Gap Healing Procedure
@@ -617,7 +702,9 @@ When a client detects a missing parent ID:
 
 ### 8.1 State Model
 
-Group state is derived entirely by replaying the genesis-connected subset of the DAG in a deterministic order. Any client with the same connected event history will derive identical state.
+Group state is derived entirely by replaying the accepted subset of the DAG in
+a deterministic order. Any client with the same integrity-valid event history
+and the same semantic validators will derive identical state.
 
 The state consists of:
 
@@ -652,11 +739,15 @@ State is initialised from the `genesis` event:
 
 ### 8.3 Derivation Order
 
-Connected events are applied in **(ts, id)** order: ascending `ts`, with ties broken by lexicographic comparison of the `id` field (ascending). This is the **canonical linearisation order**.
+Accepted events are applied in **(ts, id)** order: ascending `ts`, with ties broken by lexicographic comparison of the `id` field (ascending). This is the **canonical linearisation order**.
 
 The authorisation check for an event is performed against the state *immediately before that event in canonical linearisation order* (i.e., the state resulting from applying all earlier events).
 
-Disconnected events are stored but excluded from canonical linearisation for state derivation until they become connected to genesis through gap healing.
+Disconnected events and semantically rejected events are stored but excluded
+from canonical linearisation. A disconnected event may later become accepted
+after gap healing if all of its parents become accepted and the event passes
+semantic validation. A semantically rejected event remains rejected unless the
+client's validators change in a future protocol/app version.
 
 ### 8.4 Derivation Rules
 
@@ -690,7 +781,12 @@ Before applying a state-change event, the implementation verifies:
 - For `chat.channel_create`, `chat.channel_update`, `chat.channel_delete`, and `chat.settings_update`: the `author` MUST be in the current `admins` set.
 - For other `chat.*` events: the `author` MUST be in `joined` and not in `banned` at this point.
 
-Events failing authorisation are **discarded from state** but kept in the event store (see Section 10.3). Connected unauthorised events count toward canonical linearisation for the purposes of ordering other events, but they do not modify state. Disconnected events do not enter state linearisation until connected.
+Events failing authorisation are **rejected from the accepted DAG** but kept in
+the event store (see Section 10.3). They do not modify state, do not count as
+heads, and MUST NOT be selected as parents for future events. Any event whose
+parent set includes a rejected event is also rejected from the accepted DAG.
+Disconnected events do not enter state linearisation until connected and
+semantically accepted.
 
 **Note on founder demotion:** The founder is the initial admin (set in `genesis.content.admins`), but has no special authority beyond that. A founder can demote themselves via `admin_remove` (transferring sole control to the remaining admins), and other admins can demote the founder. This is intentional: the group is governed by its current admin set, not by an irrevocable founder. Groups that wish to preserve founder authority can maintain an out-of-band social agreement, but the protocol does not enforce it.
 
@@ -1011,19 +1107,33 @@ Anyone can run a relay for an existing group at any time: fetch the log from exi
 
 When a relay receives an event via `publish` or `backfill` (from a client), it MUST:
 
-1. Perform structural validation (Section 3.2). If invalid, reject without storing.
-2. Check the maximum event size. Relays SHOULD reject events whose serialised size exceeds 64 KiB. (This protects against DoS via oversized events; see Section 16.5.)
-3. Compute `id` and verify it matches. If not, reject.
-4. Verify the signature (Section 3.5 step 3). If invalid, reject.
+1. Check the maximum event size. Relays MUST reject events whose received UTF-8
+   JSON encoding exceeds 32 MiB. Relays MAY enforce lower local policy limits.
+2. Perform integrity validation (Section 3.5): structural validation, hash
+   check, and signature check. If invalid, reject without storing.
 5. Verify the event belongs to a group the relay is hosting (i.e., the `group` field matches a known group). If not:
-   - If the event is a valid `genesis` event (type is `genesis`, signature verifies against `group` field, all content fields present and valid), the relay SHOULD auto-host the group, subject to the relay operator's configured policy (Section 10.3.1). If auto-hosting is enabled and policy allows, the relay begins hosting the group and proceeds to step 6. Otherwise, reject.
+   - If the event is an integrity-valid `genesis` event (type is `genesis` and
+     signature verifies against the `group` field), the relay SHOULD auto-host
+     the group, subject to the relay operator's configured policy
+     (Section 10.3.1). If auto-hosting is enabled and policy allows, the relay
+     begins hosting the group and proceeds to step 6. Otherwise, reject.
    - For non-`genesis` events, reject.
 6. Store the event.
 7. Return a receipt to the publishing client. For `publish` actions, also
    broadcast the event to subscribed clients (Section 10.4.2). For `backfill`
    actions, do NOT broadcast (Section 10.4.12).
 
-Relays MUST store events regardless of whether they hold the parent events. Relays MUST store events regardless of authorisation (i.e., a non-admin attempting a `kick` is stored, even though clients will reject it). Only structural and signature checks gate storage.
+Relays MUST store integrity-valid events regardless of whether they hold the
+parent events. Relays MUST store integrity-valid events regardless of semantic
+validity or authorisation (i.e., a non-admin attempting a `kick` is stored, even
+though clients will reject it). Only resource policy and integrity checks gate
+storage in the base relay protocol.
+
+Relays MUST NOT be required to validate protocol content schemas, app content
+schemas, authorisation, connectedness, channel existence, or other semantic
+state. Relays cannot be assumed to have the full DAG history and are not app
+servers. App-aware relays MAY enforce additional advertised local policy, but
+clients MUST NOT depend on relay-side semantic validation.
 
 Relays SHOULD check whether an event is already stored before performing
 expensive signature verification. If the event is already stored, the relay
@@ -1756,7 +1866,7 @@ A malicious replay of a captured event by a relay (e.g., re-publishing an old ev
 
 - **Event flooding**: a malicious user could publish many events to overwhelm relays. Mitigation: relay-side admission policies (PoW, rate limits, IP limits) — out of scope of this protocol version; left to relay operators.
 - **Receipt flooding**: a relay could be forced to issue many receipts (and thus be liable for many censorship proofs). Same mitigation — relay-side admission.
-- **Large content**: a malicious user could publish events with enormous `content`. Relays SHOULD enforce a maximum event size (suggested: 64 KiB) and reject larger events.
+- **Large content**: a malicious user could publish events with enormous `content`. Relays MUST reject events larger than the 32 MiB protocol maximum and SHOULD enforce lower advertised local policy limits where appropriate.
 
 ### 16.6 IP Exposure
 

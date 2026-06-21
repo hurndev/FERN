@@ -1,5 +1,6 @@
 
 from fern.events.event import Event
+from fern.events.limits import MAX_CHANNEL_NAME_BYTES
 from fern.events.types import ProtocolTypes
 from fern.state.machine import derive_group_state
 
@@ -195,3 +196,43 @@ class TestGroupState:
         )
         state, rejected = derive_group_state([genesis, update])
         assert state.metadata["name"] == "New Name"
+
+    def test_semantically_invalid_event_is_rejected(self) -> None:
+        genesis = make_genesis("0" * 64, "f" * 64)
+        bad = make_event(
+            "chat.channel_create",
+            "f" * 64,
+            "0" * 64,
+            ts=2,
+            content={"name": "x" * (MAX_CHANNEL_NAME_BYTES + 1)},
+            event_id="b" * 64,
+        )
+
+        state, rejected = derive_group_state([genesis, bad])
+
+        assert "b" * 64 not in state.channels
+        assert [event.id for event in rejected] == ["b" * 64]
+
+    def test_descendant_of_rejected_event_is_rejected(self) -> None:
+        genesis = make_genesis("0" * 64, "f" * 64)
+        bad = make_event(
+            "chat.channel_create",
+            "f" * 64,
+            "0" * 64,
+            ts=2,
+            content={"name": "x" * (MAX_CHANNEL_NAME_BYTES + 1)},
+            event_id="b" * 64,
+        )
+        child = make_event(
+            "chat.message",
+            "f" * 64,
+            "0" * 64,
+            ts=3,
+            content={"text": "hello", "channel": "general"},
+            parents=("b" * 64,),
+            event_id="c" * 64,
+        )
+
+        _state, rejected = derive_group_state([genesis, bad, child])
+
+        assert [event.id for event in rejected] == ["b" * 64, "c" * 64]

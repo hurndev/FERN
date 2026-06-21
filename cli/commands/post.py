@@ -8,7 +8,7 @@ import click
 from fern.identity.user import UserIdentity
 from fern.chat.messages import build_chat_message
 from fern.storage.sqlite_store import SqliteStore
-from fern.state.machine import derive_group_state
+from fern.state.machine import compute_accepted_heads, derive_group_state
 from cli.sync import sync_group_from_transports
 from cli.config import (
     load_config,
@@ -71,7 +71,7 @@ async def _post(channel: str, reply_to: str | None, group_id: str, text: str) ->
                 print_error("You are banned from this group.")
                 return
 
-        tips = await store.get_tips(group_pubkey)
+        tips = list(compute_accepted_heads(events)) if events else []
     finally:
         await store.close()
 

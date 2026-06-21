@@ -13,7 +13,6 @@ import { SettingsModal } from './components/SettingsModal'
 import { GroupInfoModal } from './components/GroupInfoModal'
 import { getEventIds } from './fern/db'
 import { deriveGroupState } from './fern/state'
-import { computeConnectedEventIds } from './fern/dag'
 import type { FernEvent } from './fern/events'
 import { isValidPubkey } from './fern/utils'
 import styles from './styles/components.module.css'
@@ -201,18 +200,19 @@ export default function App() {
     return new Set(rejected.map((e) => e.id))
   }, [bracken.events])
 
-  const connectedEventIds = useMemo(() => {
-    return computeConnectedEventIds(bracken.events)
+  const acceptedEventIds = useMemo(() => {
+    if (!bracken.events || bracken.events.length === 0) return new Set<string>()
+    return deriveGroupState(bracken.events).acceptedIds
   }, [bracken.events])
 
   const nicknames = useMemo(() => {
     if (!bracken.events) return new Map<string, string>()
-    return computeNicknames(bracken.events.filter((event) => connectedEventIds.has(event.id)))
-  }, [bracken.events, connectedEventIds])
+    return computeNicknames(bracken.events.filter((event) => acceptedEventIds.has(event.id)))
+  }, [bracken.events, acceptedEventIds])
 
   const channelNames = useMemo(() => {
-    return computeChannelNames(bracken.events.filter((event) => connectedEventIds.has(event.id)))
-  }, [bracken.events, connectedEventIds])
+    return computeChannelNames(bracken.events.filter((event) => acceptedEventIds.has(event.id)))
+  }, [bracken.events, acceptedEventIds])
 
   const admins = useMemo(() => {
     return bracken.state?.admins ?? new Set<string>()
@@ -393,7 +393,7 @@ export default function App() {
             <MessageList
               events={bracken.events}
               rejectedIds={rejectedIds}
-              connectedEventIds={connectedEventIds}
+              connectedEventIds={acceptedEventIds}
               localEventIds={localEventIds}
               admins={admins}
               joined={joinedSet}

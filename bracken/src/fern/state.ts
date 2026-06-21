@@ -1,5 +1,5 @@
 import type { FernEvent } from './events'
-import { filterConnectedEvents } from './dag'
+import { validateEventSemantics } from './semantic'
 
 export interface BanEntry {
   until: number | null
@@ -214,36 +214,70 @@ function applyEvent(state: GroupState, event: FernEvent): GroupState {
   }
 }
 
+function validateStateDependentSemantics(state: GroupState, event: FernEvent): void {
+  if (event.type === 'chat.message' && !state.channels.has(event.content['channel'] as string)) {
+    throw new Error('message channel does not exist')
+  }
+  if (
+    event.type === 'chat.channel_create' &&
+    [...state.channels.values()].some((channel) => channel.name === event.content['name'])
+  ) {
+    throw new Error('channel name already exists')
+  }
+}
+
 export function deriveGroupState(events: FernEvent[]): {
   state: GroupState | null
   rejected: FernEvent[]
+  acceptedIds: Set<string>
   genesis: FernEvent | null
 } {
-  const connectedEvents = filterConnectedEvents(events)
-  const genesisEvents = connectedEvents.filter((e) => e.type === 'genesis')
-  if (genesisEvents.length === 0) {
-    return { state: null, rejected: [], genesis: null }
+  const rejected: FernEvent[] = []
+  const genesisEvents = events.filter((e) => e.type === 'genesis' && e.parents.length === 0)
+  let genesis: FernEvent | null = null
+  for (const event of genesisEvents) {
+    try {
+      validateEventSemantics(event)
+      genesis = event
+      break
+    } catch {
+      rejected.push(event)
+    }
   }
-  const genesis = genesisEvents[0]
+  if (!genesis) {
+    return { state: null, rejected, acceptedIds: new Set(), genesis: null }
+  }
   let state = initialiseFromGenesis(genesis)
+  const acceptedIds = new Set<string>([genesis.id])
 
-  const nonGenesis = connectedEvents
+  const nonGenesis = events
     .filter((e) => e.type !== 'genesis')
     .sort((a, b) => {
       if (a.ts !== b.ts) return a.ts - b.ts
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     })
 
-  const rejected: FernEvent[] = []
   for (const event of nonGenesis) {
+    if (!event.parents.every((parent) => acceptedIds.has(parent))) {
+      rejected.push(event)
+      continue
+    }
+    try {
+      validateEventSemantics(event)
+      validateStateDependentSemantics(state, event)
+    } catch {
+      rejected.push(event)
+      continue
+    }
     if (!isAuthorised(state, event)) {
       rejected.push(event)
       continue
     }
     state = applyEvent(state, event)
+    acceptedIds.add(event.id)
   }
 
-  return { state, rejected, genesis }
+  return { state, rejected, acceptedIds, genesis }
 }
 
 export { isBannedAt, isAuthorised, PROTOCOL_TYPES }

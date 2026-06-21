@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from fern.events.semantic import SemanticValidationError, validate_event_semantics
 from fern.events.event import Event
 from fern.events.types import ChatTypes, ProtocolTypes
 from fern.state.authorization import is_authorised
@@ -161,15 +162,30 @@ def apply_event(state: GroupState, event: Event) -> GroupState:
     )
 
 
-def derive_group_state(events: Iterable[Event]) -> tuple[GroupState, list[Event]]:
+def _validate_state_dependent_semantics(state: GroupState, event: Event) -> None:
+    c = event.content
+    if event.type == ChatTypes.MESSAGE and c["channel"] not in state.channels:
+        raise SemanticValidationError("message channel does not exist")
+    if event.type == ChatTypes.CHANNEL_CREATE and any(
+        channel.name == c["name"] for channel in state.channels.values()
+    ):
+        raise SemanticValidationError("channel name already exists")
+
+
+def derive_group_state_details(events: Iterable[Event]) -> tuple[GroupState, list[Event], frozenset[str]]:
     event_list = list(events)
 
     genesis_events = [e for e in event_list if e.type == ProtocolTypes.GENESIS]
     if not genesis_events:
         raise ValueError("No genesis event found in event list")
     genesis = genesis_events[0]
+    try:
+        validate_event_semantics(genesis)
+    except SemanticValidationError as exc:
+        raise ValueError(f"Invalid genesis event: {exc}") from exc
 
     state = _initialise_from_genesis(genesis)
+    accepted_ids = {genesis.id} if genesis.id else set()
 
     non_genesis = [e for e in event_list if e.type != ProtocolTypes.GENESIS]
     non_genesis.sort(key=lambda e: (e.ts, e.id))
@@ -177,9 +193,38 @@ def derive_group_state(events: Iterable[Event]) -> tuple[GroupState, list[Event]
     rejected: list[Event] = []
 
     for event in non_genesis:
+        if any(parent not in accepted_ids for parent in event.parents):
+            rejected.append(event)
+            continue
+        try:
+            validate_event_semantics(event)
+            _validate_state_dependent_semantics(state, event)
+        except SemanticValidationError:
+            rejected.append(event)
+            continue
         if not is_authorised(state, event):
             rejected.append(event)
             continue
         state = apply_event(state, event)
+        if event.id:
+            accepted_ids.add(event.id)
 
+    return state, rejected, frozenset(accepted_ids)
+
+
+def derive_group_state(events: Iterable[Event]) -> tuple[GroupState, list[Event]]:
+    state, rejected, _accepted_ids = derive_group_state_details(events)
     return state, rejected
+
+
+def compute_accepted_heads(events: Iterable[Event]) -> frozenset[str]:
+    event_list = list(events)
+    _state, _rejected, accepted_ids = derive_group_state_details(event_list)
+    referenced: set[str] = set()
+    for event in event_list:
+        if event.id not in accepted_ids:
+            continue
+        for parent in event.parents:
+            if parent in accepted_ids:
+                referenced.add(parent)
+    return frozenset(accepted_ids - referenced)
