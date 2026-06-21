@@ -15,6 +15,7 @@ import { getEventIds } from './fern/db'
 import { deriveGroupState } from './fern/state'
 import type { FernEvent } from './fern/events'
 import { isValidPubkey } from './fern/utils'
+import { useDefiniteOverlayClick } from './hooks/useDefiniteOverlayClick'
 import styles from './styles/components.module.css'
 
 const DagViewer = lazy(() =>
@@ -137,11 +138,13 @@ export default function App() {
   const [showRelays, setShowRelays] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showGroupInfo, setShowGroupInfo] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
   const [dagGroupPubkey, setDagGroupPubkey] = useState<string | null>(() => dagGroupFromLocation())
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [localEventIds, setLocalEventIds] = useState<Set<string>>(new Set())
   const [pendingJoin, setPendingJoin] = useState<PendingJoin | null>(() => pendingJoinFromLocation())
   const [modalInitial, setModalInitial] = useState<{ address?: string; error?: string | null } | null>(null)
+  const helpOverlayHandlers = useDefiniteOverlayClick(() => setShowHelp(false))
 
   const openAddGroup = useCallback((initial?: { address?: string; error?: string | null }) => {
     setModalInitial(initial ?? null)
@@ -342,6 +345,11 @@ export default function App() {
             setSelectedChannels((prev) => ({ ...prev, [groupPubkey]: channelId }))
             setSidebarOpen(false)
           }}
+          onGroupInfoClick={(pk) => {
+            bracken.setActiveGroup(pk)
+            setShowGroupInfo(true)
+            setSidebarOpen(false)
+          }}
           onAddGroupClick={() => {
             openAddGroup()
             setSidebarOpen(false)
@@ -350,6 +358,7 @@ export default function App() {
             setShowSettings(true)
             setSidebarOpen(false)
           }}
+          onHelpClick={() => setShowHelp(true)}
         />
       </div>
 
@@ -515,6 +524,10 @@ export default function App() {
             setShowGroupInfo(false)
             openDag(activeGroupEntry.pubkey)
           }}
+          onLeaveGroup={async () => {
+            await bracken.leaveGroup(activeGroupEntry.pubkey)
+            setShowGroupInfo(false)
+          }}
           onClose={() => setShowGroupInfo(false)}
         />
       )}
@@ -527,6 +540,36 @@ export default function App() {
           onSetNickname={bracken.setNickname}
           onLogout={bracken.logout}
         />
+      )}
+      {showHelp && (
+        <div className={styles.modalOverlay} {...helpOverlayHandlers}>
+          <div className={styles.helpModal}>
+            <div className={styles.groupInfoHeader}>
+              <div>
+                <div className={styles.groupInfoTitle}>Bracken</div>
+                <div className={styles.groupInfoSubtitle}>Alpha version</div>
+              </div>
+              <button className={styles.drawerClose} onClick={() => setShowHelp(false)}>✕</button>
+            </div>
+            <p>
+              Bracken is a group messaging app built on the FERN protocol. It
+              supports decentralized, censorship-resistant communication by
+              syncing signed group events across many relay servers.
+            </p>
+            <p>
+              Everything runs client-side: identity keys, message verification,
+              group state, and event validation happen in your browser.
+            </p>
+            <a
+              className={styles.helpLink}
+              href="https://github.com/hurndev/FERN"
+              target="_blank"
+              rel="noreferrer"
+            >
+              GitHub
+            </a>
+          </div>
+        </div>
       )}
     </div>
   )

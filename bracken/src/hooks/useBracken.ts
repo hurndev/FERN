@@ -519,6 +519,57 @@ export function useBracken() {
     setMessageDeliveries({})
   }, [])
 
+  const removeGroupEntry = useCallback(
+    async (groupPubkey: string) => {
+      const updatedGroups = groups.filter((g) => g.pubkey !== groupPubkey)
+      setGroups(updatedGroups)
+      await setMeta('groups', updatedGroups)
+      if (activeGroup === groupPubkey) {
+        const nextActive = updatedGroups[0]?.pubkey ?? null
+        setActiveGroup(nextActive)
+        if (!nextActive) {
+          setEvents([])
+          setState(null)
+          setConnStates([])
+        }
+      }
+    },
+    [activeGroup, groups],
+  )
+
+  const leaveGroup = useCallback(
+    async (groupPubkey: string): Promise<void> => {
+      if (!identity) return
+      const group = groups.find((g) => g.pubkey === groupPubkey)
+      if (!group) return
+
+      const groupEvents = await getGroupEvents(groupPubkey)
+      const { state: derived } = deriveGroupState(groupEvents)
+      const isMember = derived?.joined.has(identity.publicKey) ?? false
+
+      if (isMember) {
+        const parents = await getPublishParents(groupPubkey)
+        if (parents.length > 0) {
+          const input: EventInput = {
+            type: 'leave',
+            group: groupPubkey,
+            author: identity.publicKey,
+            parents,
+            content: {},
+            ts: Math.floor(Date.now() / 1000),
+            tags: [],
+          }
+          const event = await buildEvent(input, identity)
+          await putEvent(event)
+          await publishToGroupRelays(event, group.relays)
+        }
+      }
+
+      await removeGroupEntry(groupPubkey)
+    },
+    [identity, groups, getPublishParents, publishToGroupRelays, removeGroupEntry],
+  )
+
   const joinGroup = useCallback(
     async (address: string) => {
       if (!identity) throw new Error('No identity')
@@ -867,5 +918,6 @@ export function useBracken() {
     createGroup,
     adminAction,
     setNickname,
+    leaveGroup,
   }
 }

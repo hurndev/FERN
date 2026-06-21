@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { DEFAULT_RELAY_HINTS } from '../fern/config'
+import { useDefiniteOverlayClick } from '../hooks/useDefiniteOverlayClick'
 import styles from '../styles/components.module.css'
 
 interface Props {
@@ -35,6 +36,7 @@ function parseRelays(input: string): string[] {
 }
 
 export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initialError }: Props) {
+  const overlayHandlers = useDefiniteOverlayClick(onClose)
   const [mode, setMode] = useState<'join' | 'create'>('join')
 
   const [address, setAddress] = useState(initialAddress ?? '')
@@ -126,8 +128,8 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
   }
 
   return (
-    <div className={styles.modalOverlay} onClick={onClose}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div className={styles.modalOverlay} {...overlayHandlers}>
+      <div className={styles.modal}>
         <div className={styles.modalHeader}>
           <div className={styles.modalTitle}>Add a group</div>
           <button className={styles.drawerClose} onClick={onClose}>✕</button>

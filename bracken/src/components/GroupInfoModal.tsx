@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useDefiniteOverlayClick } from '../hooks/useDefiniteOverlayClick'
 import styles from '../styles/components.module.css'
 
 interface Props {
@@ -7,11 +8,14 @@ interface Props {
   description: string
   relays: string[]
   onViewDag?: () => void
+  onLeaveGroup?: () => Promise<void> | void
   onClose: () => void
 }
 
-export function GroupInfoModal({ name, pubkey, description, relays, onViewDag, onClose }: Props) {
+export function GroupInfoModal({ name, pubkey, description, relays, onViewDag, onLeaveGroup, onClose }: Props) {
   const [copied, setCopied] = useState<string | null>(null)
+  const [leaving, setLeaving] = useState(false)
+  const overlayHandlers = useDefiniteOverlayClick(onClose)
 
   const inviteLink = useMemo(() => {
     const relayQuery = relays.length > 0 ? `&relays=${relays.join(',')}` : ''
@@ -25,8 +29,8 @@ export function GroupInfoModal({ name, pubkey, description, relays, onViewDag, o
   }
 
   return (
-    <div className={styles.modalOverlay} onClick={onClose}>
-      <div className={styles.groupInfoModal} onClick={(e) => e.stopPropagation()}>
+    <div className={styles.modalOverlay} {...overlayHandlers}>
+      <div className={styles.groupInfoModal}>
         <div className={styles.groupInfoHeader}>
           <div>
             <div className={styles.groupInfoTitle}>{name}</div>
@@ -78,6 +82,23 @@ export function GroupInfoModal({ name, pubkey, description, relays, onViewDag, o
         {onViewDag && (
           <button className={styles.groupInfoActionBtn} onClick={onViewDag}>
             View DAG
+          </button>
+        )}
+
+        {onLeaveGroup && (
+          <button
+            className={styles.dangerBtn}
+            disabled={leaving}
+            onClick={async () => {
+              setLeaving(true)
+              try {
+                await onLeaveGroup()
+              } finally {
+                setLeaving(false)
+              }
+            }}
+          >
+            {leaving ? 'Leaving...' : 'Leave group'}
           </button>
         )}
       </div>

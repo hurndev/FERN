@@ -14,8 +14,10 @@ interface Props {
   selectedChannel: string
   onSelectGroup: (pubkey: string) => void
   onSelectChannel: (channelId: string, groupPubkey: string) => void
+  onGroupInfoClick: (pubkey: string) => void
   onAddGroupClick: () => void
   onIdentityClick: () => void
+  onHelpClick: () => void
 }
 
 export function Sidebar({
@@ -27,8 +29,10 @@ export function Sidebar({
   selectedChannel,
   onSelectGroup,
   onSelectChannel,
+  onGroupInfoClick,
   onAddGroupClick,
   onIdentityClick,
+  onHelpClick,
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(
     new Set(activeGroup ? [activeGroup] : []),
@@ -57,6 +61,7 @@ export function Sidebar({
       <div className={styles.sidebarHeader}>
         <FernLogo size={20} />
         <span>Bracken</span>
+        <span className={styles.alphaMark} title="alpha version">α</span>
       </div>
 
       <div className={styles.groupList}>
@@ -78,7 +83,17 @@ export function Sidebar({
                 >
                   ▸
                 </span>
-                {group.name}
+                <span className={styles.groupNameText}>{group.name}</span>
+                <button
+                  className={styles.groupInfoIconBtn}
+                  title="Group information"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onGroupInfoClick(group.pubkey)
+                  }}
+                >
+                  ⚙
+                </button>
               </div>
               {isExpanded &&
                 activeGroup === group.pubkey &&
@@ -106,9 +121,14 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className={styles.identityRow} onClick={onIdentityClick} style={{ cursor: 'pointer' }}>
-        <div className={`${styles.connDot} ${dotClass}`} />
-        <span className="mono">{truncateId(identityPubkey)}</span>
+      <div className={styles.sidebarFooter}>
+        <div className={styles.identityRow} onClick={onIdentityClick}>
+          <div className={`${styles.connDot} ${dotClass}`} />
+          <span className="mono">{truncateId(identityPubkey)}</span>
+        </div>
+        <button className={styles.helpBtn} onClick={onHelpClick} title="Help">
+          ?
+        </button>
       </div>
     </div>
   )

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Avatar } from './Avatar'
+import { useDefiniteOverlayClick } from '../hooks/useDefiniteOverlayClick'
 import styles from '../styles/components.module.css'
 
 interface Props {
@@ -19,6 +20,7 @@ export function SettingsModal({
   onSetNickname,
   onLogout,
 }: Props) {
+  const overlayHandlers = useDefiniteOverlayClick(onClose)
   const [copied, setCopied] = useState(false)
   const [privateKeyCopied, setPrivateKeyCopied] = useState(false)
   const [nickname, setNickname] = useState(currentNickname ?? '')
@@ -66,8 +68,8 @@ export function SettingsModal({
   }
 
   return (
-    <div className={styles.profileOverlay} onClick={onClose}>
-      <div className={styles.profileModal} onClick={(e) => e.stopPropagation()}>
+    <div className={styles.profileOverlay} {...overlayHandlers}>
+      <div className={styles.profileModal}>
         <button className={styles.profileClose} onClick={onClose}>✕</button>
         <div className={styles.profileHeader}>
           <div className={styles.profileAvatar}>

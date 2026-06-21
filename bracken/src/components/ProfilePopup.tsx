@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { truncateId } from '../fern/utils'
 import { Avatar } from './Avatar'
+import { useDefiniteOverlayClick } from '../hooks/useDefiniteOverlayClick'
 import styles from '../styles/components.module.css'
 
 interface Props {
@@ -20,6 +21,7 @@ export function ProfilePopup({
   viewerIsAdmin = false, viewerPubkey = '',
   onClose, onAdminAction,
 }: Props) {
+  const overlayHandlers = useDefiniteOverlayClick(onClose)
   const [copied, setCopied] = useState(false)
   const [acting, setActing] = useState(false)
 
@@ -53,8 +55,8 @@ export function ProfilePopup({
   const showAdminActions = viewerIsAdmin && !isSelf
 
   return (
-    <div className={styles.profileOverlay} onClick={onClose}>
-      <div className={styles.profileModal} onClick={(e) => e.stopPropagation()}>
+    <div className={styles.profileOverlay} {...overlayHandlers}>
+      <div className={styles.profileModal}>
         <button className={styles.profileClose} onClick={onClose}>✕</button>
         <div className={styles.profileHeader}>
           <div className={styles.profileAvatar}>
@@ -63,7 +65,7 @@ export function ProfilePopup({
           <div className={styles.profileIdentity}>
             <div className={styles.profileName + (isAdmin && isMember ? ' ' + styles.profileNameMod : '')}>
               {nickname ?? truncateId(pubkey)}
-              {isAdmin && isMember && <span className={styles.memberModTag}> (Admin)</span>}
+              {isSelf && <span className={styles.memberModTag}> (You)</span>}
             </div>
             <div className={styles.profileRole}>
               {isMember ? (isAdmin ? 'Admin' : 'Member') : 'Not in group'}
