@@ -209,6 +209,7 @@ export function useBracken() {
   const [events, setEvents] = useState<FernEvent[]>([])
   const [state, setState] = useState<GroupState | null>(null)
   const [connStates, setConnStates] = useState<RelayConnection[]>([])
+  const [defaultNickname, setDefaultNicknameState] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [messageDeliveries, setMessageDeliveries] = useState<Record<string, MessageDelivery>>({})
   const clientsRef = useRef<Map<string, RelayClient>>(new Map())
@@ -236,7 +237,9 @@ export function useBracken() {
         setIdentity(keypairFromSeed(stored.seed))
       }
       const savedGroups = (await getMeta<GroupEntry[]>('groups')) ?? []
+      const savedDefaultNickname = (await getMeta<string>('defaultNickname')) ?? null
       setGroups(savedGroups)
+      setDefaultNicknameState(savedDefaultNickname)
       if (savedGroups.length > 0) {
         setActiveGroup(savedGroups[0].pubkey)
       }
@@ -514,9 +517,16 @@ export function useBracken() {
     setGroups([])
     setActiveGroup(null)
     setEvents([])
-    setState(null)
-    setConnStates([])
-    setMessageDeliveries({})
+      setState(null)
+      setConnStates([])
+      setDefaultNicknameState(null)
+      setMessageDeliveries({})
+  }, [])
+
+  const setDefaultNickname = useCallback(async (name: string | null) => {
+    const normalized = name?.trim() || null
+    setDefaultNicknameState(normalized)
+    await setMeta('defaultNickname', normalized)
   }, [])
 
   const removeGroupEntry = useCallback(
@@ -619,11 +629,28 @@ export function useBracken() {
       const joinEvent = await buildEvent(joinInput, identity)
       await putEvent(joinEvent)
 
+      const nickname = defaultNickname?.trim()
+      let nicknameEvent: FernEvent | null = null
+      if (nickname) {
+        const nicknameInput: EventInput = {
+          type: 'chat.nickname_set',
+          group: groupPubkey,
+          author: identity.publicKey,
+          parents: [joinEvent.id],
+          content: { nickname },
+          ts: Math.floor(Date.now() / 1000),
+          tags: [],
+        }
+        nicknameEvent = await buildEvent(nicknameInput, identity)
+        await putEvent(nicknameEvent)
+      }
+
       for (const url of relays) {
         try {
           const client = new RelayClient(url)
           await client.connect()
           await client.publish(joinEvent)
+          if (nicknameEvent) await client.publish(nicknameEvent)
           await client.close()
         } catch {
           // best effort
@@ -632,7 +659,7 @@ export function useBracken() {
 
       setActiveGroup(groupPubkey)
     },
-    [identity, groups],
+    [defaultNickname, identity, groups],
   )
 
   const sendMessage = useCallback(
@@ -858,6 +885,7 @@ export function useBracken() {
   const setNickname = useCallback(
     async (name: string): Promise<void> => {
       if (!identity || !activeGroup) return
+      await setDefaultNickname(name)
       const group = groups.find((g) => g.pubkey === activeGroup)
       if (!group) return
 
@@ -896,7 +924,7 @@ export function useBracken() {
         )
       })()
     },
-    [identity, activeGroup, groups, getPublishParents],
+    [identity, activeGroup, groups, getPublishParents, setDefaultNickname],
   )
 
   return {
@@ -906,6 +934,7 @@ export function useBracken() {
     activeGroup,
     events,
     state,
+    defaultNickname,
     relayConns,
     messageDeliveries,
     setActiveGroup,
@@ -918,6 +947,7 @@ export function useBracken() {
     createGroup,
     adminAction,
     setNickname,
+    setDefaultNickname,
     leaveGroup,
   }
 }

@@ -535,7 +535,7 @@ export default function App() {
         <SettingsModal
           pubkey={bracken.identity.publicKey}
           privateKey={bracken.identity.seed}
-          currentNickname={nicknames.get(bracken.identity.publicKey) ?? null}
+          currentNickname={bracken.defaultNickname ?? nicknames.get(bracken.identity.publicKey) ?? null}
           onClose={() => setShowSettings(false)}
           onSetNickname={bracken.setNickname}
           onLogout={bracken.logout}

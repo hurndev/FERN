@@ -90,27 +90,6 @@ export function SettingsModal({
           </div>
         </div>
         <div className={styles.profileField}>
-          <span className={styles.profileLabel}>Nickname</span>
-          <div className={styles.profileValue}>
-            <input
-              className={styles.nicknameInput}
-              value={nickname}
-              onChange={(e) => setNickname(e.target.value)}
-              placeholder="Set a display name"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleSetNickname()
-              }}
-            />
-            <button
-              className={styles.profileCopyBtn}
-              onClick={handleSetNickname}
-              disabled={busy || !nickname.trim() || nickname === currentNickname}
-            >
-              {busy ? '...' : 'Set'}
-            </button>
-          </div>
-        </div>
-        <div className={styles.profileField}>
           <span className={styles.profileLabel}>Private Key</span>
           <div className={styles.profileValue}>
             <span className={styles.privateKeyValue}>
@@ -129,6 +108,27 @@ export function SettingsModal({
             </button>
             <button className={styles.profileCopyBtn} onClick={handleCopyPrivateKey}>
               {privateKeyCopied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        </div>
+        <div className={styles.profileField}>
+          <span className={styles.profileLabel}>Default Nickname</span>
+          <div className={styles.profileValue}>
+            <input
+              className={styles.nicknameInput}
+              value={nickname}
+              onChange={(e) => setNickname(e.target.value)}
+              placeholder="Used when joining groups"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSetNickname()
+              }}
+            />
+            <button
+              className={styles.profileCopyBtn}
+              onClick={handleSetNickname}
+              disabled={busy || !nickname.trim() || nickname === currentNickname}
+            >
+              {busy ? '...' : 'Set'}
             </button>
           </div>
         </div>
