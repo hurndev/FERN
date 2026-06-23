@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from fern.events.event import Event
-from fern.completeness.receipts import Receipt
-from fern.completeness.attestations import Attestation
+from fern.completeness.event_receipts import EventReceipt
+from fern.completeness.group_statuses import GroupStatus
 from fern.completeness.fraud_proofs import FraudProof
 
 
@@ -34,8 +34,8 @@ class SyncMessage:
 
 
 @dataclass(frozen=True)
-class AttestationRequest:
-    action: str = "attestation"
+class GroupStatusRequest:
+    action: str = "group_status"
     group: str = ""
 
 
@@ -65,15 +65,15 @@ class EventMessage:
 
 
 @dataclass(frozen=True)
-class ReceiptMessage:
-    type: str = "receipt"
-    receipt: Receipt | None = None
+class EventReceiptMessage:
+    type: str = "event_receipt"
+    event_receipt: EventReceipt | None = None
 
 
 @dataclass(frozen=True)
-class AttestationMessage:
-    type: str = "attestation"
-    attestation: Attestation | None = None
+class GroupStatusMessage:
+    type: str = "group_status"
+    group_status: GroupStatus | None = None
 
 
 @dataclass(frozen=True)

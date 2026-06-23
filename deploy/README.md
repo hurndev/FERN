@@ -59,7 +59,7 @@ cd deploy/bracken && docker compose up -d --build && cd ../..
 The first start of the relay generates a keyfile at `deploy/relay/data/relay.key`
 and prints the new pubkey. **Back this file up** — losing it means a new
 pubkey on the next restart, which invalidates client trust pins and stored
-receipts (see spec §10.6).
+event_receipts (see spec §10.6).
 
 ## Reverse proxy integration
 

@@ -60,9 +60,9 @@ async def test_publish_event_to_fake_relay(
         group_keypair=group_keypair.keypair,
     )
 
-    receipt = await relay.publish(genesis)
-    assert receipt is not None
-    assert receipt.event_id == genesis.id
+    event_receipt = await relay.publish(genesis)
+    assert event_receipt is not None
+    assert event_receipt.event_id == genesis.id
 
     stored = await relay.get(genesis.id)
     assert stored is not None
@@ -70,7 +70,7 @@ async def test_publish_event_to_fake_relay(
 
 
 @pytest.mark.asyncio
-async def test_fake_relay_attestation(
+async def test_fake_relay_group_status(
     founder_identity: UserIdentity,
     group_keypair: GroupKeypair,
     fake_relay_network: FakeRelayNetwork,
@@ -100,7 +100,7 @@ async def test_fake_relay_attestation(
 
     await relay.publish(genesis)
 
-    attestation = await relay.request_attestation(group_keypair.pubkey)
-    assert attestation is not None
-    assert attestation.count == 1
-    assert genesis.id in attestation.tips
+    group_status = await relay.request_group_status(group_keypair.pubkey)
+    assert group_status is not None
+    assert group_status.count == 1
+    assert genesis.id in group_status.tips

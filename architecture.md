@@ -78,7 +78,7 @@ This cleanly separates group identity from founder identity, enabling future key
 
 ### 5.3 Relay Identity
 
-Each relay has its own Ed25519 keypair, used for signing receipts and attestations. Clients learn a relay's public key via a relay metadata endpoint (over TLS) on first connection and store it for subsequent verification. The relay's pubkey is its identity for all completeness-layer operations.
+Each relay has its own Ed25519 keypair, used for signing event_receipts and group_statuses. Clients learn a relay's public key via a relay metadata endpoint (over TLS) on first connection and store it for subsequent verification. The relay's pubkey is its identity for all completeness-layer operations.
 
 ### 5.4 Actor Roles
 
@@ -200,7 +200,7 @@ When a client detects a missing parent hash it should:
 
 1. Request the event by ID from every relay on the current canonical relay list
 2. If found, verify and store it
-3. If found on some relays but not others, publish it to the relays that were missing it (backfill)
+3. If found on some relays but not others, publish it to the relays that were missing it (heal)
 4. Recompute the connected set. The child event enters normal state derivation and rendering only after its complete parent chain is connected to genesis.
 
 ### 7.5 Honest Limits of the DAG
@@ -209,8 +209,8 @@ The DAG is a **force multiplier**, not a completeness proof:
 
 - **Leaf messages with no descendants** get zero propagation benefit. If the last message in a quiet chat is censored, no descendant will ever reference it.
 - **All-relays-collude-and-suppress-the-whole-tree** censorship remains undetectable. The censor must win an ever-growing race forever, but if they do, the client has no signal.
-- **The DAG doesn't prove which relay received a message.** That's the job of receipts (Section 9.1).
-- **The DAG doesn't catch split-view attacks.** That's the job of signed attestations and vantage diversity (Section 9.2).
+- **The DAG doesn't prove which relay received a message.** That's the job of event_receipts (Section 9.1).
+- **The DAG doesn't catch split-view attacks.** That's the job of signed group_statuses and vantage diversity (Section 9.2).
 
 The DAG is cheap (multiple parent IDs in an array; small client bookkeeping to track heads). It's included because it provides strong value in active chats at minimal cost.
 
@@ -308,9 +308,9 @@ The threat model is explicitly scoped to **1-2 misbehaving relays** in a set of 
 
 Five mechanisms, stacked:
 
-### 9.1 Receipts
+### 9.1 Event Receipts
 
-When a relay accepts an event from a client, it returns a signed receipt:
+When a relay accepts an event from a client, it returns a signed event_receipt:
 
 ```json
 {
@@ -322,17 +322,17 @@ When a relay accepts an event from a client, it returns a signed receipt:
 }
 ```
 
-This means **a relay cannot deny having received an event it accepted**. The author keeps the receipt locally.
+This means **a relay cannot deny having received an event it accepted**. The author keeps the event_receipt locally.
 
-Receipts are **author-local and shared on-demand only**. They are NOT events in the DAG. They are NOT routinely gossiped or propagated. They stay on the author's device until needed.
+Event receipts are **author-local and shared on-demand only**. They are NOT events in the DAG. They are NOT routinely gossiped or propagated. They stay on the author's device until needed.
 
-When the author (or any client) detects that a relay's attestation or responses contradict a receipt the author holds, the author publishes a **fraud proof** (Section 9.5) containing the receipt. That is the only time receipts are shared.
+When the author (or any client) detects that a relay's group_status or responses contradict an event_receipt the author holds, the author publishes a **fraud proof** (Section 9.5) containing the event_receipt. That is the only time event_receipts are shared.
 
-This approach adds zero ongoing traffic overhead, keeps receipts cleanly out of the DAG, and avoids fragile propagation mechanisms. The author is the natural prosecutor — they have the strongest motive (their message was censored) and the evidence (their receipts).
+This approach adds zero ongoing traffic overhead, keeps event_receipts cleanly out of the DAG, and avoids fragile propagation mechanisms. The author is the natural prosecutor — they have the strongest motive (their message was censored) and the evidence (their event_receipts).
 
-### 9.2 Attestations
+### 9.2 GroupStatuses
 
-Each relay periodically publishes a signed attestation committing to everything it knows for a group:
+Each relay periodically publishes a signed group_status committing to everything it knows for a group:
 
 ```json
 {
@@ -341,20 +341,20 @@ Each relay periodically publishes a signed attestation committing to everything 
   "set_hash": "<sha256 of sorted, newline-concatenated event IDs>",
   "tips":     ["<event id hex>", ...],
   "count":    1452,
-  "prev":     "<previous attestation hash hex, or null>",
+  "prev":     "<previous group_status hash hex, or null>",
   "ts":       1711234567,
   "sig":      "<ed25519 signature by relay key>"
 }
 ```
 
-The attestation is a signed commitment: "Here's the hash of everything I have for this group, as of this time."
+The group_status is a signed commitment: "Here's the hash of everything I have for this group, as of this time."
 
 - **`set_hash`**: SHA-256 of all known event IDs, sorted lexicographically and joined with newlines. If two relays' `set_hash` values match, they have the same set. If they differ, investigation is needed.
 - **`tips`**: The current DAG frontier (events with no children). Quick structural comparison.
 - **`count`**: Total number of stored events. Quick sanity check.
-- **`prev`**: Hash of the relay's previous attestation, forming a per-relay attestation chain. Proves ordering: "Your attestation at T2 is a successor to your attestation at T1."
+- **`prev`**: Hash of the relay's previous group_status, forming a per-relay group_status chain. Proves ordering: "Your group_status at T2 is a successor to your group_status at T1."
 
-Attestation issuance rate is configurable per relay (suggested default: every 5 seconds or every 100 new events, whichever comes first). Relays push attestations to subscribed clients automatically. Clients can also request the latest attestation on demand.
+GroupStatus issuance rate is configurable per relay (suggested default: every 5 seconds or every 100 new events, whichever comes first). Relays push group_statuses to subscribed clients automatically. Clients can also request the latest group_status on demand.
 
 Uses a simple sorted-set hash, not a Merkle tree with exclusion proofs. Monitors hold the full known-set and compare directly. Merkle exclusion proofs (allowing third parties to verify non-inclusion without holding the full set) are deferred.
 
@@ -363,36 +363,36 @@ Uses a simple sorted-set hash, not a Merkle tree with exclusion proofs. Monitors
 There is no separate monitor role. **Every client that reads a group is automatically a monitor**, because it:
 
 1. Is already required to connect to multiple relays (default K=3).
-2. Receives each relay's attestations as part of normal subscription.
+2. Receives each relay's group_statuses as part of normal subscription.
 3. Holds the full set of events it has seen.
-4. Compares relay attestations against its local known-set and against each other.
+4. Compares relay group_statuses against its local known-set and against each other.
 
-The audit pass runs on every attestation push:
+The audit pass runs on every group_status push:
 
 **For every client (cross-relay comparison):**
 
-- Compare each relay's attestation (`set_hash`, `tips`, `count`) to the client's local known-set and to other relays' attestations.
+- Compare each relay's group_status (`set_hash`, `tips`, `count`) to the client's local known-set and to other relays' group_statuses.
 - If they match: in sync.
 - If they differ: investigate. Request specific events the client has that the relay might be missing, and vice versa.
-- For events the client has that a relay's attestation doesn't include:
-  - If the event's parents are in the relay's set (parent IDs appear in events the relay has): the relay should have this event. Trigger backfill (Section 9.4).
-  - If backfill doesn't resolve the discrepancy (relay refuses to integrate): flag in local trust ledger.
+- For events the client has that a relay's group_status doesn't include:
+  - If the event's parents are in the relay's set (parent IDs appear in events the relay has): the relay should have this event. Trigger heal (Section 9.4).
+  - If heal doesn't resolve the discrepancy (relay refuses to integrate): flag in local trust ledger.
 
-**For the author specifically (receipt-based proof):**
+**For the author specifically (event_receipt-based proof):**
 
-- If the author holds a receipt from relay R for event E, but R's attestation (or response to a `get` request) doesn't include E: **provable censorship**. The receipt is signed by R proving it received E; the attestation/response proves E is absent. Publish a fraud proof (Section 9.5). Record in local trust ledger. De-list R locally.
+- If the author holds an event_receipt from relay R for event E, but R's group_status (or response to a `get` request) doesn't include E: **provable censorship**. The event_receipt is signed by R proving it received E; the group_status/response proves E is absent. Publish a fraud proof (Section 9.5). Record in local trust ledger. De-list R locally.
 
 **Split-view defense:**
 
-Because attestations are signed, two clients comparing the attestations they received from the same relay can detect if the relay served them divergent views. Without signatures, a relay could serve different summaries to different clients and neither could prove it. Signed attestations make this provable when caught.
+Because group_statuses are signed, two clients comparing the group_statuses they received from the same relay can detect if the relay served them divergent views. Without signatures, a relay could serve different summaries to different clients and neither could prove it. Signed group_statuses make this provable when caught.
 
-### 9.4 Backfill — The Network Self-Heals
+### 9.4 Heal — The Network Self-Heals
 
-When a client notices a relay is missing events (detected via attestation divergence or via a gap in the DAG), it doesn't just flag the fault — it fetches the missing events from a sibling relay and republishes them to the lagging relay via the `backfill` action. `backfill` stores and receipts events without broadcasting them to subscribers, because these are historical events being repaired rather than newly-created events.
+When a client notices a relay is missing events (detected via group_status divergence or via a gap in the DAG), it doesn't just flag the fault — it fetches the missing events from a sibling relay and republishes them to the lagging relay via the `heal` action. `heal` stores and event_receipts events without broadcasting them to subscribers, because these are historical events being repaired rather than newly-created events.
 
-Clients coordinate this repair with an advisory per-group sync lock. If another client already holds the lock, short-lived clients (like CLI commands) skip that relay for the current pass, while long-lived clients (like Bracken) retry on future attestation or sync triggers after the lease window. Relay-side deduplication means uncoordinated fallback remains safe, just less efficient.
+Clients coordinate this repair with an advisory per-group sync lock. If another client already holds the lock, short-lived clients (like CLI commands) skip that relay for the current pass, while long-lived clients (like Bracken) retry on future group_status or sync triggers after the lease window. Relay-side deduplication means uncoordinated fallback remains safe, just less efficient.
 
-For efficiency, clients use `sync_ids` to fetch only event IDs and compute set differences. If attestation `set_hash` already matches the local known set, no event transfer is needed. The lagging relay either integrates the backfilled events (its next attestation converges) or refuses (caught as persistently divergent and flagged in the trust ledger).
+For efficiency, clients use `sync_ids` to fetch only event IDs and compute set differences. If group_status `set_hash` already matches the local known set, no event transfer is needed. The lagging relay either integrates the healed events (its next group_status converges) or refuses (caught as persistently divergent and flagged in the trust ledger).
 
 ### 9.5 Fraud Proofs
 
@@ -405,12 +405,12 @@ A fraud proof is a standalone object (not an event in the DAG) published when a 
   "relay":     "<relay pubkey hex>",
   "event_id":  "<event id hex>",
   "event":     { ... },
-  "receipt":   { ... },
-  "evidence":  "<description of the contradiction: e.g. attestation hash, not_found response, etc.>"
+  "event_receipt":   { ... },
+  "evidence":  "<description of the contradiction: e.g. group_status hash, not_found response, etc.>"
 }
 ```
 
-The proof is self-contained: the event is signed by its author (proving it's real), the receipt is signed by the relay (proving the relay received it), and the evidence shows the relay doesn't serve it. Any third party can verify all of this independently without trusting the publisher of the fraud proof.
+The proof is self-contained: the event is signed by its author (proving it's real), the event_receipt is signed by the relay (proving the relay received it), and the evidence shows the relay doesn't serve it. Any third party can verify all of this independently without trusting the publisher of the fraud proof.
 
 Fraud proofs are published to relays (for storage and gossip) or shared out-of-band. They are not part of the DAG — they are evidence about relay behavior, not about group history.
 
@@ -421,9 +421,9 @@ Uses local trust ledgers for relay reputation. Cross-client reputation propagati
 **Caught (cryptographically, against 1-2 bad relays):**
 
 - A relay cannot forge, alter, or insert events. (Signatures + DAG parents.)
-- A relay cannot silently drop an event it signed a receipt for, then omit from its attestation. (Receipt + attestation divergence is provable to any observer.)
-- Split-view attacks are provable when caught. (Signed attestations can be compared across clients.)
-- Relays that lag behind are detected via attestation comparison and the network self-heals via backfill.
+- A relay cannot silently drop an event it signed an event_receipt for, then omit from its group_status. (EventReceipt + group_status divergence is provable to any observer.)
+- Split-view attacks are provable when caught. (Signed group_statuses can be compared across clients.)
+- Relays that lag behind are detected via group_status comparison and the network self-heals via heal.
 - Censorship surface grows over time via the DAG: censoring a message requires censoring all its descendants, transitively.
 
 **Caught (probabilistically):**
@@ -433,9 +433,9 @@ Uses local trust ledgers for relay reputation. Cross-client reputation propagati
 **Not caught (fundamental):**
 
 - If **all** relays a client uses collude to suppress a message **and** all its descendants, the client has no signal. You cannot prove a negative without an honest witness.
-- A relay could refuse to **accept** a message at all (no receipt created). The author's mitigation is multi-relay redundancy: publish to K=3 relays; if at least one is honest, it signs a receipt and serves the event. The silent refusal of the others is provable by attestation divergence (honest relay has the event, dishonest one doesn't).
+- A relay could refuse to **accept** a message at all (no event_receipt created). The author's mitigation is multi-relay redundancy: publish to K=3 relays; if at least one is honest, it signs an event_receipt and serves the event. The silent refusal of the others is provable by group_status divergence (honest relay has the event, dishonest one doesn't).
 
-**The trap for bad relays:** to look like a functioning relay (and avoid immediate detection), a bad relay has to accept events and issue receipts. Once it does, receipts + attestations make subsequent omission provable. If it refuses to accept at all, it's immediately divergent from honest relays that do have the event. Either way, 1-2 bad relays in a curated set are caught without affecting user experience — the other K-1 or K-2 honest relays serve the events.
+**The trap for bad relays:** to look like a functioning relay (and avoid immediate detection), a bad relay has to accept events and issue event_receipts. Once it does, event_receipts + group_statuses make subsequent omission provable. If it refuses to accept at all, it's immediately divergent from honest relays that do have the event. Either way, 1-2 bad relays in a curated set are caught without affecting user experience — the other K-1 or K-2 honest relays serve the events.
 
 ---
 
@@ -485,7 +485,7 @@ Relays are storage and forwarding infrastructure. They have no authority over gr
 
 - **Forge events** — all events are cryptographically signed by authors
 - **Rewrite events** — modifying content breaks the signature
-- **Silently censor** — gaps in the DAG are visible, attestations commit to known sets, receipts prove receipt
+- **Silently censor** — gaps in the DAG are visible, group_statuses commit to known sets, event_receipts prove event_receipt
 - **Control the group** — authority is derived from the DAG, not from the relay
 
 A relay can only choose not to host a group, or to lag behind. Both are detectable and recoverable.
@@ -505,7 +505,7 @@ When a relay receives an event it must:
 1. Verify the event `id` matches the SHA-256 of the canonical serialisation
 2. Verify the signature is valid for the `author` pubkey
 3. Store the event if it belongs to a group the relay is hosting
-4. Return a signed receipt to the publishing client
+4. Return a signed event_receipt to the publishing client
 
 Relays must store events regardless of whether they hold the parent events. Relays must not apply authorisation rules — that is the client's responsibility. Relays store all events with valid signatures and valid structure, including events that clients would reject (e.g., a non-admin attempting to kick a user).
 
@@ -528,12 +528,12 @@ Key properties:
 
 Relays expose a WebSocket interface. Core actions:
 
-**Subscribe to a group** (receives new events + attestation pushes):
+**Subscribe to a group** (receives new events + group_status pushes):
 ```json
 {"action": "subscribe", "group": "<group pubkey>"}
 ```
 
-**Publish an event** (relay validates, stores, returns receipt):
+**Publish an event** (relay validates, stores, returns event_receipt):
 ```json
 {"action": "publish", "event": { ... }}
 ```
@@ -548,9 +548,9 @@ Relays expose a WebSocket interface. Core actions:
 {"action": "sync", "group": "<group pubkey>", "since": 1711234567}
 ```
 
-**Request current attestation:**
+**Request current group_status:**
 ```json
-{"action": "attestation", "group": "<group pubkey>"}
+{"action": "group_status", "group": "<group pubkey>"}
 ```
 
 **Fetch event IDs only:**
@@ -558,22 +558,22 @@ Relays expose a WebSocket interface. Core actions:
 {"action": "sync_ids", "group": "<group pubkey>"}
 ```
 
-**Acquire / release a backfill coordination lock:**
+**Acquire / release a heal coordination lock:**
 ```json
 {"action": "sync_lock", "group": "<group pubkey>", "client_id": "<user pubkey>"}
 {"action": "sync_unlock", "group": "<group pubkey>", "client_id": "<user pubkey>"}
 ```
 
-**Backfill historical event without broadcasting:**
+**Heal historical event without broadcasting:**
 ```json
-{"action": "backfill", "event": { ... }}
+{"action": "heal", "event": { ... }}
 ```
 
 Relay responses:
 ```json
 {"type": "event", "event": { ... }}
-{"type": "receipt", "receipt": { ... }}
-{"type": "attestation", "attestation": { ... }}
+{"type": "event_receipt", "event_receipt": { ... }}
+{"type": "group_status", "group_status": { ... }}
 {"type": "ids", "group": "<group pubkey>", "ids": ["<event id>", "..."]}
 {"type": "sync_lock_granted", "group": "<group pubkey>", "ttl": 30}
 {"type": "sync_lock_denied", "group": "<group pubkey>", "expires_in": 15}
@@ -581,7 +581,7 @@ Relay responses:
 {"type": "error", "message": "..."}
 ```
 
-Attestations are pushed to subscribed clients periodically (every ~5 seconds or every ~100 events, configurable per relay) without requiring a request.
+GroupStatuses are pushed to subscribed clients periodically (every ~5 seconds or every ~100 events, configurable per relay) without requiring a request.
 
 ---
 
@@ -644,7 +644,7 @@ Clients must perform this seeding before sending new messages to the group. The 
 
 ### 14.1 Local Cache
 
-Clients must persist their full local event history to disk. This cache is essential for gap healing and relay seeding. Clients must never evict events from their local cache unless explicitly instructed by the user. The local cache is also where receipts are stored (author-local).
+Clients must persist their full local event history to disk. This cache is essential for gap healing and relay seeding. Clients must never evict events from their local cache unless explicitly instructed by the user. The local cache is also where event_receipts are stored (author-local).
 
 ### 14.2 Joining a Group
 
@@ -652,7 +652,7 @@ Clients must persist their full local event history to disk. This cache is essen
 2. Connect to hint relays, fetch and verify the `genesis` event
 3. Derive the canonical relay list from genesis, connect to all canonical relays
 4. Sync from all canonical relays using the `sync` action; merge results
-5. Verify completeness by comparing relay attestations to the local known set. If a relay's `set_hash` differs, use `sync_ids` to compute differences, fetch missing events with `get`, and repair missing relay events with `backfill`.
+5. Verify completeness by comparing relay group_statuses to the local known set. If a relay's `set_hash` differs, use `sync_ids` to compute differences, fetch missing events with `get`, and repair missing relay events with `heal`.
 6. Walk the DAG from genesis:
    - Verify signatures and parent references
    - Compute the genesis-connected event set
@@ -666,13 +666,13 @@ Clients must persist their full local event history to disk. This cache is essen
 1. Construct the event with `parents` referencing the latest known connected heads in the group
 2. Sign the event with the author's user private key
 3. Publish to all canonical relays **simultaneously and in parallel**
-4. Collect receipts from each relay
-5. Store receipts locally alongside the event in the local cache
+4. Collect event_receipts from each relay
+5. Store event_receipts locally alongside the event in the local cache
 6. Cache the event locally
 
 Locally cached events that have not been accepted by any canonical relay are retryable local sends, not heads. If delivery fails, the client should show a retry affordance and exclude the failed event from parent selection so later messages do not build on it.
 
-Publishing to fewer than all canonical relays is strongly discouraged. Message loss resulting from single-relay publishing is the sender's responsibility. A message is considered "safely acknowledged" when receipts from at least 2 relays are collected (configurable).
+Publishing to fewer than all canonical relays is strongly discouraged. Message loss resulting from single-relay publishing is the sender's responsibility. A message is considered "safely acknowledged" when event_receipts from at least 2 relays are collected (configurable).
 
 ### 14.4 Receiving
 
@@ -683,8 +683,8 @@ Clients maintain persistent WebSocket connections to all canonical relays for ea
 After initial sync, the client continuously:
 
 - **Receives new events**: verify, store, recompute connectedness, trigger gap healing for disconnected events, and render connected events per client policy (hide banned/unauthorised if configured).
-- **Receives attestation pushes**: verify the attestation, compare relay state to local known-set and to other relays, then trigger ID-diff sync/backfill for missing events. Short-lived clients skip held sync locks; long-lived clients retry on later attestation/sync triggers. Flag persistent divergence in local trust ledger.
-- **Maintains a local trust ledger**: `{relay_pubkey → {observed_faults, last_attestation}}`. This is local state, not network-consensus. Different clients may have different views of which relays are trustworthy.
+- **Receives group_status pushes**: verify the group_status, compare relay state to local known-set and to other relays, then trigger ID-diff sync/heal for missing events. Short-lived clients skip held sync locks; long-lived clients retry on later group_status/sync triggers. Flag persistent divergence in local trust ledger.
+- **Maintains a local trust ledger**: `{relay_pubkey → {observed_faults, last_group_status}}`. This is local state, not network-consensus. Different clients may have different views of which relays are trustworthy.
 
 Trust propagation is **social, not protocol-enforced**. The protocol does not dictate that faulted relays are de-listed across clients. The protocol guarantees misconduct is *provable*; the social response (drop relay R from your config) is up to the client/operator.
 
@@ -702,7 +702,7 @@ The protocol (FERN) defines:
 - Identity (user, group, relay)
 - The causal DAG (parents, heads, gaps, healing)
 - Group state machine (membership, root authority, relays, metadata)
-- Completeness layer (receipts, attestations, monitoring, backfill, fraud proofs)
+- Completeness layer (event_receipts, group_statuses, monitoring, heal, fraud proofs)
 - Relay protocol (WebSocket actions, relay validation, GC)
 - Discovery and migration
 - Protocol-level event types (genesis, join, leave, invite, kick, ban, unban, admin_add, admin_remove, relay_update, metadata_update)
@@ -727,11 +727,11 @@ This separation lets multiple apps share the same infrastructure: identity, rela
 | Forge a message as another user | Author signatures defeat this |
 | Forge a group state change (admin action) | Admin signatures + check against folded admin list |
 | Insert a fake event into the DAG | Signatures prevent forgery; the connected-subgraph rule prevents disconnected events from entering state, normal rendering, or future parent selection |
-| Relay silently censors a message it accepted | Receipt + attestation divergence; provable to any observer via fraud proof |
+| Relay silently censors a message it accepted | EventReceipt + group_status divergence; provable to any observer via fraud proof |
 | Relay refuses to accept a message at all | Multi-relay redundancy (K=3); if at least one honest, it has the event and the others are provably divergent |
-| Split-view attack (relay serves different state to different clients) | Signed attestations make divergence provable when clients compare notes. Defeated probabilistically by vantage diversity. |
+| Split-view attack (relay serves different state to different clients) | Signed group_statuses make divergence provable when clients compare notes. Defeated probabilistically by vantage diversity. |
 | Relay shuts down | Group continues on remaining relays; new relays can stand up anytime |
-| Relay lags behind | Detected via attestation comparison; self-healed via backfill from sibling relays |
+| Relay lags behind | Detected via group_status comparison; self-healed via heal from sibling relays |
 | Founder issues bad bans/admin decisions | Founder trust is accepted at join time. Bans are render filters; underlying log stays complete. |
 | All relays a client uses collude to suppress a message and its descendants | Censorship undetectable. Fundamental; out of scope without consensus. |
 | IP exposure between members | No client-to-client connections; only relays see client IPs |
@@ -741,8 +741,8 @@ This separation lets multiple apps share the same infrastructure: identity, rela
 In a curated set of K=3 trusted relays where 1-2 go bad:
 
 - To avoid immediate detection, the bad relay must accept events and look operational.
-- Once it accepts an event, it signs a receipt — committing to having received it.
-- If it later omits the event, the receipt + attestation divergence is provable censorship.
+- Once it accepts an event, it signs an event_receipt — committing to having received it.
+- If it later omits the event, the event_receipt + group_status divergence is provable censorship.
 - If it refuses to accept at all, it's immediately divergent from the K-1 or K-2 honest relays that do have the event.
 - User experience is unaffected: the honest relays serve all events, and the bad relay is flagged and de-listed.
 
@@ -755,7 +755,7 @@ This is the core guarantee: **1-2 misbehaving relays in a curated set are caught
 Documented future extensions, deliberately excluded to keep the design implementable:
 
 - **Threshold founder signing**: multiple admin keys required for high-sensitivity actions. Founder single-key currently.
-- **Merkle exclusion proofs**: allowing third parties to verify non-inclusion without holding the full set. Simple sorted-set-hash attestations currently.
+- **Merkle exclusion proofs**: allowing third parties to verify non-inclusion without holding the full set. Simple sorted-set-hash group_statuses currently.
 - **Fork-proofs as first-class gossiped objects**: cross-client reputation propagation for relay misbehavior. Local trust ledgers currently.
 - **Snapshots**: founder-signed state anchors to bound new-joiner cost for large groups. Not needed for small-to-medium groups (verify from genesis is fast enough). Will be added when groups reach scaling pain.
 - **App-prefixed types with pubkey namespaces**: `<app_pubkey>.appname.type` for collision-free type names. Convention-based `appname.type` currently.
@@ -769,4 +769,4 @@ These are documented as upgrade paths, not abandoned. The current design's goal 
 
 ## 18. The Whole Picture in One Paragraph
 
-Signed events in a public append-only log, replicated across multiple interchangeable canonical relays that anyone can run. Events reference recent connected heads, forming a causal DAG that propagates existence proofs for free through normal chat activity without letting disconnected events poison future history. Relays sign receipts when they accept events, committing to having received them; relays periodically sign attestations committing to their full known set. Every client cross-checks relays against each other for free — monitors aren't a separate role, they're a property of clients running the audit pass on every attestation push. Backfill self-heals gaps automatically: any reader who notices a gap fetches the missing event and republishes it. Admin actions like bans are themselves events in the log, never deletions, so moderation is a render-time filter rather than a storage-level operation. The protocol is general-purpose: it handles transport, identity, group management, and completeness; applications define their own event types and content schemas on top. The result is a protocol for public group chats that can't be forged, can't be silently censored (provably if attempted by 1-2 bad relays in a curated set), can't be shut down, and hides member IPs by virtue of never connecting members directly.
+Signed events in a public append-only log, replicated across multiple interchangeable canonical relays that anyone can run. Events reference recent connected heads, forming a causal DAG that propagates existence proofs for free through normal chat activity without letting disconnected events poison future history. Relays sign event_receipts when they accept events, committing to having received them; relays periodically sign group_statuses committing to their full known set. Every client cross-checks relays against each other for free — monitors aren't a separate role, they're a property of clients running the audit pass on every group_status push. Heal self-heals gaps automatically: any reader who notices a gap fetches the missing event and republishes it. Admin actions like bans are themselves events in the log, never deletions, so moderation is a render-time filter rather than a storage-level operation. The protocol is general-purpose: it handles transport, identity, group management, and completeness; applications define their own event types and content schemas on top. The result is a protocol for public group chats that can't be forged, can't be silently censored (provably if attempted by 1-2 bad relays in a curated set), can't be shut down, and hides member IPs by virtue of never connecting members directly.

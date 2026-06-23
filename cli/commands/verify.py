@@ -4,7 +4,7 @@ import asyncio
 
 import click
 
-from fern.completeness.attestations import Attestation
+from fern.completeness.group_statuses import GroupStatus
 from fern.completeness.trust_ledger import TrustLedger
 from fern.client.monitor_runner import run_monitor_pass
 from fern.storage.sqlite_store import SqliteStore
@@ -55,29 +55,29 @@ async def _verify(group_id: str) -> None:
         pass
 
     trust_ledger = TrustLedger()
-    sibling_attestations: dict[str, Attestation] = {}
+    sibling_group_statuses: dict[str, GroupStatus] = {}
 
     try:
         for t in transports:
             try:
-                att = await t.request_attestation(group_pubkey)
-                sibling_attestations[t.relay_pubkey] = att
+                att = await t.request_group_status(group_pubkey)
+                sibling_group_statuses[t.relay_pubkey] = att
             except Exception:
                 pass
 
         for t in transports:
             relay_pk = t.relay_pubkey
-            if not relay_pk or relay_pk not in sibling_attestations:
+            if not relay_pk or relay_pk not in sibling_group_statuses:
                 continue
-            att = sibling_attestations[relay_pk]
+            att = sibling_group_statuses[relay_pk]
             await run_monitor_pass(
                 relay=t,
-                attestation=att,
+                group_status=att,
                 local_known_set=known_set,
-                receipts_for_relay={},
+                event_receipts_for_relay={},
                 trust_ledger=trust_ledger,
-                sibling_attestations={
-                    k: v for k, v in sibling_attestations.items() if k != relay_pk
+                sibling_group_statuses={
+                    k: v for k, v in sibling_group_statuses.items() if k != relay_pk
                 },
             )
 
@@ -94,15 +94,15 @@ async def _verify(group_id: str) -> None:
 
     if sync_results:
         fetched = sum(r.fetched for r in sync_results)
-        backfilled = sum(r.backfilled for r in sync_results)
+        healed = sum(r.healed for r in sync_results)
         skipped = sum(1 for r in sync_results if r.skipped_locked)
         click.echo(
-            f"  Sync pass: fetched {fetched}, backfilled {backfilled}, skipped locked {skipped}"
+            f"  Sync pass: fetched {fetched}, healed {healed}, skipped locked {skipped}"
         )
         click.echo()
 
     if not trust_ledger.entries:
-        click.echo("  No relay attestations received.")
+        click.echo("  No relay group_statuses received.")
         return
 
     any_faults = False
@@ -114,7 +114,7 @@ async def _verify(group_id: str) -> None:
             for f in faults:
                 click.echo(f"    [{f.kind}] {f.evidence}")
         else:
-            set_hash = entry.last_attestation.set_hash if entry.last_attestation else "(none)"
+            set_hash = entry.last_group_status.set_hash if entry.last_group_status else "(none)"
             click.echo(f"  Relay {relay_pk[:16]}... — in sync (set_hash: {set_hash[:16]}...)")
 
     if not any_faults:

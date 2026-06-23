@@ -12,8 +12,8 @@ from fern.transport.interfaces import RelayTransport
 async def fetch_genesis(group_pubkey: str, transports: Sequence[RelayTransport]) -> Event | None:
     for transport in transports:
         try:
-            attestation = await transport.request_attestation(group_pubkey)
-            for tip_id in attestation.tips:
+            group_status = await transport.request_group_status(group_pubkey)
+            for tip_id in group_status.tips:
                 event = await transport.get(tip_id)
                 if event is not None:
                     while event.id is not None:

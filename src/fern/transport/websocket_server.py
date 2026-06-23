@@ -16,10 +16,10 @@ from websockets.http11 import Response
 from fern.events.event import Event
 from fern.events.limits import MAX_EVENT_BYTES
 from fern.events.validation import verify_event
-from fern.completeness.receipts import Receipt, build_receipt
-from fern.completeness.attestations import (
-    Attestation,
-    build_attestation,
+from fern.completeness.event_receipts import EventReceipt, build_event_receipt
+from fern.completeness.group_statuses import (
+    GroupStatus,
+    build_group_status,
 )
 from fern.completeness.fraud_proofs import (
     FraudProof,
@@ -93,7 +93,7 @@ def _json_to_event_dict(d: dict) -> Event:
     )
 
 
-def _attestation_to_json(att: Attestation) -> dict:
+def _group_status_to_json(att: GroupStatus) -> dict:
     return {
         "group": att.group,
         "relay": att.relay,
@@ -106,8 +106,8 @@ def _attestation_to_json(att: Attestation) -> dict:
     }
 
 
-def _json_to_attestation(d: dict) -> Attestation:
-    return Attestation(
+def _json_to_group_status(d: dict) -> GroupStatus:
+    return GroupStatus(
         group=d["group"],
         relay=d["relay"],
         set_hash=d["set_hash"],
@@ -139,9 +139,9 @@ class RelayServer:
         self._relay_store = RelayStore(self._store)
         self._fraud_proofs: dict[str, FraudProof] = {}
         self._subscribers: dict[str, set[ws_server.ServerConnection]] = {}
-        self._last_attestations: dict[str, Attestation] = {}
-        self._attestation_intervals: dict[str, float] = {}
-        self._attestation_tasks: dict[str, asyncio.Task] = {}
+        self._last_group_statuses: dict[str, GroupStatus] = {}
+        self._group_status_intervals: dict[str, float] = {}
+        self._group_status_tasks: dict[str, asyncio.Task] = {}
         self._hosted_groups: set[str] = set()
         self._sync_locks: dict[str, SyncLockLease] = {}
         self._started = False
@@ -265,8 +265,8 @@ class RelayServer:
             return await self._handle_unsubscribe(msg, ws)
         elif action == "publish":
             return await self._handle_publish(msg, ws)
-        elif action == "backfill":
-            return await self._handle_backfill(msg, ws)
+        elif action == "heal":
+            return await self._handle_heal(msg, ws)
         elif action == "get":
             return await self._handle_get(msg)
         elif action == "sync":
@@ -277,8 +277,8 @@ class RelayServer:
             return await self._handle_sync_lock(msg, ws)
         elif action == "sync_unlock":
             return await self._handle_sync_unlock(msg)
-        elif action == "attestation":
-            return await self._handle_attestation_request(msg)
+        elif action == "group_status":
+            return await self._handle_group_status_request(msg)
         elif action == "submit_fraud_proof":
             return await self._handle_submit_fraud_proof(msg)
         elif action == "query_fraud_proofs":
@@ -303,8 +303,8 @@ class RelayServer:
 
         logger.info("subscribe to group %s (%d subscribers)", group[:16] + "...", len(self._subscribers[group]))
 
-        att = await self._build_and_store_attestation(group)
-        return [{"type": "attestation", "attestation": _attestation_to_json(att)}]
+        att = await self._build_and_store_group_status(group)
+        return [{"type": "group_status", "group_status": _group_status_to_json(att)}]
 
     async def _handle_unsubscribe(
         self, msg: dict, ws: ws_server.ServerConnection
@@ -318,21 +318,21 @@ class RelayServer:
     async def _handle_publish(self, msg: dict, ws: ws_server.ServerConnection) -> list[dict] | None:
         return await self._store_event_message(msg, action="publish", broadcast=True)
 
-    async def _handle_backfill(
+    async def _handle_heal(
         self, msg: dict, ws: ws_server.ServerConnection
     ) -> list[dict] | None:
-        return await self._store_event_message(msg, action="backfill", broadcast=False)
+        return await self._store_event_message(msg, action="heal", broadcast=False)
 
-    def _receipt_response(self, receipt: Receipt) -> list[dict]:
+    def _event_receipt_response(self, event_receipt: EventReceipt) -> list[dict]:
         return [
             {
-                "type": "receipt",
-                "receipt": {
-                    "event_id": receipt.event_id,
-                    "group": receipt.group,
-                    "relay": receipt.relay,
-                    "ts": receipt.ts,
-                    "sig": receipt.sig,
+                "type": "event_receipt",
+                "event_receipt": {
+                    "event_id": event_receipt.event_id,
+                    "group": event_receipt.group,
+                    "relay": event_receipt.relay,
+                    "ts": event_receipt.ts,
+                    "sig": event_receipt.sig,
                 },
             }
         ]
@@ -347,17 +347,17 @@ class RelayServer:
             if event.id and await self._store.has_event(event.id):
                 stored = await self._store.get_event(event.id)
                 if stored is not None:
-                    receipt = build_receipt(
+                    event_receipt = build_event_receipt(
                         event=stored,
                         relay_keypair=self._keypair,
                         ts=int(time.time()),
                     )
                     logger.info(
-                        "%s duplicate id=%s... -> receipt (skipped verify/store/broadcast)",
+                        "%s duplicate id=%s... -> event_receipt (skipped verify/store/broadcast)",
                         action,
                         event.id[:16],
                     )
-                    return self._receipt_response(receipt)
+                    return self._event_receipt_response(event_receipt)
 
             verify_event(event)
 
@@ -388,12 +388,12 @@ class RelayServer:
                 broadcast,
             )
 
-            receipt = build_receipt(
+            event_receipt = build_event_receipt(
                 event=event,
                 relay_keypair=self._keypair,
                 ts=int(time.time()),
             )
-            response = self._receipt_response(receipt)
+            response = self._event_receipt_response(event_receipt)
 
             if broadcast:
                 await self._broadcast_event(event)
@@ -486,28 +486,28 @@ class RelayServer:
             logger.info("sync_unlock group=%s... released by %s...", group[:16], client_id[:16])
         return [{"type": "ok", "message": "unlocked"}]
 
-    async def _handle_attestation_request(self, msg: dict) -> list[dict] | None:
+    async def _handle_group_status_request(self, msg: dict) -> list[dict] | None:
         group = msg.get("group", "")
-        logger.info("attestation request group=%s...", group[:16])
+        logger.info("group_status request group=%s...", group[:16])
         if group not in self._hosted_groups:
             return [{"type": "error", "message": "group not hosted"}]
-        att = await self._build_and_store_attestation(group)
-        return [{"type": "attestation", "attestation": _attestation_to_json(att)}]
+        att = await self._build_and_store_group_status(group)
+        return [{"type": "group_status", "group_status": _group_status_to_json(att)}]
 
     async def _handle_submit_fraud_proof(self, msg: dict) -> list[dict] | None:
         try:
             fp_dict = msg.get("fraud_proof", {})
             event = _json_to_event_dict(fp_dict.get("event", {})) if fp_dict.get("event") else None
-            receipt_data = fp_dict.get("receipt", {})
-            receipt = (
-                Receipt(
-                    event_id=receipt_data.get("event_id", ""),
-                    group=receipt_data.get("group", ""),
-                    relay=receipt_data.get("relay", ""),
-                    ts=receipt_data.get("ts", 0),
-                    sig=receipt_data.get("sig", ""),
+            event_receipt_data = fp_dict.get("event_receipt", {})
+            event_receipt = (
+                EventReceipt(
+                    event_id=event_receipt_data.get("event_id", ""),
+                    group=event_receipt_data.get("group", ""),
+                    relay=event_receipt_data.get("relay", ""),
+                    ts=event_receipt_data.get("ts", 0),
+                    sig=event_receipt_data.get("sig", ""),
                 )
-                if receipt_data
+                if event_receipt_data
                 else None
             )
             proof = FraudProof(
@@ -516,7 +516,7 @@ class RelayServer:
                 relay=fp_dict.get("relay", ""),
                 event_id=fp_dict.get("event_id", ""),
                 event=event,
-                receipt=receipt,
+                event_receipt=event_receipt,
                 evidence=fp_dict.get("evidence", ""),
             )
             if not verify_fraud_proof(proof):
@@ -563,14 +563,14 @@ class RelayServer:
                 "relay": fp.relay,
                 "event_id": fp.event_id,
                 "event": _event_to_json_dict(fp.event) if fp.event else None,
-                "receipt": {
-                    "event_id": fp.receipt.event_id,
-                    "group": fp.receipt.group,
-                    "relay": fp.receipt.relay,
-                    "ts": fp.receipt.ts,
-                    "sig": fp.receipt.sig,
+                "event_receipt": {
+                    "event_id": fp.event_receipt.event_id,
+                    "group": fp.event_receipt.group,
+                    "relay": fp.event_receipt.relay,
+                    "ts": fp.event_receipt.ts,
+                    "sig": fp.event_receipt.sig,
                 }
-                if fp.receipt
+                if fp.event_receipt
                 else None,
                 "evidence": fp.evidence,
             },
@@ -589,10 +589,10 @@ class RelayServer:
         if subs:
             logger.info("broadcast event %s... to %d/%d subscribers", event.id[:16] if event.id else "?", delivered, len(subs))
 
-    async def _broadcast_attestation(self, group: str, att: Attestation) -> None:
+    async def _broadcast_group_status(self, group: str, att: GroupStatus) -> None:
         subs = self._subscribers.get(group, set())
         msg = json.dumps(
-            {"type": "attestation", "attestation": _attestation_to_json(att)}, default=str
+            {"type": "group_status", "group_status": _group_status_to_json(att)}, default=str
         )
         delivered = 0
         for sub in list(subs):
@@ -602,15 +602,15 @@ class RelayServer:
             except Exception:
                 subs.discard(sub)
         if subs:
-            logger.info("broadcast attestation to %d/%d subscribers for group %s...", delivered, len(subs), group[:16])
+            logger.info("broadcast group_status to %d/%d subscribers for group %s...", delivered, len(subs), group[:16])
 
-    async def _build_and_store_attestation(self, group: str) -> Attestation:
+    async def _build_and_store_group_status(self, group: str) -> GroupStatus:
         known_set = await self._store.get_known_set(group)
         tips = await self._store.get_tips(group)
         count = await self._store.count_events(group)
 
-        prev = self._last_attestations.get(group)
-        att = build_attestation(
+        prev = self._last_group_statuses.get(group)
+        att = build_group_status(
             group=group,
             relay_keypair=self._keypair,
             known_set=known_set,
@@ -619,7 +619,7 @@ class RelayServer:
             prev=prev,
             ts=int(time.time()),
         )
-        self._last_attestations[group] = att
+        self._last_group_statuses[group] = att
 
-        await self._broadcast_attestation(group, att)
+        await self._broadcast_group_status(group, att)
         return att

@@ -54,7 +54,7 @@ def make_genesis(founder: UserIdentity, group_keypair: GroupKeypair, relay: Fake
 
 
 @pytest.mark.asyncio
-async def test_backfill_stores_without_broadcast(
+async def test_heal_stores_without_broadcast(
     founder: UserIdentity,
     alice: UserIdentity,
     group_keypair: GroupKeypair,
@@ -78,7 +78,7 @@ async def test_backfill_stores_without_broadcast(
         text="hello",
         ts=2,
     )
-    await relay.backfill(message)
+    await relay.heal(message)
     await asyncio.sleep(0)
 
     assert await relay.get(message.id) == message
@@ -118,7 +118,7 @@ async def test_sync_diff_fetches_events_missing_locally(
 
 
 @pytest.mark.asyncio
-async def test_sync_diff_backfills_events_missing_on_relay(
+async def test_sync_diff_heals_events_missing_on_relay(
     founder: UserIdentity,
     alice: UserIdentity,
     group_keypair: GroupKeypair,
@@ -145,7 +145,7 @@ async def test_sync_diff_backfills_events_missing_on_relay(
         client_id=alice.pubkey,
     )
 
-    assert result.backfilled == 1
+    assert result.healed == 1
     assert await relay.get(message.id) == message
 
 

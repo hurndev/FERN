@@ -3,13 +3,13 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 
 from fern.events.event import Event
-from fern.completeness.receipts import Receipt
+from fern.completeness.event_receipts import EventReceipt
 
 
 class MemoryStore:
     def __init__(self) -> None:
         self._events: dict[str, Event] = {}
-        self._receipts: dict[tuple[str, str], Receipt] = {}
+        self._event_receipts: dict[tuple[str, str], EventReceipt] = {}
 
     async def put_event(self, event: Event) -> None:
         assert event.id is not None
@@ -58,16 +58,16 @@ class MemoryStore:
     async def get_hosted_groups(self) -> list[str]:
         return list({e.group for e in self._events.values()})
 
-    async def put_receipt(self, event_id: str, relay_pubkey: str, receipt: Receipt) -> None:
-        self._receipts[(event_id, relay_pubkey)] = receipt
+    async def put_event_receipt(self, event_id: str, relay_pubkey: str, event_receipt: EventReceipt) -> None:
+        self._event_receipts[(event_id, relay_pubkey)] = event_receipt
 
-    async def get_receipt(self, event_id: str, relay_pubkey: str) -> Receipt | None:
-        return self._receipts.get((event_id, relay_pubkey))
+    async def get_event_receipt(self, event_id: str, relay_pubkey: str) -> EventReceipt | None:
+        return self._event_receipts.get((event_id, relay_pubkey))
 
-    async def iter_receipts_for_event(self, event_id: str) -> AsyncIterator[Receipt]:
-        for (eid, _), receipt in self._receipts.items():
+    async def iter_event_receipts_for_event(self, event_id: str) -> AsyncIterator[EventReceipt]:
+        for (eid, _), event_receipt in self._event_receipts.items():
             if eid == event_id:
-                yield receipt
+                yield event_receipt
 
     async def delete_event(self, event_id: str) -> None:
         self._events.pop(event_id, None)

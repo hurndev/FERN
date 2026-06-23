@@ -1,5 +1,5 @@
 import { verifySignature } from './crypto'
-import type { Attestation } from './relay'
+import type { GroupStatus } from './relay'
 import { isValidEventId, isValidPubkey, isValidSig, sha256Hex } from './utils'
 
 export const EMPTY_SET_HASH =
@@ -10,7 +10,7 @@ export async function computeSetHash(ids: Set<string>): Promise<string> {
   return sha256Hex(new TextEncoder().encode([...ids].sort().join('\n')))
 }
 
-export function canonicalSerializationAttestation(att: Attestation): Uint8Array {
+export function canonicalSerializationGroupStatus(att: GroupStatus): Uint8Array {
   const arr = [
     att.group,
     att.relay,
@@ -23,7 +23,7 @@ export function canonicalSerializationAttestation(att: Attestation): Uint8Array 
   return new TextEncoder().encode(JSON.stringify(arr))
 }
 
-export function verifyAttestation(att: Attestation): boolean {
+export function verifyGroupStatus(att: GroupStatus): boolean {
   if (!isValidPubkey(att.group)) return false
   if (!isValidPubkey(att.relay)) return false
   if (!isValidEventId(att.set_hash)) return false
@@ -34,9 +34,9 @@ export function verifyAttestation(att: Attestation): boolean {
   if (!Array.isArray(att.tips) || att.tips.some((tip) => !isValidEventId(tip))) return false
   const sortedTips = [...att.tips].sort()
   if (JSON.stringify(att.tips) !== JSON.stringify(sortedTips)) return false
-  return verifySignature(att.relay, canonicalSerializationAttestation(att), att.sig)
+  return verifySignature(att.relay, canonicalSerializationGroupStatus(att), att.sig)
 }
 
-export async function hashAttestation(att: Attestation): Promise<string> {
-  return sha256Hex(canonicalSerializationAttestation(att))
+export async function hashGroupStatus(att: GroupStatus): Promise<string> {
+  return sha256Hex(canonicalSerializationGroupStatus(att))
 }

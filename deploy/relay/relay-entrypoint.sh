@@ -21,7 +21,7 @@ print(k.pubkey_hex)
     echo "[entrypoint] New relay pubkey: $PUBKEY"
     echo "[entrypoint] BACK UP $KEY_FILE."
     echo "[entrypoint] Losing this file means a new pubkey on restart,"
-    echo "[entrypoint] which invalidates client trust pins and receipts."
+    echo "[entrypoint] which invalidates client trust pins and event_receipts."
     echo "[entrypoint] ============================================"
 else
     echo "[entrypoint] Loading existing key from $KEY_FILE"

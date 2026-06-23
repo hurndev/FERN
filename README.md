@@ -2,7 +2,7 @@
 
 FERN (Fault-tolerant Event Relay Network) is a signed-event protocol for decentralised public group chats. Users and groups are not tied to any particular server, and messages are published to multiple relay servers so the group survives relay outages and migrations.
 
-Relay servers are intentionally simple. They store and forward signed events, return receipts when they accept them, and publish attestations about what they know. They do not make moderation decisions or invent group state. All verification happens locally in the client.
+Relay servers are intentionally simple. They store and forward signed events, return event_receipts when they accept them, and publish group_statuses about what they know. They do not make moderation decisions or invent group state. All verification happens locally in the client.
 
 Message history is structured as a DAG (Directed Acyclic Graph). Events reference prior events, which makes history tamper-evident and lets clients heal missing history by redistributing events that relays are missing. Events with missing parents are stored, but they do not become normal history until the parent chain is complete.
 
@@ -17,6 +17,8 @@ The main design docs are here:
 - [architecture.md](architecture.md)
 - [python-architecture.md](python-architecture.md)
 - [implementation-notes.md](implementation-notes.md)
+- [relay-storage-spam-problem.md](relay-storage-spam-problem.md)
+- [trusted-relay-heal-proposal.md](trusted-relay-heal-proposal.md)
 
 ## Current State
 

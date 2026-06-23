@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from fern.completeness.attestations import compute_set_hash, verify_attestation
+from fern.completeness.group_statuses import compute_set_hash, verify_group_status
 from fern.events.event import Event
 from fern.events.validation import verify_event
 from fern.storage.interfaces import EventStore
@@ -13,7 +13,7 @@ from fern.transport.interfaces import RelayTransport, SyncLockResult
 @dataclass(frozen=True)
 class SyncDiffResult:
     fetched: int = 0
-    backfilled: int = 0
+    healed: int = 0
     used_fallback: bool = False
     skipped_locked: bool = False
 
@@ -36,9 +36,9 @@ async def _full_sync(
     return SyncDiffResult(fetched=fetched, used_fallback=True)
 
 
-async def _try_backfill(transport: RelayTransport, event: Event) -> bool:
+async def _try_heal(transport: RelayTransport, event: Event) -> bool:
     try:
-        await transport.backfill(event)
+        await transport.heal(event)
         return True
     except (AttributeError, NotImplementedError):
         try:
@@ -50,18 +50,18 @@ async def _try_backfill(transport: RelayTransport, event: Event) -> bool:
         return False
 
 
-async def _backfill_events(
+async def _heal_events(
     *, transport: RelayTransport, events: list[Event], batch_size: int
 ) -> int:
-    backfilled = 0
+    healed = 0
     for i in range(0, len(events), batch_size):
         batch = events[i : i + batch_size]
         results = await asyncio.gather(
-            *(_try_backfill(transport, event) for event in batch),
+            *(_try_heal(transport, event) for event in batch),
             return_exceptions=False,
         )
-        backfilled += sum(1 for ok in results if ok)
-    return backfilled
+        healed += sum(1 for ok in results if ok)
+    return healed
 
 
 async def _local_group_events(store: EventStore, group: str) -> list[Event]:
@@ -87,22 +87,22 @@ async def sync_diff(
     batch_size: int = 10,
     wait_on_lock: bool = False,
 ) -> SyncDiffResult:
-    """Synchronise one relay using attestations, ID diffing, and advisory backfill locks."""
+    """Synchronise one relay using group_statuses, ID diffing, and advisory heal locks."""
     try:
-        attestation = await transport.request_attestation(group)
-        if not verify_attestation(attestation):
+        group_status = await transport.request_group_status(group)
+        if not verify_group_status(group_status):
             return await _full_sync(transport=transport, group=group, store=store)
     except Exception as e:
         if "group not hosted" in str(e).lower():
             local_events = await _local_group_events(store, group)
-            backfilled = await _backfill_events(
+            healed = await _heal_events(
                 transport=transport, events=local_events, batch_size=batch_size
             )
-            return SyncDiffResult(backfilled=backfilled)
+            return SyncDiffResult(healed=healed)
         return await _full_sync(transport=transport, group=group, store=store)
 
     local_ids = await store.get_known_set(group)
-    if attestation.set_hash == compute_set_hash(local_ids):
+    if group_status.set_hash == compute_set_hash(local_ids):
         return SyncDiffResult()
 
     lock_acquired = False
@@ -118,11 +118,11 @@ async def sync_diff(
 
             await asyncio.sleep(lock_result.expires_in or 30)
             try:
-                recheck = await transport.request_attestation(group)
+                recheck = await transport.request_group_status(group)
             except Exception:
                 return await _full_sync(transport=transport, group=group, store=store)
             local_ids = await store.get_known_set(group)
-            if verify_attestation(recheck) and recheck.set_hash == compute_set_hash(local_ids):
+            if verify_group_status(recheck) and recheck.set_hash == compute_set_hash(local_ids):
                 return SyncDiffResult()
             lock_result = await transport.sync_lock(group, client_id)
             if not lock_result.granted:
@@ -135,10 +135,10 @@ async def sync_diff(
         except Exception as e:
             if "group not hosted" in str(e).lower():
                 local_events = await _local_group_events(store, group)
-                backfilled = await _backfill_events(
+                healed = await _heal_events(
                     transport=transport, events=local_events, batch_size=batch_size
                 )
-                return SyncDiffResult(backfilled=backfilled)
+                return SyncDiffResult(healed=healed)
             return await _full_sync(transport=transport, group=group, store=store)
 
         local_ids = await store.get_known_set(group)
@@ -159,16 +159,16 @@ async def sync_diff(
             await store.put_event(event)
 
         missing_on_relay_set = set(missing_on_relay)
-        to_backfill = [
+        to_heal = [
             event
             for event in await _local_group_events(store, group)
             if event.id in missing_on_relay_set
         ]
-        backfilled = await _backfill_events(
-            transport=transport, events=to_backfill, batch_size=batch_size
+        healed = await _heal_events(
+            transport=transport, events=to_heal, batch_size=batch_size
         )
 
-        return SyncDiffResult(fetched=fetched, backfilled=backfilled)
+        return SyncDiffResult(fetched=fetched, healed=healed)
     finally:
         if lock_acquired:
             try:

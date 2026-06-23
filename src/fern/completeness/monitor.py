@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from fern.completeness.attestations import (
-    Attestation,
+from fern.completeness.group_statuses import (
+    GroupStatus,
     compute_set_hash,
-    hash_attestation,
+    hash_group_status,
 )
-from fern.completeness.receipts import Receipt
+from fern.completeness.event_receipts import EventReceipt
 from fern.completeness.trust_ledger import Fault
 
 
@@ -23,37 +23,37 @@ class MonitorResult:
 def monitor_pass(
     *,
     local_known_set: Iterable[str],
-    local_receipts_for_relay: Mapping[str, Receipt],
-    new_attestation: Attestation,
-    prev_attestation: Attestation | None,
+    local_event_receipts_for_relay: Mapping[str, EventReceipt],
+    new_group_status: GroupStatus,
+    prev_group_status: GroupStatus | None,
     relay_pubkey: str,
-    sibling_attestations: Mapping[str, Attestation],
+    sibling_group_statuses: Mapping[str, GroupStatus],
     now_ts: int,
 ) -> MonitorResult:
     faults: list[Fault] = []
     known_set = frozenset(local_known_set)
     local_hash = compute_set_hash(known_set)
-    in_sync = local_hash == new_attestation.set_hash
+    in_sync = local_hash == new_group_status.set_hash
 
-    if prev_attestation is not None:
-        expected_prev = hash_attestation(prev_attestation)
-        if new_attestation.prev != expected_prev:
+    if prev_group_status is not None:
+        expected_prev = hash_group_status(prev_group_status)
+        if new_group_status.prev != expected_prev:
             faults.append(
                 Fault(
                     ts=now_ts,
-                    kind="attestation_chain_break",
+                    kind="group_status_chain_break",
                     evidence=(
-                        f"Relay {relay_pubkey[:16]}... attestation prev "
-                        f"does not match hash of previous attestation"
+                        f"Relay {relay_pubkey[:16]}... group_status prev "
+                        f"does not match hash of previous group_status"
                     ),
                 )
             )
 
     divergent_relays: list[str] = []
-    for other_relay, other_att in sibling_attestations.items():
+    for other_relay, other_att in sibling_group_statuses.items():
         if other_relay == relay_pubkey:
             continue
-        if other_att.set_hash != new_attestation.set_hash:
+        if other_att.set_hash != new_group_status.set_hash:
             divergent_relays.append(other_relay)
 
     if in_sync:

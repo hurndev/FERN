@@ -11,16 +11,16 @@ import websockets.asyncio.client as ws_client
 from websockets.exceptions import ConnectionClosed
 
 from fern.events.event import Event
-from fern.completeness.receipts import Receipt
-from fern.completeness.attestations import Attestation
+from fern.completeness.event_receipts import EventReceipt
+from fern.completeness.group_statuses import GroupStatus
 from fern.completeness.fraud_proofs import FraudProof
 from fern.transport.interfaces import RelayMetadata, SyncLockResult
 
 
-_PUSH_TYPES = frozenset({"event", "attestation"})
+_PUSH_TYPES = frozenset({"event", "group_status"})
 _RESPONSE_TYPES = frozenset(
     {
-        "receipt",
+        "event_receipt",
         "not_found",
         "sync_complete",
         "ok",
@@ -65,8 +65,8 @@ def _json_to_event(d: dict) -> Event:
     )
 
 
-def _json_to_attestation(d: dict) -> Attestation:
-    return Attestation(
+def _json_to_group_status(d: dict) -> GroupStatus:
+    return GroupStatus(
         group=d["group"],
         relay=d["relay"],
         set_hash=d["set_hash"],
@@ -78,13 +78,13 @@ def _json_to_attestation(d: dict) -> Attestation:
     )
 
 
-def _receipt_to_json(receipt: Receipt) -> dict:
+def _event_receipt_to_json(event_receipt: EventReceipt) -> dict:
     return {
-        "event_id": receipt.event_id,
-        "group": receipt.group,
-        "relay": receipt.relay,
-        "ts": receipt.ts,
-        "sig": receipt.sig,
+        "event_id": event_receipt.event_id,
+        "group": event_receipt.group,
+        "relay": event_receipt.relay,
+        "ts": event_receipt.ts,
+        "sig": event_receipt.sig,
     }
 
 
@@ -94,7 +94,7 @@ class WebSocketRelayClient:
         self.relay_pubkey = relay_pubkey
         self._ws: ws_client.ClientConnection | None = None
         self._event_callbacks: list[Callable[[Event], Awaitable[None]]] = []
-        self._attestation_callbacks: list[Callable[[Attestation], Awaitable[None]]] = []
+        self._group_status_callbacks: list[Callable[[GroupStatus], Awaitable[None]]] = []
         self._response_queue: asyncio.Queue[dict] | None = None
         self._listen_task: asyncio.Task | None = None
         self._subscribed_groups: set[str] = set()
@@ -150,13 +150,13 @@ class WebSocketRelayClient:
         await self._send(msg)
         self._subscribed_groups.discard(group)
 
-    async def publish(self, event: Event) -> Receipt:
+    async def publish(self, event: Event) -> EventReceipt:
         msg = {"action": "publish", "event": _event_to_json(event)}
         await self._send(msg)
         response = await self._recv_response()
-        if response.get("type") == "receipt":
-            r = response["receipt"]
-            return Receipt(
+        if response.get("type") == "event_receipt":
+            r = response["event_receipt"]
+            return EventReceipt(
                 event_id=r["event_id"],
                 group=r["group"],
                 relay=r["relay"],
@@ -165,20 +165,20 @@ class WebSocketRelayClient:
             )
         raise ValueError(f"publish failed: {response.get('message', 'unknown error')}")
 
-    async def backfill(self, event: Event) -> Receipt:
-        msg = {"action": "backfill", "event": _event_to_json(event)}
+    async def heal(self, event: Event) -> EventReceipt:
+        msg = {"action": "heal", "event": _event_to_json(event)}
         await self._send(msg)
         response = await self._recv_response()
-        if response.get("type") == "receipt":
-            r = response["receipt"]
-            return Receipt(
+        if response.get("type") == "event_receipt":
+            r = response["event_receipt"]
+            return EventReceipt(
                 event_id=r["event_id"],
                 group=r["group"],
                 relay=r["relay"],
                 ts=r["ts"],
                 sig=r["sig"],
             )
-        raise ValueError(f"backfill failed: {response.get('message', 'unknown error')}")
+        raise ValueError(f"heal failed: {response.get('message', 'unknown error')}")
 
     async def get(self, event_id: str) -> Event | None:
         msg = {"action": "get", "id": event_id}
@@ -215,7 +215,7 @@ class WebSocketRelayClient:
                     break
                 if r_type == "event":
                     yield _json_to_event(response["event"])
-                elif r_type in ("attestation",):
+                elif r_type in ("group_status",):
                     self._route_push(response)
         finally:
             self._awaiting_response = False
@@ -289,8 +289,8 @@ class WebSocketRelayClient:
         finally:
             self._awaiting_response = False
 
-    async def request_attestation(self, group: str) -> Attestation:
-        msg = {"action": "attestation", "group": group}
+    async def request_group_status(self, group: str) -> GroupStatus:
+        msg = {"action": "group_status", "group": group}
         self._awaiting_response = True
         try:
             await self._send(msg)
@@ -298,10 +298,10 @@ class WebSocketRelayClient:
             while True:
                 response = await self._recv_response()
                 r_type = response.get("type")
-                if r_type == "attestation":
-                    return _json_to_attestation(response["attestation"])
+                if r_type == "group_status":
+                    return _json_to_group_status(response["group_status"])
                 if r_type == "error":
-                    raise ValueError(f"attestation request failed: {response.get('message')}")
+                    raise ValueError(f"group_status request failed: {response.get('message')}")
                 if r_type in _PUSH_TYPES:
                     self._route_push(response)
                     continue
@@ -318,7 +318,7 @@ class WebSocketRelayClient:
                 "relay": proof.relay,
                 "event_id": proof.event_id,
                 "event": _event_to_json(proof.event) if proof.event else None,
-                "receipt": _receipt_to_json(proof.receipt) if proof.receipt else None,
+                "event_receipt": _event_receipt_to_json(proof.event_receipt) if proof.event_receipt else None,
                 "evidence": proof.evidence,
             },
         }
@@ -346,16 +346,16 @@ class WebSocketRelayClient:
             if r_type == "fraud_proof":
                 fp = response["fraud_proof"]
                 event = _json_to_event(fp["event"]) if fp.get("event") else None
-                receipt_data = fp.get("receipt", {})
-                receipt = (
-                    Receipt(
-                        event_id=receipt_data.get("event_id", ""),
-                        group=receipt_data.get("group", ""),
-                        relay=receipt_data.get("relay", ""),
-                        ts=receipt_data.get("ts", 0),
-                        sig=receipt_data.get("sig", ""),
+                event_receipt_data = fp.get("event_receipt", {})
+                event_receipt = (
+                    EventReceipt(
+                        event_id=event_receipt_data.get("event_id", ""),
+                        group=event_receipt_data.get("group", ""),
+                        relay=event_receipt_data.get("relay", ""),
+                        ts=event_receipt_data.get("ts", 0),
+                        sig=event_receipt_data.get("sig", ""),
                     )
-                    if receipt_data
+                    if event_receipt_data
                     else None
                 )
                 yield FraudProof(
@@ -364,15 +364,15 @@ class WebSocketRelayClient:
                     relay=fp.get("relay", ""),
                     event_id=fp.get("event_id", ""),
                     event=event,
-                    receipt=receipt,
+                    event_receipt=event_receipt,
                     evidence=fp.get("evidence", ""),
                 )
 
     def on_event(self, callback: Callable[[Event], Awaitable[None]]) -> None:
         self._event_callbacks.append(callback)
 
-    def on_attestation(self, callback: Callable[[Attestation], Awaitable[None]]) -> None:
-        self._attestation_callbacks.append(callback)
+    def on_group_status(self, callback: Callable[[GroupStatus], Awaitable[None]]) -> None:
+        self._group_status_callbacks.append(callback)
 
     def _route_push(self, msg: dict) -> None:
         msg_type = msg.get("type")
@@ -380,9 +380,9 @@ class WebSocketRelayClient:
             event = _json_to_event(msg["event"])
             for cb in self._event_callbacks:
                 asyncio.create_task(cb(event))
-        elif msg_type == "attestation":
-            att = _json_to_attestation(msg["attestation"])
-            for cb in self._attestation_callbacks:
+        elif msg_type == "group_status":
+            att = _json_to_group_status(msg["group_status"])
+            for cb in self._group_status_callbacks:
                 asyncio.create_task(cb(att))
 
     async def _send(self, msg: dict) -> None:

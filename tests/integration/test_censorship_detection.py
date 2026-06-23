@@ -4,7 +4,7 @@ from fern.crypto.keys import Keypair
 from fern.identity.user import UserIdentity
 from fern.events.build import build_event
 from fern.events.types import ProtocolTypes
-from fern.completeness.receipts import Receipt
+from fern.completeness.event_receipts import EventReceipt
 from fern.completeness.trust_ledger import TrustLedger
 from fern.client.monitor_runner import run_monitor_pass
 from fern.storage.memory import MemoryStore
@@ -12,7 +12,7 @@ from fern.transport.fake import FakeRelayNetwork
 
 
 @pytest.mark.asyncio
-async def test_censorship_detection_via_attestation_divergence() -> None:
+async def test_censorship_detection_via_group_status_divergence() -> None:
     network = FakeRelayNetwork()
     relay_a, relay_b, relay_c = network.spawn(count=3)
 
@@ -58,14 +58,14 @@ async def test_censorship_detection_via_attestation_divergence() -> None:
 
     relay_a.drop_event(msg.id)
 
-    attestation_a = await relay_a.request_attestation(group_kp.pubkey_hex)
-    attestation_b = await relay_b.request_attestation(group_kp.pubkey_hex)
+    group_status_a = await relay_a.request_group_status(group_kp.pubkey_hex)
+    group_status_b = await relay_b.request_group_status(group_kp.pubkey_hex)
 
-    assert attestation_a.set_hash != attestation_b.set_hash
+    assert group_status_a.set_hash != group_status_b.set_hash
 
 
 @pytest.mark.asyncio
-async def test_monitor_pass_detects_missing_event_with_receipt() -> None:
+async def test_monitor_pass_detects_missing_event_with_event_receipt() -> None:
     network = FakeRelayNetwork()
     relay_a, relay_b, relay_c = network.spawn(count=3)
 
@@ -105,14 +105,14 @@ async def test_monitor_pass_detects_missing_event_with_receipt() -> None:
         content={"text": "hello", "channel": "general"},
     )
 
-    receipt_a = await relay_a.publish(msg)
+    event_receipt_a = await relay_a.publish(msg)
     await relay_b.publish(msg)
     await relay_c.publish(msg)
 
     relay_a.drop_event(msg.id)
 
-    attestation_a = await relay_a.request_attestation(group_kp.pubkey_hex)
-    attestation_b = await relay_b.request_attestation(group_kp.pubkey_hex)
+    group_status_a = await relay_a.request_group_status(group_kp.pubkey_hex)
+    group_status_b = await relay_b.request_group_status(group_kp.pubkey_hex)
 
     store = MemoryStore()
     await store.put_event(genesis)
@@ -120,25 +120,25 @@ async def test_monitor_pass_detects_missing_event_with_receipt() -> None:
 
     known_set = await store.get_known_set(group_kp.pubkey_hex)
 
-    receipts_for_relay: dict[str, Receipt] = {}
+    event_receipts_for_relay: dict[str, EventReceipt] = {}
     assert msg.id is not None
-    receipts_for_relay[msg.id] = receipt_a
+    event_receipts_for_relay[msg.id] = event_receipt_a
 
     trust_ledger = TrustLedger()
-    sibling_attestations = {relay_b.relay_pubkey: attestation_b}
+    sibling_group_statuses = {relay_b.relay_pubkey: group_status_b}
 
     result = await run_monitor_pass(
         relay=relay_a,
-        attestation=attestation_a,
+        group_status=group_status_a,
         local_known_set=known_set,
-        receipts_for_relay=receipts_for_relay,
+        event_receipts_for_relay=event_receipts_for_relay,
         trust_ledger=trust_ledger,
-        sibling_attestations=sibling_attestations,
+        sibling_group_statuses=sibling_group_statuses,
     )
 
     assert not result.in_sync
     fault_kinds = [f.kind for f in result.faults]
-    assert "missing_event_with_receipt" in fault_kinds
+    assert "missing_event_with_event_receipt" in fault_kinds
 
     entry = trust_ledger.entries[relay_a.relay_pubkey]
-    assert any(f.kind == "missing_event_with_receipt" for f in entry.observed_faults)
+    assert any(f.kind == "missing_event_with_event_receipt" for f in entry.observed_faults)

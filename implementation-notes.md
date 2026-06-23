@@ -68,13 +68,13 @@ Always use `Encoding.Raw` + `PrivateFormat.Raw` / `PublicFormat.Raw`. Never use 
 
 `event.py` uses `field(default_factory=dict)` for `content` and `()` for `parents`. If you add new fields with mutable defaults, always use `field(default_factory=...)`.
 
-### 3.5 Attestation `set_hash` empty-set case
+### 3.5 GroupStatus `set_hash` empty-set case
 
 Per `spec.md` § 9.2.3: `set_hash` of an empty set is `sha256_hex(b"")` = `"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"`. This is computed correctly by `compute_set_hash()` — it returns `sha256_hex(b"")` when the input is empty.
 
-### 3.6 Attestation `prev` chain
+### 3.6 GroupStatus `prev` chain
 
-`prev` is the SHA-256 hash of the previous attestation's canonical serialization. It is NOT the previous attestation's `sig` or any `id` field (attestations don't have an `id`). The `hash_attestation()` function computes it. The `build_attestation(prev=previous_att)` automatically sets this.
+`prev` is the SHA-256 hash of the previous group_status's canonical serialization. It is NOT the previous group_status's `sig` or any `id` field (group_statuses don't have an `id`). The `hash_group_status()` function computes it. The `build_group_status(prev=previous_att)` automatically sets this.
 
 ### 3.7 Conflict resolution order
 
@@ -93,22 +93,22 @@ This matters for attack resistance. If a client allowed an arbitrary disconnecte
 ### 3.10 Monitor pass: two-stage design
 
 The completeness layer has two stages:
-1. **Pure `monitor_pass()`** — compares attestation `set_hash` to local known set. Returns `MonitorResult` with `in_sync` flag and `candidates_to_check` tuple.
-2. **Async `run_monitor_pass()`** — for each candidate, queries the relay via `get()` to check if it's truly missing. Builds fraud proofs for events with receipts. Writes faults to trust ledger.
+1. **Pure `monitor_pass()`** — compares group_status `set_hash` to local known set. Returns `MonitorResult` with `in_sync` flag and `candidates_to_check` tuple.
+2. **Async `run_monitor_pass()`** — for each candidate, queries the relay via `get()` to check if it's truly missing. Builds fraud proofs for events with event_receipts. Writes faults to trust ledger.
 
 The pure function cannot determine which specific events are missing without network I/O — that's the async layer's job.
 
-### 3.11 Receipts are author-local
+### 3.11 Event receipts are author-local
 
-Receipts are stored on the author's device via `ReceiptStore`. They are NOT events in the DAG. They are shared ONLY when building a fraud proof. Do not add an "auto-gossip receipts" mechanism — the protocol intentionally avoids this complexity.
+Event receipts are stored on the author's device via `EventReceiptStore`. They are NOT events in the DAG. They are shared ONLY when building a fraud proof. Do not add an "auto-gossip event_receipts" mechanism — the protocol intentionally avoids this complexity.
 
 ### 3.12 Fraud proofs are not DAG events
 
 Fraud proofs are standalone objects stored in a side table (`fraud_proofs`) on relays, queryable via `submit_fraud_proof` / `query_fraud_proofs`. They do not affect group state or the DAG.
 
-### 3.13 Relay `subscribe` returns an attestation
+### 3.13 Relay `subscribe` returns an group_status
 
-Per spec § 10.4.1, the relay responds to `subscribe` with the latest attestation for that group. `WebSocketRelayClient.subscribe()` sends the subscribe message but doesn't wait for a response (the response comes as a push via the listen loop). The `RelayServer._handle_subscribe()` builds and returns the attestation, and adds the client to the subscriber set.
+Per spec § 10.4.1, the relay responds to `subscribe` with the latest group_status for that group. `WebSocketRelayClient.subscribe()` sends the subscribe message but doesn't wait for a response (the response comes as a push via the listen loop). The `RelayServer._handle_subscribe()` builds and returns the group_status, and adds the client to the subscriber set.
 
 ### 3.14 Relay auto-hosts on valid genesis
 
@@ -116,7 +116,7 @@ The `RelayServer._handle_publish()` checks if an event is a `genesis` for an unk
 
 ### 3.15 SqliteStore is synchronous behind an async API
 
-`SqliteStore` methods are async to match the `EventStore` / `ReceiptStore` protocols, but the SQLite calls themselves run synchronously under a store-local lock. Each operation opens a short-lived SQLite connection inside that lock. Do not share a single SQLite connection across `asyncio.to_thread()` worker threads: Python's sqlite connection/thread behavior is easy to break under concurrent relay backfill.
+`SqliteStore` methods are async to match the `EventStore` / `EventReceiptStore` protocols, but the SQLite calls themselves run synchronously under a store-local lock. Each operation opens a short-lived SQLite connection inside that lock. Do not share a single SQLite connection across `asyncio.to_thread()` worker threads: Python's sqlite connection/thread behavior is easy to break under concurrent relay heal.
 
 ### 3.16 WebSocket connection scheme
 
@@ -124,9 +124,9 @@ The `WebSocketRelayClient.connect()` method auto-prepends `wss://` to URLs that 
 
 ### 3.17 `_awaiting_response` flag in WebSocketRelayClient
 
-The single-reader model routes push messages (`event`, `attestation`) to callbacks and response messages to the queue. But `sync()` and `get()` responses are ALSO `event`-type messages. The `_awaiting_response` flag tells the listen loop to route ALL messages to the queue when a request-response method is active, preventing sync/get/attestation responses from being swallowed by push callbacks. Set it `True` before sending the request, `False` in the `finally` block.
+The single-reader model routes push messages (`event`, `group_status`) to callbacks and response messages to the queue. But `sync()` and `get()` responses are ALSO `event`-type messages. The `_awaiting_response` flag tells the listen loop to route ALL messages to the queue when a request-response method is active, preventing sync/get/group_status responses from being swallowed by push callbacks. Set it `True` before sending the request, `False` in the `finally` block.
 
-Bracken's browser relay client has a related trap: pending request resolvers must be keyed by response type. A `publish` request expects a `receipt`; if an unrelated pushed message or error consumes the resolver first, the UI can show "sending" then "failed" even though the relay accepted the event.
+Bracken's browser relay client has a related trap: pending request resolvers must be keyed by response type. A `publish` request expects a `event_receipt`; if an unrelated pushed message or error consumes the resolver first, the UI can show "sending" then "failed" even though the relay accepted the event.
 
 ### 3.18 Relay `_hosted_groups` reconstruction
 
@@ -136,15 +136,15 @@ Bracken's browser relay client has a related trap: pending request resolvers mus
 
 `cli/config.py` uses `FERN_HOME` env var to override the default `~/.fern` directory. All CLI data (config + per-group SQLite caches) lives under that path. When unset, falls back to `~/.fern`. This allows running multiple isolated CLI instances on the same machine:
 
-### 3.20 Backfill vs Publish
+### 3.20 Heal vs Publish
 
-`backfill` stores an event without broadcasting. `publish` stores and broadcasts. Use `backfill` when healing or seeding a relay with historical events. Use `publish` for newly-created local events. The relay deduplicates both: if it already has the event, it returns a receipt without re-verifying, re-storing, or broadcasting.
+`heal` stores an event without broadcasting. `publish` stores and broadcasts. Use `heal` when healing or seeding a relay with historical events. Use `publish` for newly-created local events. The relay deduplicates both: if it already has the event, it returns an event_receipt without re-verifying, re-storing, or broadcasting.
 
 ### 3.21 Sync lock is advisory and lease-based
 
-The sync lock prevents thundering herd during backfill. It is per-group, lease-based (30s TTL, lazy expiry), and advisory. Clients that do not support it can still backfill; relay-side dedup makes this safe but less efficient.
+The sync lock prevents thundering herd during heal. It is per-group, lease-based (30s TTL, lazy expiry), and advisory. Clients that do not support it can still heal; relay-side dedup makes this safe but less efficient.
 
-CLI commands use opportunistic lock behavior: if another client holds the lock, they skip that relay and exit promptly. Bracken uses event-driven retry gates: when denied, it records `nextRetryAt` and retries on a later attestation/reconnect/manual sync trigger after the lease window.
+CLI commands use opportunistic lock behavior: if another client holds the lock, they skip that relay and exit promptly. Bracken uses event-driven retry gates: when denied, it records `nextRetryAt` and retries on a later group_status/reconnect/manual sync trigger after the lease window.
 
 ---
 
@@ -200,7 +200,7 @@ Relay start commands print the local WebSocket address, mapping wildcard binds s
 
 ## 5. Bracken Patterns
 
-Bracken is the browser SPA in `bracken/`. It stores identity, events, receipts, relay pins, trust ledger, and metadata in IndexedDB.
+Bracken is the browser SPA in `bracken/`. It stores identity, events, event_receipts, relay pins, trust ledger, and metadata in IndexedDB.
 
 Current UI and protocol behavior:
 - Usernames/nicknames are not unique. `chat.nickname_set` is per-author display metadata; two users can display the same name.
@@ -234,8 +234,8 @@ For tests needing relay interaction without a network:
 ```python
 network = FakeRelayNetwork()
 relay_a, relay_b, relay_c = network.spawn(count=3)
-receipt = await relay_a.publish(event)
-attestation = await relay_a.request_attestation(group)
+event_receipt = await relay_a.publish(event)
+group_status = await relay_a.request_group_status(group)
 ```
 
 `FakeRelay` implements the same `RelayTransport` Protocol as `WebSocketRelayClient`, so the same assertions work.
@@ -292,7 +292,7 @@ Use docstrings and clear naming. Comments should explain WHY (when non-obvious).
 ## 8. What's Explicitly Out of Scope
 
 - Threshold founder signing (founder single-key)
-- Merkle exclusion proofs (simple sorted-set-hash attestations)
+- Merkle exclusion proofs (simple sorted-set-hash group_statuses)
 - Snapshots (verify from genesis)
 - Cross-client reputation propagation (local trust ledgers)
 - Relay-side authorization enforcement (all moderation is client-side)
@@ -315,16 +315,16 @@ Note: `bracken/` is a separate TypeScript SPA (Vite + React) implementing the sa
 - Hash output: 32 bytes → 64-char lowercase hex
 - Empty-set `set_hash`: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
 - Suggested relay GC threshold: N=1000
-- Suggested attestation interval: 5 seconds or 100 events
+- Suggested group_status interval: 5 seconds or 100 events
 - Sync lock TTL: 30 seconds
 - Sync lock renewal interval: 60% of TTL
-- Backfill batch size: 10 concurrent events
+- Heal batch size: 10 concurrent events
 - Default K (relays per publish): 3 (all canonical relays)
-- Default K_min (receipts for safe ack): 2
+- Default K_min (event_receipts for safe ack): 2
 - `FERN_HOME` env var: overrides `~/.fern` for CLI data storage
 - Relay log formatter: coloured output by level (INFO=green, WARN=yellow, ERROR=red), `--no-color` to disable
 - Relay metadata endpoint: HTTP GET on same host/port (wss→https scheme swap), returns JSON with CORS headers
-- `fern-relay --key-file PATH`: load the relay's 64-char hex private key from a file instead of generating one. The default behaviour (no flag) mints a fresh keypair every start, which breaks client trust pins and invalidates outstanding receipts — only acceptable for ephemeral/dev use. For a long-lived relay, pass `--key-file` and persist the keyfile outside the container. The `deploy/relay/relay-entrypoint.sh` wrapper handles first-run generation automatically.
+- `fern-relay --key-file PATH`: load the relay's 64-char hex private key from a file instead of generating one. The default behaviour (no flag) mints a fresh keypair every start, which breaks client trust pins and invalidates outstanding event_receipts — only acceptable for ephemeral/dev use. For a long-lived relay, pass `--key-file` and persist the keyfile outside the container. The `deploy/relay/relay-entrypoint.sh` wrapper handles first-run generation automatically.
 
 ### 9.2 Event type names
 
@@ -337,23 +337,23 @@ Future namespaces: `<appname>.<type>` (e.g., `poll.vote`, `schedule.event`)
 ### 9.3 Canonical serialization order
 
 - Event: `[type, group, author, sorted(parents), sorted_content_recursively, ts, sorted(tags)]`
-- Receipt: `[event_id, group, relay, ts]`
-- Attestation: `[group, relay, set_hash, sorted(tips), count, prev_or_null, ts]`
-- Fraud proof: `[type, group, relay, event_id, event_array, receipt_array, evidence]`
+- EventReceipt: `[event_id, group, relay, ts]`
+- GroupStatus: `[group, relay, set_hash, sorted(tips), count, prev_or_null, ts]`
+- Fraud proof: `[type, group, relay, event_id, event_array, event_receipt_array, evidence]`
 
 ### 9.4 WebSocket actions
 
 | Action | Purpose |
 |---|---|
-| `subscribe` | Start receiving events + attestations for a group |
-| `publish` | Submit an event; relay validates and returns receipt |
+| `subscribe` | Start receiving events + group_statuses for a group |
+| `publish` | Submit an event; relay validates and returns event_receipt |
 | `get` | Request a specific event by ID |
 | `sync` | Bulk-fetch events since a timestamp |
 | `sync_ids` | Bulk-fetch event IDs only (no event bodies) |
-| `sync_lock` | Acquire/renew per-group backfill coordination lock |
+| `sync_lock` | Acquire/renew per-group heal coordination lock |
 | `sync_unlock` | Release sync lock |
-| `backfill` | Store an event without broadcasting to subscribers |
-| `attestation` | Request relay's latest attestation |
+| `heal` | Store an event without broadcasting to subscribers |
+| `group_status` | Request relay's latest group_status |
 | `submit_fraud_proof` | Submit a fraud proof for storage and gossip |
 | `query_fraud_proofs` | Query stored fraud proofs |
 | `unsubscribe` | Stop receiving events for a group |

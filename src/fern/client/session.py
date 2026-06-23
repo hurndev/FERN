@@ -7,13 +7,13 @@ import asyncio
 from fern.events.event import Event
 from fern.events.types import ProtocolTypes
 from fern.events.validation import verify_event
-from fern.completeness.attestations import Attestation
+from fern.completeness.group_statuses import GroupStatus
 from fern.completeness.trust_ledger import TrustLedger
-from fern.completeness.receipts import Receipt
+from fern.completeness.event_receipts import EventReceipt
 from fern.identity.user import UserIdentity
 from fern.state.types import GroupState
 from fern.state.machine import derive_group_state
-from fern.storage.interfaces import EventStore, ReceiptStore
+from fern.storage.interfaces import EventStore, EventReceiptStore
 from fern.transport.interfaces import RelayTransport
 from fern.client.bootstrap import fetch_genesis, initial_sync
 from fern.client.publisher import publish_event
@@ -28,18 +28,18 @@ class GroupSession:
         *,
         user: UserIdentity,
         store: EventStore,
-        receipt_store: ReceiptStore,
+        event_receipt_store: EventReceiptStore,
         trust_ledger: TrustLedger | None = None,
     ) -> None:
         self._user = user
         self._store = store
-        self._receipt_store = receipt_store
+        self._event_receipt_store = event_receipt_store
         self._trust_ledger = trust_ledger or TrustLedger()
         self._transports: list[RelayTransport] = []
         self._group_pubkey: str | None = None
         self._state: GroupState | None = None
         self._event_callbacks: list[Callable[[Event], Awaitable[None]]] = []
-        self._attestation_callbacks: list[Callable[[Attestation], Awaitable[None]]] = []
+        self._group_status_callbacks: list[Callable[[GroupStatus], Awaitable[None]]] = []
         self._state_callbacks: list[Callable[[GroupState], Awaitable[None]]] = []
         self._state_events_seen: set[str] = set()
         self._syncs_in_flight: set[tuple[str, str]] = set()
@@ -86,7 +86,7 @@ class GroupSession:
 
         for transport in self._transports:
             transport.on_event(self._handle_event)
-            transport.on_attestation(self._handle_attestation)
+            transport.on_group_status(self._handle_group_status)
 
         state, rejected = derive_group_state(events)
         self._state = state
@@ -99,11 +99,11 @@ class GroupSession:
 
         return state
 
-    async def publish(self, event: Event) -> tuple[Event, list[Receipt]]:
+    async def publish(self, event: Event) -> tuple[Event, list[EventReceipt]]:
         return await publish_event(
             event,
             self._transports,
-            receipt_store=self._receipt_store,
+            event_receipt_store=self._event_receipt_store,
         )
 
     async def get_known_set(self) -> frozenset[str]:
@@ -124,8 +124,8 @@ class GroupSession:
     def on_event(self, callback: Callable[[Event], Awaitable[None]]) -> None:
         self._event_callbacks.append(callback)
 
-    def on_attestation(self, callback: Callable[[Attestation], Awaitable[None]]) -> None:
-        self._attestation_callbacks.append(callback)
+    def on_group_status(self, callback: Callable[[GroupStatus], Awaitable[None]]) -> None:
+        self._group_status_callbacks.append(callback)
 
     def on_state_change(self, callback: Callable[[GroupState], Awaitable[None]]) -> None:
         self._state_callbacks.append(callback)
@@ -169,31 +169,31 @@ class GroupSession:
             except Exception:
                 pass
 
-    async def _handle_attestation(self, attestation: Attestation) -> None:
+    async def _handle_group_status(self, group_status: GroupStatus) -> None:
         if self._group_pubkey is None:
             return
 
         for transport in self._transports:
-            if transport.relay_pubkey == attestation.relay:
-                sibling_attestations = {}
+            if transport.relay_pubkey == group_status.relay:
+                sibling_group_statuses = {}
                 for t in self._transports:
-                    if t.relay_pubkey != attestation.relay and t.relay_pubkey:
+                    if t.relay_pubkey != group_status.relay and t.relay_pubkey:
                         entry = self._trust_ledger.entries.get(t.relay_pubkey)
-                        if entry and entry.last_attestation:
-                            sibling_attestations[t.relay_pubkey] = entry.last_attestation
+                        if entry and entry.last_group_status:
+                            sibling_group_statuses[t.relay_pubkey] = entry.last_group_status
 
                 known_set = await self.get_known_set()
 
-                receipts_for_relay: dict[str, Receipt] = {}
+                event_receipts_for_relay: dict[str, EventReceipt] = {}
 
                 try:
                     await run_monitor_pass(
                         relay=transport,
-                        attestation=attestation,
+                        group_status=group_status,
                         local_known_set=known_set,
-                        receipts_for_relay=receipts_for_relay,
+                        event_receipts_for_relay=event_receipts_for_relay,
                         trust_ledger=self._trust_ledger,
-                        sibling_attestations=sibling_attestations,
+                        sibling_group_statuses=sibling_group_statuses,
                     )
                 except Exception:
                     pass
@@ -217,9 +217,9 @@ class GroupSession:
                         self._syncs_in_flight.discard(key)
                 break
 
-        for cb in self._attestation_callbacks:
+        for cb in self._group_status_callbacks:
             try:
-                asyncio.ensure_future(cb(attestation))
+                asyncio.ensure_future(cb(group_status))
             except Exception:
                 pass
 

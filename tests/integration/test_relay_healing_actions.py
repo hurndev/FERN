@@ -49,7 +49,7 @@ async def test_relay_healing_actions(tmp_path, monkeypatch: pytest.MonkeyPatch) 
 
         publish = await server._handle_publish({"event": _event_to_json_dict(genesis)}, None)  # type: ignore[arg-type]
         assert publish is not None
-        assert publish[0]["type"] == "receipt"
+        assert publish[0]["type"] == "event_receipt"
 
         ids = await server._handle_sync_ids({"group": group_keypair.pubkey})
         assert ids == [{"type": "ids", "group": group_keypair.pubkey, "ids": [genesis.id]}]
@@ -85,9 +85,9 @@ async def test_relay_healing_actions(tmp_path, monkeypatch: pytest.MonkeyPatch) 
             broadcasts.append(event)
 
         server._broadcast_event = record_broadcast  # type: ignore[method-assign]
-        backfill = await server._handle_backfill({"event": _event_to_json_dict(message)}, None)  # type: ignore[arg-type]
-        assert backfill is not None
-        assert backfill[0]["type"] == "receipt"
+        heal = await server._handle_heal({"event": _event_to_json_dict(message)}, None)  # type: ignore[arg-type]
+        assert heal is not None
+        assert heal[0]["type"] == "event_receipt"
         assert await server._store.get_event(message.id) == message
         assert broadcasts == []
     finally:

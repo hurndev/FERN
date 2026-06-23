@@ -1,6 +1,6 @@
 import type { FernEvent } from './events'
 
-export interface Receipt {
+export interface EventReceipt {
   event_id: string
   group: string
   relay: string
@@ -8,7 +8,7 @@ export interface Receipt {
   sig: string
 }
 
-export interface Attestation {
+export interface GroupStatus {
   group: string
   relay: string
   set_hash: string
@@ -36,14 +36,14 @@ export interface SyncLockResult {
 }
 
 type EventCallback = (event: FernEvent) => void
-type AttestationCallback = (att: Attestation) => void
+type GroupStatusCallback = (att: GroupStatus) => void
 
 export class RelayClient {
   url: string
   relayPubkey = ''
   private ws: WebSocket | null = null
   private eventCallbacks: EventCallback[] = []
-  private attestationCallbacks: AttestationCallback[] = []
+  private group_statusCallbacks: GroupStatusCallback[] = []
   private closeCallbacks: (() => void)[] = []
   private connected = false
 
@@ -91,8 +91,8 @@ export class RelayClient {
     this.eventCallbacks.push(cb)
   }
 
-  onAttestation(cb: AttestationCallback): void {
-    this.attestationCallbacks.push(cb)
+  onGroupStatus(cb: GroupStatusCallback): void {
+    this.group_statusCallbacks.push(cb)
   }
 
   onClose(cb: () => void): void {
@@ -115,9 +115,9 @@ export class RelayClient {
     } else if (type === 'event') {
       const event = msg['event'] as FernEvent
       this.eventCallbacks.forEach((cb) => cb(event))
-    } else if (type === 'attestation') {
-      const att = msg['attestation'] as Attestation
-      this.attestationCallbacks.forEach((cb) => cb(att))
+    } else if (type === 'group_status') {
+      const att = msg['group_status'] as GroupStatus
+      this.group_statusCallbacks.forEach((cb) => cb(att))
     }
   }
 
@@ -164,22 +164,22 @@ export class RelayClient {
     this.ws.send(JSON.stringify({ action: 'unsubscribe', group }))
   }
 
-  async publish(event: FernEvent): Promise<Receipt> {
-    const msg = await this.sendRequest<{ receipt: Receipt }>(
-      'receipt',
+  async publish(event: FernEvent): Promise<EventReceipt> {
+    const msg = await this.sendRequest<{ event_receipt: EventReceipt }>(
+      'event_receipt',
       'publish',
       { event },
     )
-    return msg.receipt
+    return msg.event_receipt
   }
 
-  async backfill(event: FernEvent): Promise<Receipt> {
-    const msg = await this.sendRequest<{ receipt: Receipt }>(
-      'receipt',
-      'backfill',
+  async heal(event: FernEvent): Promise<EventReceipt> {
+    const msg = await this.sendRequest<{ event_receipt: EventReceipt }>(
+      'event_receipt',
+      'heal',
       { event },
     )
-    return msg.receipt
+    return msg.event_receipt
   }
 
   async get(eventId: string): Promise<FernEvent | null> {
@@ -260,13 +260,13 @@ export class RelayClient {
     await this.sendRequest('ok', 'sync_unlock', { group, client_id: clientId })
   }
 
-  async requestAttestation(group: string): Promise<Attestation> {
-    const msg = await this.sendRequest<{ attestation: Attestation }>(
-      'attestation',
-      'attestation',
+  async requestGroupStatus(group: string): Promise<GroupStatus> {
+    const msg = await this.sendRequest<{ group_status: GroupStatus }>(
+      'group_status',
+      'group_status',
       { group },
     )
-    return msg.attestation
+    return msg.group_status
   }
 
   async fetchMetadata(): Promise<RelayMetadata> {

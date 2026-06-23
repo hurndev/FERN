@@ -8,7 +8,7 @@ interface BrackenDB extends DBSchema {
     value: FernEvent
     indexes: { 'by-group': string; 'by-ts': number }
   }
-  receipts: {
+  event_receipts: {
     key: string
     value: {
       event_id: string
@@ -35,7 +35,7 @@ interface BrackenDB extends DBSchema {
     key: string
     value: {
       relay_pubkey: string
-      last_attestation: unknown
+      last_group_status: unknown
       observed_faults: { ts: number; kind: string; event_id?: string; evidence: string }[]
     }
   }
@@ -54,8 +54,8 @@ export async function getDB(): Promise<IDBPDatabase<BrackenDB>> {
       const events = db.createObjectStore('events', { keyPath: 'id' })
       events.createIndex('by-group', 'group')
       events.createIndex('by-ts', 'ts')
-      const receipts = db.createObjectStore('receipts', { keyPath: 'event_id' })
-      receipts.createIndex('by-event', 'event_id')
+      const event_receipts = db.createObjectStore('event_receipts', { keyPath: 'event_id' })
+      event_receipts.createIndex('by-event', 'event_id')
       db.createObjectStore('identity', { keyPath: 'pubkey' })
       db.createObjectStore('relayPins', { keyPath: 'url' })
       db.createObjectStore('trustLedger', { keyPath: 'relay_pubkey' })
@@ -117,7 +117,7 @@ export async function getTips(group: string, excludedIds: Set<string> = new Set(
   return [...eligibleIds].filter((id) => !referenced.has(id)).sort()
 }
 
-export async function putReceipt(receipt: {
+export async function putEventReceipt(event_receipt: {
   event_id: string
   group: string
   relay: string
@@ -125,14 +125,14 @@ export async function putReceipt(receipt: {
   sig: string
 }): Promise<void> {
   const d = await getDB()
-  await d.put('receipts', receipt)
+  await d.put('event_receipts', event_receipt)
 }
 
-export async function getReceiptsForEvent(eventId: string): Promise<
+export async function getEventReceiptsForEvent(eventId: string): Promise<
   { event_id: string; group: string; relay: string; ts: number; sig: string }[]
 > {
   const d = await getDB()
-  return d.getAllFromIndex('receipts', 'by-event', eventId)
+  return d.getAllFromIndex('event_receipts', 'by-event', eventId)
 }
 
 export async function saveIdentity(identity: {
@@ -159,7 +159,7 @@ export async function clearLocalData(): Promise<void> {
   const d = await getDB()
   await Promise.all([
     d.clear('events'),
-    d.clear('receipts'),
+    d.clear('event_receipts'),
     d.clear('identity'),
     d.clear('relayPins'),
     d.clear('trustLedger'),

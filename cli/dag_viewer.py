@@ -42,18 +42,18 @@ def _query_db(db_path: str) -> dict[str, Any]:
                 ).fetchone()[0],
             }
 
-        receipts: list[dict[str, Any]] = []
+        event_receipts: list[dict[str, Any]] = []
         try:
-            for row in conn.execute("SELECT event_id, relay_pubkey, receipt_json FROM receipts"):
-                receipts.append({
+            for row in conn.execute("SELECT event_id, relay_pubkey, event_receipt_json FROM event_receipts"):
+                event_receipts.append({
                     "event_id": row["event_id"],
                     "relay_pubkey": row["relay_pubkey"],
-                    "receipt": json.loads(row["receipt_json"]),
+                    "event_receipt": json.loads(row["event_receipt_json"]),
                 })
         except sqlite3.OperationalError:
             pass
 
-        return {"events": events, "edges": edges, "groups": groups, "receipts": receipts}
+        return {"events": events, "edges": edges, "groups": groups, "event_receipts": event_receipts}
     finally:
         conn.close()
 
@@ -224,7 +224,7 @@ body {
 let network = null;
 let allEvents = [];
 let allEdges = [];
-let allReceipts = [];
+let allEventReceipts = [];
 let selectedId = null;
 let currentGroup = '';
 let searchTerm = '';
@@ -339,15 +339,15 @@ function showDetail(id) {
   const contentStr = JSON.stringify(e.content, null, 2);
   const tsDate = new Date(e.ts * 1000).toISOString();
 
-  let receiptsHtml = '';
-  const evReceipts = allReceipts.filter(r => r.event_id === id);
-  if (evReceipts.length > 0) {
-    receiptsHtml = '<div class="detail-row"><div class="detail-key">Receipts</div>';
-    for (const r of evReceipts) {
-      receiptsHtml += '<div class="detail-val mono" style="margin-bottom:3px">relay=' +
-        r.relay_pubkey.substring(0, 16) + '... ts=' + r.receipt.ts + '</div>';
+  let event_receiptsHtml = '';
+  const evEventReceipts = allEventReceipts.filter(r => r.event_id === id);
+  if (evEventReceipts.length > 0) {
+    event_receiptsHtml = '<div class="detail-row"><div class="detail-key">Event receipts</div>';
+    for (const r of evEventReceipts) {
+      event_receiptsHtml += '<div class="detail-val mono" style="margin-bottom:3px">relay=' +
+        r.relay_pubkey.substring(0, 16) + '... ts=' + r.event_receipt.ts + '</div>';
     }
-    receiptsHtml += '</div>';
+    event_receiptsHtml += '</div>';
   }
 
   const parentsStr = e.parents.length === 0
@@ -362,7 +362,7 @@ function showDetail(id) {
     '<div class="detail-row"><div class="detail-key">Timestamp</div><div class="detail-val">' + tsDate + ' <span style="color:var(--text-muted)">(' + e.ts + ')</span></div></div>' +
     '<div class="detail-row"><div class="detail-key">Parents (' + e.parents.length + ')</div><div class="detail-val mono">' + parentsStr + '</div></div>' +
     '<div class="detail-row"><div class="detail-key">Signature</div><div class="detail-val mono">' + (e.sig ? e.sig.substring(0, 32) + '...' : '(none)') + '</div></div>' +
-    receiptsHtml +
+    event_receiptsHtml +
     '<div class="detail-row"><div class="detail-key">Content</div><div class="content-box">' + escapeHtml(contentStr) + '</div></div>';
 
   if (network && network.findNode(id).length > 0) {
@@ -415,7 +415,7 @@ function escapeHtml(s) {
 function updateFromData(data) {
   allEvents = data.events || [];
   allEdges = data.edges || [];
-  allReceipts = data.receipts || [];
+  allEventReceipts = data.event_receipts || [];
 
   const sel = document.getElementById('group-select');
   const groupKeys = Object.keys(data.groups || {});
@@ -508,7 +508,7 @@ class _DAGHandler(BaseHTTPRequestHandler):
             data = _query_db(self.db_path)
             self._send_json(data)
         except Exception as e:
-            self._send_json({"error": str(e), "events": [], "edges": [], "groups": {}, "receipts": []})
+            self._send_json({"error": str(e), "events": [], "edges": [], "groups": {}, "event_receipts": []})
 
     def _handle_sse(self) -> None:
         self.send_response(200)

@@ -6,7 +6,7 @@ from fern.events.event import Event
 from fern.transport.interfaces import RelayTransport
 
 
-async def backfill_missing(
+async def heal_missing(
     *,
     event_id: str,
     target_relay: RelayTransport,
@@ -16,7 +16,7 @@ async def backfill_missing(
         try:
             event = await sibling.get(event_id)
             if event is not None:
-                await target_relay.publish(event)
+                await target_relay.heal(event)
                 return event
         except Exception:
             continue

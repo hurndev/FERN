@@ -6,8 +6,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 
 from fern.events.event import Event
 from fern.events.validation import verify_event
-from fern.completeness.receipts import Receipt, build_receipt
-from fern.completeness.attestations import Attestation, build_attestation
+from fern.completeness.event_receipts import EventReceipt, build_event_receipt
+from fern.completeness.group_statuses import GroupStatus, build_group_status
 from fern.completeness.fraud_proofs import (
     FraudProof,
     verify_fraud_proof,
@@ -24,13 +24,13 @@ class FakeRelay:
             relay_keypair = Keypair.generate()
         self._keypair = relay_keypair
         self._store = MemoryStore()
-        self._receipts: dict[tuple[str, str], Receipt] = {}
+        self._event_receipts: dict[tuple[str, str], EventReceipt] = {}
         self._fraud_proofs: dict[str, FraudProof] = {}
         self._deleted_events: set[str] = set()
         self._event_callbacks: list[Callable[[Event], Awaitable[None]]] = []
-        self._attestation_callbacks: list[Callable[[Attestation], Awaitable[None]]] = []
+        self._group_status_callbacks: list[Callable[[GroupStatus], Awaitable[None]]] = []
         self._subscribed_groups: set[str] = set()
-        self._last_attestations: dict[str, Attestation] = {}
+        self._last_group_statuses: dict[str, GroupStatus] = {}
         self._publish_lock = asyncio.Lock()
         self._sync_locks: dict[str, tuple[str, float]] = {}
 
@@ -68,36 +68,36 @@ class FakeRelay:
     async def unsubscribe(self, group: str) -> None:
         self._subscribed_groups.discard(group)
 
-    async def publish(self, event: Event) -> Receipt:
+    async def publish(self, event: Event) -> EventReceipt:
         async with self._publish_lock:
             verify_event(event)
             await self._store.put_event(event)
-            receipt = build_receipt(
+            event_receipt = build_event_receipt(
                 event=event,
                 relay_keypair=self._keypair,
                 ts=int(time.time()),
             )
             assert event.id is not None
-            self._receipts[(event.id, self.relay_pubkey)] = receipt
+            self._event_receipts[(event.id, self.relay_pubkey)] = event_receipt
 
             if event.group in self._subscribed_groups:
                 for cb in self._event_callbacks:
                     asyncio.ensure_future(cb(event))
 
-            return receipt
+            return event_receipt
 
-    async def backfill(self, event: Event) -> Receipt:
+    async def heal(self, event: Event) -> EventReceipt:
         async with self._publish_lock:
             verify_event(event)
             await self._store.put_event(event)
-            receipt = build_receipt(
+            event_receipt = build_event_receipt(
                 event=event,
                 relay_keypair=self._keypair,
                 ts=int(time.time()),
             )
             assert event.id is not None
-            self._receipts[(event.id, self.relay_pubkey)] = receipt
-            return receipt
+            self._event_receipts[(event.id, self.relay_pubkey)] = event_receipt
+            return event_receipt
 
     async def get(self, event_id: str) -> Event | None:
         if event_id in self._deleted_events:
@@ -131,13 +131,13 @@ class FakeRelay:
         if existing and existing[0] == client_id:
             del self._sync_locks[group]
 
-    async def request_attestation(self, group: str) -> Attestation:
+    async def request_group_status(self, group: str) -> GroupStatus:
         known_set = await self._store.get_known_set(group)
         tips = await self._store.get_tips(group)
         count = await self._store.count_events(group)
 
-        prev = self._last_attestations.get(group)
-        att = build_attestation(
+        prev = self._last_group_statuses.get(group)
+        att = build_group_status(
             group=group,
             relay_keypair=self._keypair,
             known_set=known_set,
@@ -146,10 +146,10 @@ class FakeRelay:
             prev=prev,
             ts=int(time.time()),
         )
-        self._last_attestations[group] = att
+        self._last_group_statuses[group] = att
 
         if group in self._subscribed_groups:
-            for cb in self._attestation_callbacks:
+            for cb in self._group_status_callbacks:
                 asyncio.ensure_future(cb(att))
 
         return att
@@ -174,8 +174,8 @@ class FakeRelay:
     def on_event(self, callback: Callable[[Event], Awaitable[None]]) -> None:
         self._event_callbacks.append(callback)
 
-    def on_attestation(self, callback: Callable[[Attestation], Awaitable[None]]) -> None:
-        self._attestation_callbacks.append(callback)
+    def on_group_status(self, callback: Callable[[GroupStatus], Awaitable[None]]) -> None:
+        self._group_status_callbacks.append(callback)
 
     def drop_event(self, event_id: str) -> None:
         if event_id in self._store._events:

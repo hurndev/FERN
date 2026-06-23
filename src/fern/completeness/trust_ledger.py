@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from fern.completeness.attestations import Attestation
+from fern.completeness.group_statuses import GroupStatus
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,7 @@ class Fault:
 
 @dataclass
 class RelayTrustEntry:
-    last_attestation: Attestation | None = None
+    last_group_status: GroupStatus | None = None
     observed_faults: list[Fault] = field(default_factory=list)
 
 
@@ -32,9 +32,9 @@ class TrustLedger:
         entry = self.ensure_entry(relay_pubkey)
         entry.observed_faults.append(fault)
 
-    def update_attestation(self, relay_pubkey: str, attestation: Attestation) -> None:
+    def update_group_status(self, relay_pubkey: str, group_status: GroupStatus) -> None:
         entry = self.ensure_entry(relay_pubkey)
-        entry.last_attestation = attestation
+        entry.last_group_status = group_status
 
     def get_faults(self, relay_pubkey: str) -> list[Fault]:
         entry = self.entries.get(relay_pubkey)

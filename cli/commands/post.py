@@ -87,13 +87,13 @@ async def _post(channel: str, reply_to: str | None, group_id: str, text: str) ->
         ts=int(time.time()),
     )
 
-    receipts = 0
+    event_receipts = 0
     errors = 0
     first_error: str | None = None
     for t in transports:
         try:
             await t.publish(event)
-            receipts += 1
+            event_receipts += 1
         except Exception as e:
             errors += 1
             if first_error is None:
@@ -105,7 +105,7 @@ async def _post(channel: str, reply_to: str | None, group_id: str, text: str) ->
         except Exception:
             pass
 
-    if receipts == 0:
+    if event_receipts == 0:
         msg = first_error or "unknown error"
         print_error(f"Failed to publish to any relay: {msg}")
         return
@@ -120,7 +120,7 @@ async def _post(channel: str, reply_to: str | None, group_id: str, text: str) ->
 
     print_success(f"Posted to group {group_id}: {event.id[:16] if event.id else ''}...")
     click.echo(f"  Channel: #{channel}")
-    click.echo(f"  Receipts: {receipts}/{len(relay_urls)}")
+    click.echo(f"  Event receipts: {event_receipts}/{len(relay_urls)}")
     if errors:
         click.echo(f"  Errors: {errors}")
     if event.id:

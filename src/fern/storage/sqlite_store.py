@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import TypeVar
 
 from fern.events.event import Event
-from fern.completeness.receipts import Receipt
+from fern.completeness.event_receipts import EventReceipt
 
 
 T = TypeVar("T")
@@ -37,10 +37,10 @@ CREATE TABLE IF NOT EXISTS parent_refs (
 );
 CREATE INDEX IF NOT EXISTS idx_parent_refs_parent ON parent_refs(parent_id);
 
-CREATE TABLE IF NOT EXISTS receipts (
+CREATE TABLE IF NOT EXISTS event_receipts (
     event_id TEXT NOT NULL,
     relay_pubkey TEXT NOT NULL,
-    receipt_json TEXT NOT NULL,
+    event_receipt_json TEXT NOT NULL,
     PRIMARY KEY (event_id, relay_pubkey)
 );
 
@@ -55,10 +55,10 @@ CREATE TABLE IF NOT EXISTS fraud_proofs (
 CREATE INDEX IF NOT EXISTS idx_fraud_proofs_relay ON fraud_proofs(accused_relay_pubkey);
 CREATE INDEX IF NOT EXISTS idx_fraud_proofs_group ON fraud_proofs(group_pubkey);
 
-CREATE TABLE IF NOT EXISTS attestations_issued (
+CREATE TABLE IF NOT EXISTS group_statuses_issued (
     relay_pubkey TEXT NOT NULL,
     group_pubkey TEXT NOT NULL,
-    attestation_json TEXT NOT NULL,
+    group_status_json TEXT NOT NULL,
     ts INTEGER NOT NULL,
     PRIMARY KEY (relay_pubkey, group_pubkey)
 );
@@ -112,18 +112,18 @@ def _row_to_event(row: dict[str, object]) -> Event:
     )
 
 
-def _receipt_to_json(receipt: Receipt) -> dict[str, object]:
+def _event_receipt_to_json(event_receipt: EventReceipt) -> dict[str, object]:
     return {
-        "event_id": receipt.event_id,
-        "group": receipt.group,
-        "relay": receipt.relay,
-        "ts": receipt.ts,
-        "sig": receipt.sig,
+        "event_id": event_receipt.event_id,
+        "group": event_receipt.group,
+        "relay": event_receipt.relay,
+        "ts": event_receipt.ts,
+        "sig": event_receipt.sig,
     }
 
 
-def _json_to_receipt(d: dict[str, object]) -> Receipt:
-    return Receipt(
+def _json_to_event_receipt(d: dict[str, object]) -> EventReceipt:
+    return EventReceipt(
         event_id=str(d["event_id"]),
         group=str(d["group"]),
         relay=str(d["relay"]),
@@ -307,40 +307,40 @@ class SqliteStore:
 
         return await self._run(_get_groups)
 
-    async def put_receipt(self, event_id: str, relay_pubkey: str, receipt: Receipt) -> None:
+    async def put_event_receipt(self, event_id: str, relay_pubkey: str, event_receipt: EventReceipt) -> None:
         def _put() -> None:
-            receipt_json = json.dumps(_receipt_to_json(receipt))
+            event_receipt_json = json.dumps(_event_receipt_to_json(event_receipt))
             self.conn.execute(
-                "INSERT OR REPLACE INTO receipts (event_id, relay_pubkey, receipt_json) VALUES (?, ?, ?)",
-                (event_id, relay_pubkey, receipt_json),
+                "INSERT OR REPLACE INTO event_receipts (event_id, relay_pubkey, event_receipt_json) VALUES (?, ?, ?)",
+                (event_id, relay_pubkey, event_receipt_json),
             )
             self.conn.commit()
 
         await self._run(_put)
 
-    async def get_receipt(self, event_id: str, relay_pubkey: str) -> Receipt | None:
-        def _get() -> Receipt | None:
+    async def get_event_receipt(self, event_id: str, relay_pubkey: str) -> EventReceipt | None:
+        def _get() -> EventReceipt | None:
             cursor = self.conn.execute(
-                "SELECT receipt_json FROM receipts WHERE event_id = ? AND relay_pubkey = ?",
+                "SELECT event_receipt_json FROM event_receipts WHERE event_id = ? AND relay_pubkey = ?",
                 (event_id, relay_pubkey),
             )
             row = cursor.fetchone()
             if row is None:
                 return None
-            return _json_to_receipt(json.loads(str(row[0])))
+            return _json_to_event_receipt(json.loads(str(row[0])))
 
         return await self._run(_get)
 
-    async def iter_receipts_for_event(self, event_id: str) -> AsyncIterator[Receipt]:
-        def _fetch_receipts() -> list[Receipt]:
+    async def iter_event_receipts_for_event(self, event_id: str) -> AsyncIterator[EventReceipt]:
+        def _fetch_event_receipts() -> list[EventReceipt]:
             cursor = self.conn.execute(
-                "SELECT receipt_json FROM receipts WHERE event_id = ?", (event_id,)
+                "SELECT event_receipt_json FROM event_receipts WHERE event_id = ?", (event_id,)
             )
-            return [_json_to_receipt(json.loads(str(row[0]))) for row in cursor]
+            return [_json_to_event_receipt(json.loads(str(row[0]))) for row in cursor]
 
-        receipts = await self._run(_fetch_receipts)
-        for receipt in receipts:
-            yield receipt
+        event_receipts = await self._run(_fetch_event_receipts)
+        for event_receipt in event_receipts:
+            yield event_receipt
 
     async def put_fraud_proof(
         self, fp_id: str, group: str, accused_relay: str, event_id: str, fp_json: str
@@ -375,11 +375,11 @@ class SqliteStore:
 
         return await self._run(_query)
 
-    async def save_attestation(self, relay_pubkey: str, group: str, att_json: str, ts: int) -> None:
+    async def save_group_status(self, relay_pubkey: str, group: str, att_json: str, ts: int) -> None:
         def _save() -> None:
             self.conn.execute(
-                """INSERT OR REPLACE INTO attestations_issued
-                   (relay_pubkey, group_pubkey, attestation_json, ts)
+                """INSERT OR REPLACE INTO group_statuses_issued
+                   (relay_pubkey, group_pubkey, group_status_json, ts)
                    VALUES (?, ?, ?, ?)""",
                 (relay_pubkey, group, att_json, ts),
             )
@@ -387,10 +387,10 @@ class SqliteStore:
 
         await self._run(_save)
 
-    async def get_last_attestation(self, relay_pubkey: str, group: str) -> str | None:
+    async def get_last_group_status(self, relay_pubkey: str, group: str) -> str | None:
         def _get() -> str | None:
             cursor = self.conn.execute(
-                "SELECT attestation_json FROM attestations_issued WHERE relay_pubkey = ? AND group_pubkey = ?",
+                "SELECT group_status_json FROM group_statuses_issued WHERE relay_pubkey = ? AND group_pubkey = ?",
                 (relay_pubkey, group),
             )
             row = cursor.fetchone()

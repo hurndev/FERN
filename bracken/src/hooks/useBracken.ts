@@ -7,12 +7,12 @@ import type { GroupState } from '../fern/state'
 import { deriveGroupState } from '../fern/state'
 import {
   getIdentity, saveIdentity, putEvent, getGroupEvents,
-  getTips, putReceipt, putRelayPin, setMeta, getMeta,
+  getTips, putEventReceipt, putRelayPin, setMeta, getMeta,
   clearLocalData, getGroupEventIds,
 } from '../fern/db'
 import { RelayClient, parseGroupAddress } from '../fern/relay'
-import type { Attestation, Receipt } from '../fern/relay'
-import { computeSetHash, verifyAttestation } from '../fern/completeness'
+import type { GroupStatus, EventReceipt } from '../fern/relay'
+import { computeSetHash, verifyGroupStatus } from '../fern/completeness'
 
 export interface GroupEntry {
   pubkey: string
@@ -39,13 +39,13 @@ async function publishToRelaysWith(
   client: RelayClient,
 ): Promise<boolean> {
   try {
-    const receipt: Receipt = await client.publish(event)
-    await putReceipt({
-      event_id: receipt.event_id,
-      group: receipt.group,
-      relay: receipt.relay,
-      ts: receipt.ts,
-      sig: receipt.sig,
+    const event_receipt: EventReceipt = await client.publish(event)
+    await putEventReceipt({
+      event_id: event_receipt.event_id,
+      group: event_receipt.group,
+      relay: event_receipt.relay,
+      ts: event_receipt.ts,
+      sig: event_receipt.sig,
     })
     return true
   } catch {
@@ -71,7 +71,7 @@ async function publishToRelaysEphemeral(
 async function fallbackFullSync(
   client: RelayClient,
   groupPubkey: string,
-): Promise<{ fetched: number; backfilled: number }> {
+): Promise<{ fetched: number; healed: number }> {
   const syncEvents = await client.sync(groupPubkey)
   let fetched = 0
   for (const event of syncEvents) {
@@ -83,20 +83,20 @@ async function fallbackFullSync(
       console.error('fallback sync verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
     }
   }
-  return { fetched, backfilled: 0 }
+  return { fetched, healed: 0 }
 }
 
-async function batchBackfill(
+async function batchHeal(
   events: FernEvent[],
   client: RelayClient,
   batchSize = 10,
 ): Promise<number> {
-  let backfilled = 0
+  let healed = 0
   for (let i = 0; i < events.length; i += batchSize) {
     const batch = events.slice(i, i + batchSize)
     const results = await Promise.all(batch.map(async (event) => {
       try {
-        await client.backfill(event)
+        await client.heal(event)
         return true
       } catch {
         try {
@@ -107,12 +107,12 @@ async function batchBackfill(
         }
       }
     }))
-    backfilled += results.filter(Boolean).length
+    healed += results.filter(Boolean).length
   }
-  return backfilled
+  return healed
 }
 
-function sortForBackfill(events: FernEvent[]): FernEvent[] {
+function sortForHeal(events: FernEvent[]): FernEvent[] {
   return [...events].sort((a, b) => {
     if (a.type === 'genesis' && b.type !== 'genesis') return -1
     if (a.type !== 'genesis' && b.type === 'genesis') return 1
@@ -125,36 +125,36 @@ async function syncDiff(
   groupPubkey: string,
   identityPubkey: string,
   onLockDenied?: (expiresIn: number) => void,
-): Promise<{ fetched: number; backfilled: number }> {
-  let att: Attestation
+): Promise<{ fetched: number; healed: number }> {
+  let att: GroupStatus
   try {
-    att = await client.requestAttestation(groupPubkey)
+    att = await client.requestGroupStatus(groupPubkey)
   } catch (e) {
     if (String(e).toLowerCase().includes('group not hosted')) {
-      const localEvents = sortForBackfill(await getGroupEvents(groupPubkey))
-      return { fetched: 0, backfilled: await batchBackfill(localEvents, client) }
+      const localEvents = sortForHeal(await getGroupEvents(groupPubkey))
+      return { fetched: 0, healed: await batchHeal(localEvents, client) }
     }
     return fallbackFullSync(client, groupPubkey)
   }
 
-  if (!verifyAttestation(att)) {
-    console.error('attestation verification failed for', client.url)
+  if (!verifyGroupStatus(att)) {
+    console.error('group_status verification failed for', client.url)
     return fallbackFullSync(client, groupPubkey)
   }
 
   const localIds = await getGroupEventIds(groupPubkey)
   const localHash = await computeSetHash(localIds)
-  if (att.set_hash === localHash) return { fetched: 0, backfilled: 0 }
+  if (att.set_hash === localHash) return { fetched: 0, healed: 0 }
 
   try {
     const lock = await client.syncLock(groupPubkey, identityPubkey)
     if (!lock.granted) {
       onLockDenied?.(lock.expiresIn ?? 30)
-      return { fetched: 0, backfilled: 0 }
+      return { fetched: 0, healed: 0 }
     }
   } catch {
     // Older relays may not support advisory locks. Relay-side dedup keeps
-    // uncoordinated backfill safe, though less efficient.
+    // uncoordinated heal safe, though less efficient.
   }
 
   try {
@@ -163,8 +163,8 @@ async function syncDiff(
       relayIds = new Set(await client.syncIds(groupPubkey))
     } catch (e) {
       if (String(e).toLowerCase().includes('group not hosted')) {
-        const localEvents = sortForBackfill(await getGroupEvents(groupPubkey))
-        return { fetched: 0, backfilled: await batchBackfill(localEvents, client) }
+        const localEvents = sortForHeal(await getGroupEvents(groupPubkey))
+        return { fetched: 0, healed: await batchHeal(localEvents, client) }
       }
       return fallbackFullSync(client, groupPubkey)
     }
@@ -188,11 +188,11 @@ async function syncDiff(
     }
 
     const missingSet = new Set(missingOnRelay)
-    const localEvents = sortForBackfill(
+    const localEvents = sortForHeal(
       (await getGroupEvents(groupPubkey)).filter((event) => missingSet.has(event.id)),
     )
-    const backfilled = await batchBackfill(localEvents, client)
-    return { fetched, backfilled }
+    const healed = await batchHeal(localEvents, client)
+    return { fetched, healed }
   } finally {
     try {
       await client.syncUnlock(groupPubkey, identityPubkey)
@@ -357,7 +357,7 @@ export function useBracken() {
                 healRetryGateRef.current.set(key, Date.now() + expiresIn * 1000)
               },
             )
-            if (result.fetched > 0 || result.backfilled > 0) {
+            if (result.fetched > 0 || result.healed > 0) {
               healRetryGateRef.current.delete(key)
               await refreshGroup()
             }
@@ -384,10 +384,10 @@ export function useBracken() {
             console.error('verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
           }
         })
-        client.onAttestation(async (att) => {
+        client.onGroupStatus(async (att) => {
           if (att.group !== groupPubkey) return
-          if (!verifyAttestation(att)) {
-            console.error('attestation push verification failed for', client.url)
+          if (!verifyGroupStatus(att)) {
+            console.error('group_status push verification failed for', client.url)
             return
           }
           const localHash = await computeSetHash(await getGroupEventIds(groupPubkey))

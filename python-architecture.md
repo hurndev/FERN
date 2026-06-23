@@ -10,7 +10,7 @@ See `spec.md` for the wire-level protocol details and `architecture.md` for the 
 
 ### 1.1 Pure / Impure Boundary
 
-- **Pure**: crypto, hashing, canonical serialization, signature verification, event construction, DAG operations, state machine fold, attestation/receipt/fraud-proof building and verification. All synchronous. Trivially testable (input → expected output).
+- **Pure**: crypto, hashing, canonical serialization, signature verification, event construction, DAG operations, state machine fold, group_status/event_receipt/fraud-proof building and verification. All synchronous. Trivially testable (input → expected output).
 - **Impure-async**: WebSocket relay client/server, SQLite storage behind async store interfaces, client orchestration (`GroupSession`, publishing, subscribing, monitor runner).
 - **Impure-sync**: the `sqlite3` module itself — used synchronously inside `SqliteStore` under a store-local lock with short-lived connections.
 
@@ -25,12 +25,12 @@ All dependencies are passed explicitly. No module-level singletons. Multiple `Gr
 Where pure logic needs I/O, it uses a `Protocol` (PEP 544). Tests substitute in-memory fakes that implement the same Protocol.
 
 - `EventStore` — event storage (MemoryStore for tests, SqliteStore for production)
-- `ReceiptStore` — receipt storage (built into MemoryStore and SqliteStore)
+- `EventReceiptStore` — event_receipt storage (built into MemoryStore and SqliteStore)
 - `RelayTransport` — relay client (WebSocketRelayClient for real connections, FakeRelay for tests)
 
 ### 1.4 Immutability by Default
 
-`Event`, `Receipt`, `Attestation`, `GroupState`, `BanEntry`, `FraudProof` are `@dataclass(frozen=True)`. Mutating operations return copies. (Exception: `Keypair` is a plain class wrapping `cryptography`'s internal state.)
+`Event`, `EventReceipt`, `GroupStatus`, `GroupState`, `BanEntry`, `FraudProof` are `@dataclass(frozen=True)`. Mutating operations return copies. (Exception: `Keypair` is a plain class wrapping `cryptography`'s internal state.)
 
 ### 1.5 Async at the Edge, Sync in the Core
 
@@ -43,9 +43,9 @@ CLI / apps
     ↓
 client.session (orchestration) · relay server
     ↓
-transport (websocket / fake) · storage (sqlite / memory) · completeness.backfill
+transport (websocket / fake) · storage (sqlite / memory) · completeness.heal
     ↓
-completeness (receipts, attestations, fraud_proofs, monitor, trust_ledger) · state.machine · dag
+completeness (event_receipts, group_statuses, fraud_proofs, monitor, trust_ledger) · state.machine · dag
     ↓
 events · identity · chat
     ↓
@@ -69,7 +69,9 @@ src/fern/
 ├── events/
 │   ├── event.py                 # Event dataclass (frozen)
 │   ├── serialization.py         # canonical_serialization(), compute_id(), sign_event()
-│   ├── validation.py            # verify_event(), is_well_formed()
+│   ├── validation.py            # verify_event(), is_well_formed() — structural + crypto integrity
+│   ├── limits.py                # Per-field and per-event byte size limits
+│   ├── semantic.py              # validate_event_semantics() — content schema per event type
 │   ├── build.py                 # build_event() helper
 │   └── types.py                 # ProtocolTypes, ChatTypes constants
 ├── identity/
@@ -85,33 +87,33 @@ src/fern/
 │   ├── authorization.py         # is_authorised()
 │   └── machine.py               # derive_group_state(), apply_event()
 ├── completeness/
-│   ├── receipts.py              # Receipt dataclass, build_receipt(), verify_receipt()
-│   ├── attestations.py          # Attestation dataclass, build/verify, compute_set_hash()
+│   ├── event_receipts.py              # EventReceipt dataclass, build_event_receipt(), verify_event_receipt()
+│   ├── group_statuses.py          # GroupStatus dataclass, build/verify, compute_set_hash()
 │   ├── fraud_proofs.py          # FraudProof dataclass, build/verify, compute_fraud_proof_id()
 │   ├── monitor.py               # monitor_pass() pure logic, MonitorResult
 │   ├── trust_ledger.py          # TrustLedger, RelayTrustEntry, Fault
-│   └── backfill.py              # backfill_missing() async helper
+│   └── heal.py              # heal_missing() async helper
 ├── storage/
-│   ├── interfaces.py            # EventStore Protocol, ReceiptStore Protocol
+│   ├── interfaces.py            # EventStore Protocol, EventReceiptStore Protocol
 │   ├── memory.py                # MemoryStore (in-memory, used in tests)
 │   └── sqlite_store.py          # SqliteStore (disk-backed, async API over locked sync sqlite)
 ├── transport/
 │   ├── interfaces.py            # RelayTransport Protocol, RelayMetadata dataclass
 │   ├── websocket_client.py      # WebSocketRelayClient (single-reader model, response queue)
-│   ├── websocket_server.py      # RelayServer (subscribe, sync, publish, attestations, fraud proofs)
+│   ├── websocket_server.py      # RelayServer (subscribe, sync, publish, group_statuses, fraud proofs)
 │   ├── fake.py                  # FakeRelay (in-process relay for tests)
 │   ├── wire.py                  # Message dataclasses (not currently used by client/server)
 │   └── metadata.py              # fetch_relay_metadata() async helper
 ├── client/
 │   ├── session.py               # GroupSession — per-group client orchestration
 │   ├── bootstrap.py             # fetch_genesis(), initial_sync()
-│   ├── publisher.py             # publish_event() — parallel publish + receipt collection
+│   ├── publisher.py             # publish_event() — parallel publish + event_receipt collection
 │   ├── subscriber.py            # subscribe_to_relays(), unsubscribe_from_relays()
 │   └── monitor_runner.py        # run_monitor_pass() — async investigation + trust ledger update
 ├── relay/
 │   ├── store.py                 # RelayStore wrapper
 │   ├── gc.py                    # garbage_collect() — tip cleanup with unreferenced-for-N check
-│   ├── attestation_loop.py      # Periodic attestation issuance with prev chain tracking
+│   ├── group_status_loop.py      # Periodic group_status issuance with prev chain tracking
 │   └── metadata_handler.py      # build_metadata() helper
 ├── chat/
 │   ├── messages.py              # build_chat_message(), is_chat_message()
@@ -212,6 +214,11 @@ def sign_event(event: Event, keypair, *, is_genesis=False) -> Event: ...
 def verify_event(event: Event) -> None:     # raises VerificationError subclasses
 def is_well_formed(event: Event) -> bool: ...
 
+def validate_event_semantics(event: Event) -> None:  # raises SemanticValidationError
+    # Content schema validation per event type (genesis fields, relay URLs,
+    # chat channel structure, message text length, nickname length, etc.)
+    # Uses limits from fern.events.limits.
+
 def build_event(*, type, group, author_keypair, parents, content, ts, tags,
                 group_keypair=None) -> Event: ...
 ```
@@ -281,29 +288,29 @@ Connectedness is a recursive genesis gate: `genesis` is connected, and a non-gen
 ### 3.5 `fern.completeness` (Pure logic + async orchestration)
 
 ```python
-# Receipts (pure)
+# Event Receipts (pure)
 @dataclass(frozen=True)
-class Receipt:
+class EventReceipt:
     event_id: str; group: str; relay: str; ts: int; sig: str
-def build_receipt(*, event, relay_keypair, ts) -> Receipt: ...
-def verify_receipt(receipt: Receipt) -> bool: ...
+def build_event_receipt(*, event, relay_keypair, ts) -> EventReceipt: ...
+def verify_event_receipt(event_receipt: EventReceipt) -> bool: ...
 
-# Attestations (pure)
+# GroupStatuses (pure)
 @dataclass(frozen=True)
-class Attestation:
+class GroupStatus:
     group: str; relay: str; set_hash: str; tips: tuple[str, ...]
     count: int; prev: str | None; ts: int; sig: str
-def build_attestation(*, group, relay_keypair, known_set, tips, count, prev, ts) -> Attestation: ...
-def verify_attestation(attestation: Attestation, prev: Attestation | None = None) -> bool: ...
+def build_group_status(*, group, relay_keypair, known_set, tips, count, prev, ts) -> GroupStatus: ...
+def verify_group_status(group_status: GroupStatus, prev: GroupStatus | None = None) -> bool: ...
 def compute_set_hash(event_ids: Iterable[str]) -> str: ...
-def hash_attestation(attestation: Attestation) -> str: ...
+def hash_group_status(group_status: GroupStatus) -> str: ...
 
 # Fraud proofs (pure)
 @dataclass(frozen=True)
 class FraudProof:
     type: str; group: str; relay: str; event_id: str
-    event: Event | None; receipt: Receipt | None; evidence: str
-def build_fraud_proof(*, relay, event, receipt, evidence) -> FraudProof: ...
+    event: Event | None; event_receipt: EventReceipt | None; evidence: str
+def build_fraud_proof(*, relay, event, event_receipt, evidence) -> FraudProof: ...
 def verify_fraud_proof(proof: FraudProof) -> bool: ...
 def compute_fraud_proof_id(proof: FraudProof) -> str: ...
 
@@ -315,10 +322,10 @@ class MonitorResult:
     divergent_relays: tuple[str, ...] = ()
     candidates_to_check: tuple[str, ...] = ()
 
-def monitor_pass(*, local_known_set, local_receipts_for_relay, new_attestation,
-                 prev_attestation, relay_pubkey, sibling_attestations, now_ts) -> MonitorResult: ...
-async def run_monitor_pass(*, relay, attestation, local_known_set, receipts_for_relay,
-                           trust_ledger, sibling_attestations) -> MonitorResult: ...
+def monitor_pass(*, local_known_set, local_event_receipts_for_relay, new_group_status,
+                 prev_group_status, relay_pubkey, sibling_group_statuses, now_ts) -> MonitorResult: ...
+async def run_monitor_pass(*, relay, group_status, local_known_set, event_receipts_for_relay,
+                           trust_ledger, sibling_group_statuses) -> MonitorResult: ...
 
 # Trust ledger
 @dataclass class TrustLedger: entries: dict[str, RelayTrustEntry]
@@ -326,8 +333,8 @@ def add_fault(self, relay_pubkey, fault): ...
 ```
 
 The monitor works in two stages:
-1. **Pure `monitor_pass`**: compares `set_hash` to local known set, checks attestation chain, records sibling divergence. If `in_sync=False`, returns `candidates_to_check`.
-2. **Async `run_monitor_pass`**: for each candidate, queries the relay via `get()` to determine which events are truly missing. For events with a receipt → `missing_event_with_receipt` fault (fraud). Without receipt → `missing_event_no_receipt` fault (backfill candidate).
+1. **Pure `monitor_pass`**: compares `set_hash` to local known set, checks group_status chain, records sibling divergence. If `in_sync=False`, returns `candidates_to_check`.
+2. **Async `run_monitor_pass`**: for each candidate, queries the relay via `get()` to determine which events are truly missing. For events with an event_receipt → `missing_event_with_event_receipt` fault (fraud). Without event_receipt → `missing_event_no_event_receipt` fault (heal candidate).
 
 ### 3.6 `fern.storage` (I/O with Protocols)
 
@@ -346,15 +353,15 @@ class EventStore(Protocol):
     async def get_hosted_groups(self) -> list[str]: ...
     async def delete_event(self, event_id: str) -> None: ...
 
-class ReceiptStore(Protocol):
-    async def put_receipt(self, event_id: str, relay_pubkey: str, receipt: Receipt) -> None: ...
-    async def get_receipt(self, event_id: str, relay_pubkey: str) -> Receipt | None: ...
-    def iter_receipts_for_event(self, event_id: str) -> AsyncIterator[Receipt]: ...
+class EventReceiptStore(Protocol):
+    async def put_event_receipt(self, event_id: str, relay_pubkey: str, event_receipt: EventReceipt) -> None: ...
+    async def get_event_receipt(self, event_id: str, relay_pubkey: str) -> EventReceipt | None: ...
+    def iter_event_receipts_for_event(self, event_id: str) -> AsyncIterator[EventReceipt]: ...
 ```
 
 Two implementations:
 - `MemoryStore` — in-memory dicts. Used in tests and ephemeral CLI invocations.
-- `SqliteStore` — SQLite-backed. Methods are async to satisfy the storage protocols, but SQLite calls run synchronously under a store-local lock with short-lived connections. Schema includes tables for `events`, `parent_refs`, `receipts`, `fraud_proofs`, and `attestations_issued`. Used both as relay event store and per-group client cache at `~/.fern/cache/<pubkey>.sqlite`. `get_hosted_groups()` queries distinct `group_pubkey` values so the relay can reconstruct its hosted groups from disk on startup.
+- `SqliteStore` — SQLite-backed. Methods are async to satisfy the storage protocols, but SQLite calls run synchronously under a store-local lock with short-lived connections. Schema includes tables for `events`, `parent_refs`, `event_receipts`, `fraud_proofs`, and `group_statuses_issued`. Used both as relay event store and per-group client cache at `~/.fern/cache/<pubkey>.sqlite`. `get_hosted_groups()` queries distinct `group_pubkey` values so the relay can reconstruct its hosted groups from disk on startup.
 
 ### 3.7 `fern.transport` (I/O with Protocols)
 
@@ -366,51 +373,51 @@ class RelayTransport(Protocol):
     async def close(self) -> None: ...
     async def fetch_metadata(self) -> RelayMetadata: ...
     async def subscribe(self, group: str) -> None: ...
-    async def publish(self, event: Event) -> Receipt: ...
-    async def backfill(self, event: Event) -> Receipt: ...
+    async def publish(self, event: Event) -> EventReceipt: ...
+    async def heal(self, event: Event) -> EventReceipt: ...
     async def get(self, event_id: str) -> Event | None: ...
     def sync(self, group: str, since_ts=None) -> AsyncIterator[Event]: ...
     async def sync_ids(self, group: str) -> list[str]: ...
     async def sync_lock(self, group: str, client_id: str) -> SyncLockResult: ...
     async def sync_unlock(self, group: str, client_id: str) -> None: ...
-    async def request_attestation(self, group: str) -> Attestation: ...
+    async def request_group_status(self, group: str) -> GroupStatus: ...
     async def submit_fraud_proof(self, proof: FraudProof) -> str: ...
     def query_fraud_proofs(self, *, relay=None, group=None) -> AsyncIterator[FraudProof]: ...
     def on_event(self, callback) -> None: ...
-    def on_attestation(self, callback) -> None: ...
+    def on_group_status(self, callback) -> None: ...
 ```
 
 Three implementations:
-- `WebSocketRelayClient` — real WSS/WS client. Uses a single-reader model: a `_listen_loop` reads all messages, pushes route to callbacks, responses go to an `asyncio.Queue` for request-response correlation. Uses `_awaiting_response` flag so `sync`/`get`/`request_attestation` responses are correctly routed to the queue rather than being swallowed by push callbacks.
-- `RelayServer` — real WSS/WS server. Implements subscribe (tracks connections, pushes events/attestations), sync (streams events + `sync_complete`), sync_ids (ID-only set fetch), sync_lock/sync_unlock (advisory per-group backfill coordination), backfill (store without broadcast), and query_fraud_proofs (streams + `query_complete`). Auto-hosts groups on valid genesis. Serves an HTTP metadata endpoint (with CORS headers) for browser clients. Reconstructs `_hosted_groups` from the database on startup via `get_hosted_groups()`. Uses structured logging with a coloured formatter.
-- `FakeRelay` — in-process relay for tests. Implements the same `RelayTransport` Protocol. Tracks `_last_attestations` per group for the prev chain.
+- `WebSocketRelayClient` — real WSS/WS client. Uses a single-reader model: a `_listen_loop` reads all messages, pushes route to callbacks, responses go to an `asyncio.Queue` for request-response correlation. Uses `_awaiting_response` flag so `sync`/`get`/`request_group_status` responses are correctly routed to the queue rather than being swallowed by push callbacks.
+- `RelayServer` — real WSS/WS server. Implements subscribe (tracks connections, pushes events/group_statuses), sync (streams events + `sync_complete`), sync_ids (ID-only set fetch), sync_lock/sync_unlock (advisory per-group heal coordination), heal (store without broadcast), and query_fraud_proofs (streams + `query_complete`). Auto-hosts groups on valid genesis. Serves an HTTP metadata endpoint (with CORS headers) for browser clients. Reconstructs `_hosted_groups` from the database on startup via `get_hosted_groups()`. Uses structured logging with a coloured formatter.
+- `FakeRelay` — in-process relay for tests. Implements the same `RelayTransport` Protocol. Tracks `_last_group_statuses` per group for the prev chain.
 
 ### 3.8 `fern.client` (Async Orchestration)
 
 ```python
 class GroupSession:
     def __init__(self, *, user: UserIdentity, store: EventStore,
-                 receipt_store: ReceiptStore, trust_ledger=None): ...
+                 event_receipt_store: EventReceiptStore, trust_ledger=None): ...
     @property def state(self) -> GroupState | None: ...
     @property def trust_ledger(self) -> TrustLedger: ...
 
     async def join_group(self, group_pubkey, transports) -> GroupState: ...
-    async def publish(self, event: Event) -> tuple[Event, list[Receipt]]: ...
+    async def publish(self, event: Event) -> tuple[Event, list[EventReceipt]]: ...
     async def refresh_state(self) -> GroupState | None: ...
     async def get_known_set(self) -> frozenset[str]: ...
     async def close(self) -> None: ...
 
     def on_event(self, callback) -> None: ...
-    def on_attestation(self, callback) -> None: ...
+    def on_group_status(self, callback) -> None: ...
     def on_state_change(self, callback) -> None: ...
 ```
 
-`GroupSession.join_group()` handles the full bootstrap: connect transports, fetch genesis, initial sync from all relays, derive state, subscribe for live events, register event/attestation handlers. `_handle_event()` updates `_state` when admin events arrive; `_handle_attestation()` runs the monitor pass.
+`GroupSession.join_group()` handles the full bootstrap: connect transports, fetch genesis, initial sync from all relays, derive state, subscribe for live events, register event/group_status handlers. `_handle_event()` updates `_state` when admin events arrive; `_handle_group_status()` runs the monitor pass.
 
 Helper modules:
-- `publisher.py` — `publish_event()`: parallel publish to all transports via `asyncio.gather`, collects receipts, stores them if a receipt store is provided.
-- `bootstrap.py` — `fetch_genesis()` walks DAG tips back to genesis via `get` requests; falls back to `sync`. `initial_sync()` uses attestation-gated `sync_diff()` when a client identity is available, otherwise falls back to full `sync`.
-- `sync.py` — `sync_diff()` compares relay attestations to the local known set, uses `sync_ids` to compute differences, fetches missing local events with `get`, and repairs missing relay events with `backfill`. CLI callers use non-waiting lock behavior; long-lived clients may retry after leases.
+- `publisher.py` — `publish_event()`: parallel publish to all transports via `asyncio.gather`, collects event_receipts, stores them if an event_receipt store is provided.
+- `bootstrap.py` — `fetch_genesis()` walks DAG tips back to genesis via `get` requests; falls back to `sync`. `initial_sync()` uses group_status-gated `sync_diff()` when a client identity is available, otherwise falls back to full `sync`.
+- `sync.py` — `sync_diff()` compares relay group_statuses to the local known set, uses `sync_ids` to compute differences, fetches missing local events with `get`, and repairs missing relay events with `heal`. CLI callers use non-waiting lock behavior; long-lived clients may retry after leases.
 - `subscriber.py` — `subscribe_to_relays()` calls `transport.subscribe(group)` on each transport.
 - `monitor_runner.py` — `run_monitor_pass()`: runs pure `monitor_pass`, then asynchronously investigates candidate events by querying the relay, writes faults to trust ledger.
 
@@ -472,7 +479,7 @@ Groups are numbered 1, 2, 3... in join order. `config.json` stores a `group_orde
 | `fern post` | `[--channel c] [--reply-to id] <group> <text>` | `cli/commands/post.py` — syncs, derives state, checks auth (joined + not banned), publishes |
 | `fern read` | `[--channel c] [-n N] [--show-rejected] <group>` | `cli/commands/read.py` — syncs, filters by auth, shows admin actions inline, shows nicknames |
 | `fern watch` | `[--channel c] [--show-rejected] <group>` | `cli/commands/watch.py` — subscribes, shows admin actions and nicknames live (Ctrl+C stops) |
-| `fern verify` | `<group>` | `cli/commands/verify.py` — requests attestations, runs monitor pass, prints trust ledger |
+| `fern verify` | `<group>` | `cli/commands/verify.py` — requests group_statuses, runs monitor pass, prints trust ledger |
 | `fern relay start` | `--port N --store X [--log-level L] [--no-color]` | `cli/commands/relay.py` — starts a WebSocket relay server with coloured logging |
 | `fern relay info` | `<url>` | `cli/commands/relay.py` — fetches relay metadata |
 | `fern dag` | `--db <path> [--host H] [--port P]` | `cli/commands/dag.py` — launches the zero-dependency DAG web viewer for any SQLite store |
@@ -502,7 +509,7 @@ Everything else (crypto, events, dag, state, completeness pure logic, chat handl
 
 The CLI uses `asyncio.run()` at the top of each command. Tests use `pytest-asyncio` with `asyncio_mode = "auto"`.
 
-The `WebSocketRelayClient` uses a single-reader model: a `_listen_loop` task reads all incoming messages. Push messages (`event`, `attestation`) are dispatched to callbacks via `asyncio.ensure_future`. Response messages (`receipt`, `not_found`, `sync_complete`, `ok`, `error`, `query_complete`, `ids`, `sync_lock_granted`, `sync_lock_denied`) go to an `asyncio.Queue` where request-response methods (`publish`, `backfill`, `get`, `request_attestation`, `sync_ids`, `sync_lock`, `sync_unlock`, `submit_fraud_proof`, `sync`, `query_fraud_proofs`) consume them.
+The `WebSocketRelayClient` uses a single-reader model: a `_listen_loop` task reads all incoming messages. Push messages (`event`, `group_status`) are dispatched to callbacks via `asyncio.ensure_future`. Response messages (`event_receipt`, `not_found`, `sync_complete`, `ok`, `error`, `query_complete`, `ids`, `sync_lock_granted`, `sync_lock_denied`) go to an `asyncio.Queue` where request-response methods (`publish`, `heal`, `get`, `request_group_status`, `sync_ids`, `sync_lock`, `sync_unlock`, `submit_fraud_proof`, `sync`, `query_fraud_proofs`) consume them.
 
 ---
 
@@ -517,11 +524,11 @@ The `WebSocketRelayClient` uses a single-reader model: a `_listen_loop` task rea
 | Events | `tests/unit/events/test_serialization_property.py` | Property-based: determinism, unicode round-trip, tag sorting |
 | DAG | `tests/unit/dag/test_dag.py` | Head computation, gap detection, cycle check |
 | State | `tests/unit/state/test_state.py` | State derivation, ban/unban/kick semantics, admin add/remove, metadata, `(ts,id)` ordering |
-| Completeness | `tests/unit/completeness/test_completeness.py` | Receipt build/verify, attestation build/verify, `set_hash` determinism |
+| Completeness | `tests/unit/completeness/test_completeness.py` | EventReceipt build/verify, group_status build/verify, `set_hash` determinism |
 | Chat | `tests/unit/chat/test_chat.py` | Message/reaction/nickname builders |
-| Integration | `tests/integration/test_fake_relay.py` | FakeRelay publish/get/sync/attestation round-trips |
+| Integration | `tests/integration/test_fake_relay.py` | FakeRelay publish/get/sync/group_status round-trips |
 | Integration | `tests/integration/test_event_roundtrip.py` | Build-sign-verify round-trip |
-| Integration | `tests/integration/test_censorship_detection.py` | Attestation divergence detection, monitor pass detects missing-with-receipt |
+| Integration | `tests/integration/test_censorship_detection.py` | GroupStatus divergence detection, monitor pass detects missing-with-event_receipt |
 
 ### 6.2 Fixtures (`conftest.py`)
 
@@ -603,10 +610,10 @@ Install for development: `pip install -e ".[dev]"`
 
 - **Vite + React + TypeScript** — SPA framework
 - **tweetnacl-js** — Ed25519 signing and verification
-- **idb** — IndexedDB wrapper for local event/receipt/identity persistence
+- **idb** — IndexedDB wrapper for local event/event_receipt/identity persistence
 - **No REST API** — only WebSocket connections to FERN relays and a one-time HTTPS metadata fetch
 
-Features: private-key identity create/import, group join with sync, real-time message list (connected-DAG filtering, auth filtering, admin action system messages, nickname display, jdenticon avatars, collapsed consecutive messages, retryable failed sends), profile popups with admin actions, admin-only slash commands, collapsible mobile sidebar, member/relay drawers, group info, relay count badge, and settings with nickname editing, private-key export, and logout.
+Features: private-key identity create/import, group join with sync, real-time message list (connected-DAG filtering, auth filtering, admin action system messages, nickname display, jdenticon avatars, collapsed consecutive messages, retryable failed sends), profile popups with admin actions, admin-only slash commands, collapsible mobile sidebar, member/relay drawers, group info, relay count badge, settings with nickname editing, private-key export, and logout. Includes a built-in interactive DAG viewer (`bracken/src/components/DagViewer.tsx`) for visualising the group's event graph.
 
 Bracken implements the connected-DAG gate in TypeScript: disconnected events remain in IndexedDB for gap healing, but do not enter normal message rendering, group-state derivation, or future parent selection.
 
@@ -635,12 +642,12 @@ The library assumes no particular UI runtime — no `print()`, no `@app.route`, 
 | Decision | Rationale |
 |---|---|
 | Lowercase hex everywhere | Case-mismatch in hashing breaks the protocol |
-| Canonical serialization as load-bearing primitive | `id`, `sig`, receipt signing, attestation signing all depend on it |
+| Canonical serialization as load-bearing primitive | `id`, `sig`, event_receipt signing, group_status signing all depend on it |
 | Frozen dataclasses | Prevent aliasing bugs, enable dict/set membership |
 | Async at edge, sync in core | ~80% of code testable without event loop |
 | Single-reader model for WebSocket client | Avoids race between request/response and pushed messages |
-| Locked short-lived SQLite connections | Avoids cross-thread SQLite connection failures during concurrent backfill |
-| Author-local receipts, shared on-demand | Zero ongoing traffic; only published as fraud proof evidence |
+| Locked short-lived SQLite connections | Avoids cross-thread SQLite connection failures during concurrent heal |
+| Author-local event_receipts, shared on-demand | Zero ongoing traffic; only published as fraud proof evidence |
 | Fraud proofs not in DAG | Audit evidence, not group history |
 | DAG for completeness propagation, not replies | Separate concerns; replies are `content.reply_to` |
 | `connect_transports` shared helper | Single point for relay connection logic across CLI commands |

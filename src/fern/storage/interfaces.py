@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Protocol, runtime_checkable
 
 from fern.events.event import Event
-from fern.completeness.receipts import Receipt
+from fern.completeness.event_receipts import EventReceipt
 
 
 @runtime_checkable
@@ -24,7 +24,7 @@ class EventStore(Protocol):
 
 
 @runtime_checkable
-class ReceiptStore(Protocol):
-    async def put_receipt(self, event_id: str, relay_pubkey: str, receipt: Receipt) -> None: ...
-    async def get_receipt(self, event_id: str, relay_pubkey: str) -> Receipt | None: ...
-    def iter_receipts_for_event(self, event_id: str) -> AsyncIterator[Receipt]: ...
+class EventReceiptStore(Protocol):
+    async def put_event_receipt(self, event_id: str, relay_pubkey: str, event_receipt: EventReceipt) -> None: ...
+    async def get_event_receipt(self, event_id: str, relay_pubkey: str) -> EventReceipt | None: ...
+    def iter_event_receipts_for_event(self, event_id: str) -> AsyncIterator[EventReceipt]: ...

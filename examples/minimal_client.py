@@ -48,13 +48,13 @@ async def main() -> None:
         ts=int(time.time()),
     )
 
-    receipt = await relay_a.publish(msg)
+    event_receipt = await relay_a.publish(msg)
     print(f"  Published message: {msg.id[:16]}...")
-    print(f"  Receipt from relay: {receipt.relay[:16]}...")
+    print(f"  EventReceipt from relay: {event_receipt.relay[:16]}...")
 
-    attestation = await relay_a.request_attestation(group.pubkey)
-    print(f"  Attestation count: {attestation.count}")
-    print(f"  Attestation set_hash: {attestation.set_hash[:16]}...")
+    group_status = await relay_a.request_group_status(group.pubkey)
+    print(f"  GroupStatus count: {group_status.count}")
+    print(f"  GroupStatus set_hash: {group_status.set_hash[:16]}...")
 
 
 if __name__ == "__main__":

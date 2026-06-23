@@ -146,17 +146,17 @@ async def _create(name: str, description: str, public: bool, relay_urls: list[st
             group_keypair=group_kp.keypair,
         )
 
-        receipts = 0
+        event_receipts = 0
         first_error: str | None = None
         for t in transports:
             try:
                 await t.publish(genesis)
-                receipts += 1
+                event_receipts += 1
             except Exception as e:
                 if first_error is None:
                     first_error = str(e)
 
-        if receipts == 0:
+        if event_receipts == 0:
             msg = first_error or "unknown error"
             print_error(f"Failed to publish genesis to any relay: {msg}")
             return
@@ -541,17 +541,17 @@ async def _relay_update(group_id: str, urls: list[str]) -> None:
             content={"relays": relay_urls},
         )
 
-        receipts = 0
+        event_receipts = 0
         first_error: str | None = None
         for t in transports:
             try:
                 await t.publish(event)
-                receipts += 1
+                event_receipts += 1
             except Exception as e:
                 if first_error is None:
                     first_error = str(e)
 
-        if receipts == 0:
+        if event_receipts == 0:
             msg = first_error or "unknown error"
             print_error(f"Failed to publish relay_update to any relay: {msg}")
             return
@@ -625,17 +625,17 @@ async def _publish_admin_event(
             content=content,
         )
 
-        receipts = 0
+        event_receipts = 0
         first_error: str | None = None
         for t in transports:
             try:
                 await t.publish(event)
-                receipts += 1
+                event_receipts += 1
             except Exception as e:
                 if first_error is None:
                     first_error = str(e)
 
-        if receipts == 0:
+        if event_receipts == 0:
             msg = first_error or "unknown error"
             print_error(f"Failed to publish {event_type}: {msg}")
             return
@@ -781,17 +781,17 @@ async def _nickname(group_id: str, name: str) -> None:
     )
 
     try:
-        receipts = 0
+        event_receipts = 0
         first_error: str | None = None
         for t in transports:
             try:
                 await t.publish(event)
-                receipts += 1
+                event_receipts += 1
             except Exception as e:
                 if first_error is None:
                     first_error = str(e)
 
-        if receipts == 0:
+        if event_receipts == 0:
             msg = first_error or "unknown error"
             print_error(f"Failed to publish nickname: {msg}")
             return

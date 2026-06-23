@@ -9,16 +9,16 @@ from fern.crypto.keys import Keypair
 from fern.storage.interfaces import EventStore
 
 
-async def attestation_loop(
+async def group_status_loop(
     *,
     store: EventStore,
     group: str,
     relay_keypair: Keypair,
-    last_attestations: dict[str, Any],
+    last_group_statuses: dict[str, Any],
     broadcast_fn: Callable[[str, Any], Awaitable[None]] | None = None,
     interval_seconds: int = 5,
 ) -> None:
-    from fern.completeness.attestations import build_attestation
+    from fern.completeness.group_statuses import build_group_status
 
     while True:
         await asyncio.sleep(interval_seconds)
@@ -27,8 +27,8 @@ async def attestation_loop(
         tips = await store.get_tips(group)
         count = await store.count_events(group)
 
-        prev = last_attestations.get(group)
-        att = build_attestation(
+        prev = last_group_statuses.get(group)
+        att = build_group_status(
             group=group,
             relay_keypair=relay_keypair,
             known_set=known_set,
@@ -37,7 +37,7 @@ async def attestation_loop(
             prev=prev,
             ts=int(time.time()),
         )
-        last_attestations[group] = att
+        last_group_statuses[group] = att
 
         if broadcast_fn is not None:
             await broadcast_fn(group, att)
