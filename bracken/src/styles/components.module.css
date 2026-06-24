@@ -1074,7 +1074,11 @@
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: 1fr;
+}
+
+.dagBodyWithInspector {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 30vw);
 }
 
 .dagGraphWrap {
@@ -1922,7 +1926,7 @@
     max-width: none;
     margin-left: 42px;
   }
-  .dagBody {
+  .dagBodyWithInspector {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) 260px;
   }

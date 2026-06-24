@@ -85,12 +85,65 @@ function buildDagNodes(events: FernEvent[]): DagNode[] {
   return nodes
 }
 
+function computeNodeLevels(dagNodes: DagNode[]): Map<string, number> {
+  const levels = new Map<string, number>()
+  const childrenOf = new Map<string, string[]>()
+  const allIds = new Set(dagNodes.map((n) => n.id))
+
+  for (const node of dagNodes) {
+    if (node.event) {
+      for (const parent of node.event.parents) {
+        const parentId = allIds.has(parent) ? parent : `missing:${parent}`
+        if (!childrenOf.has(parentId)) childrenOf.set(parentId, [])
+        childrenOf.get(parentId)!.push(node.id)
+      }
+    }
+  }
+
+  const genesis = dagNodes.find((n) => n.event?.type === 'genesis')
+  if (!genesis) return levels
+
+  const queue: string[] = [genesis.id]
+  levels.set(genesis.id, 0)
+
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    const currentLevel = levels.get(current)!
+    const children = childrenOf.get(current) ?? []
+    for (const child of children) {
+      const existing = levels.get(child)
+      const newLevel = currentLevel + 1
+      if (existing === undefined || newLevel > existing) {
+        levels.set(child, newLevel)
+        queue.push(child)
+      }
+    }
+  }
+
+  const maxLevel = Math.max(...levels.values(), 0)
+  for (const node of dagNodes) {
+    if (!levels.has(node.id)) {
+      const childLevels = (childrenOf.get(node.id) ?? [])
+        .map((id) => levels.get(id))
+        .filter((l): l is number => l !== undefined)
+      if (childLevels.length > 0) {
+        levels.set(node.id, Math.min(...childLevels) - 1)
+      } else {
+        levels.set(node.id, maxLevel + 1)
+      }
+    }
+  }
+
+  return levels
+}
+
 export function DagViewer({ groupName, groupPubkey, events, onClose }: Props) {
   const graphRef = useRef<HTMLDivElement>(null)
   const networkRef = useRef<Network | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const dagNodes = useMemo(() => buildDagNodes(events), [events])
+  const nodeLevels = useMemo(() => computeNodeLevels(dagNodes), [dagNodes])
   const nodeById = useMemo(() => new Map(dagNodes.map((node) => [node.id, node])), [dagNodes])
   const stats = useMemo(() => {
     const connected = dagNodes.filter((node) => node.status === 'connected').length
@@ -107,6 +160,7 @@ export function DagViewer({ groupName, groupPubkey, events, onClose }: Props) {
       dagNodes.map((node) => ({
         id: node.id,
         label: node.label,
+        level: nodeLevels.get(node.id) ?? 0,
         shape: node.event?.type === 'genesis' ? 'diamond' : node.kind === 'missing' ? 'box' : 'dot',
         size: node.event?.type === 'genesis' ? 22 : node.kind === 'missing' ? undefined : 17,
         color: node.kind === 'missing'
@@ -180,6 +234,7 @@ export function DagViewer({ groupName, groupPubkey, events, onClose }: Props) {
   }, [dagNodes, events])
 
   const selected = selectedId ? nodeById.get(selectedId) ?? null : null
+  const hasSelection = selected !== null && (selected.event !== undefined || selected.status === 'missing')
   const focusNode = useCallback((id: string) => {
     const nodeId = nodeById.has(id) ? id : `missing:${id}`
     if (!nodeById.has(nodeId)) return
@@ -212,7 +267,7 @@ export function DagViewer({ groupName, groupPubkey, events, onClose }: Props) {
         </div>
       </div>
 
-      <div className={styles.dagBody}>
+      <div className={`${styles.dagBody} ${hasSelection ? styles.dagBodyWithInspector : ''}`}>
         <div className={styles.dagGraphWrap}>
           <div className={styles.dagGraph} ref={graphRef} />
           <div className={styles.dagLegendPanel}>
@@ -238,58 +293,58 @@ export function DagViewer({ groupName, groupPubkey, events, onClose }: Props) {
             </span>
           </div>
         </div>
-        <aside className={styles.dagInspector}>
-          {selected?.event ? (
-            <>
-              <div className={styles.dagInspectorTitle}>{selected.event.type}</div>
-              <div className={styles.dagInspectorGrid}>
-                <span>Type</span>
-                <code>{selected.event.type}</code>
-                <span>Status</span>
-                <strong>{selected.status}</strong>
-                <span>ID</span>
-                <code>{selected.event.id}</code>
-                <span>Group</span>
-                <code>{selected.event.group}</code>
-                <span>Author</span>
-                <code>{selected.event.author}</code>
-                <span>Timestamp</span>
-                <strong>{absoluteTime(selected.event.ts)}</strong>
-                <span>Parents</span>
-                {selected.event.parents.length > 0 ? (
-                  <div className={styles.dagParentList}>
-                    {selected.event.parents.map((parent) => (
-                      <button
-                        key={parent}
-                        className={styles.dagParentBtn}
-                        onClick={() => focusNode(parent)}
-                      >
-                        {truncateId(parent)}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <strong>none</strong>
-                )}
-                <span>Tags</span>
-                <code>{selected.event.tags.length > 0 ? JSON.stringify(selected.event.tags) : '[]'}</code>
-                <span>Signature</span>
-                <code>{selected.event.sig}</code>
-              </div>
-              <pre className={styles.dagJson}>{JSON.stringify(selected.event.content, null, 2)}</pre>
-            </>
-          ) : selected?.status === 'missing' ? (
-            <>
-              <div className={styles.dagInspectorTitle}>Missing parent</div>
-              <div className={styles.dagInspectorGrid}>
-                <span>ID</span>
-                <code>{selected.id.replace(/^missing:/, '')}</code>
-              </div>
-            </>
-          ) : (
-            <div className={styles.dagEmptyInspector}>Select a node to inspect the stored event.</div>
-          )}
-        </aside>
+        {hasSelection && (
+          <aside className={styles.dagInspector}>
+            {selected?.event ? (
+              <>
+                <div className={styles.dagInspectorTitle}>{selected.event.type}</div>
+                <div className={styles.dagInspectorGrid}>
+                  <span>Type</span>
+                  <code>{selected.event.type}</code>
+                  <span>Status</span>
+                  <strong>{selected.status}</strong>
+                  <span>ID</span>
+                  <code>{selected.event.id}</code>
+                  <span>Group</span>
+                  <code>{selected.event.group}</code>
+                  <span>Author</span>
+                  <code>{selected.event.author}</code>
+                  <span>Timestamp</span>
+                  <strong>{absoluteTime(selected.event.ts)}</strong>
+                  <span>Parents</span>
+                  {selected.event.parents.length > 0 ? (
+                    <div className={styles.dagParentList}>
+                      {selected.event.parents.map((parent) => (
+                        <button
+                          key={parent}
+                          className={styles.dagParentBtn}
+                          onClick={() => focusNode(parent)}
+                        >
+                          {truncateId(parent)}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <strong>none</strong>
+                  )}
+                  <span>Tags</span>
+                  <code>{selected.event.tags.length > 0 ? JSON.stringify(selected.event.tags) : '[]'}</code>
+                  <span>Signature</span>
+                  <code>{selected.event.sig}</code>
+                </div>
+                <pre className={styles.dagJson}>{JSON.stringify(selected.event.content, null, 2)}</pre>
+              </>
+            ) : selected?.status === 'missing' ? (
+              <>
+                <div className={styles.dagInspectorTitle}>Missing parent</div>
+                <div className={styles.dagInspectorGrid}>
+                  <span>ID</span>
+                  <code>{selected.id.replace(/^missing:/, '')}</code>
+                </div>
+              </>
+            ) : null}
+          </aside>
+        )}
       </div>
     </div>
   )
