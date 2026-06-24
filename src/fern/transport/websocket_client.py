@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 import websockets.asyncio.client as ws_client
 from websockets.exceptions import ConnectionClosed
@@ -14,7 +14,19 @@ from fern.events.event import Event
 from fern.completeness.event_receipts import EventReceipt
 from fern.completeness.group_statuses import GroupStatus
 from fern.completeness.fraud_proofs import FraudProof
-from fern.transport.interfaces import RelayMetadata, SyncLockResult
+from fern.completeness.heal_attestations import (
+    GroupHostAttestation,
+    HealChallenge,
+    InventoryAttestation,
+    Threshold,
+    TrustedWitness,
+)
+from fern.transport.interfaces import (
+    HealBatchResult,
+    InventoryAttestationResult,
+    RelayMetadata,
+    SyncLockResult,
+)
 
 
 _PUSH_TYPES = frozenset({"event", "group_status"})
@@ -30,6 +42,11 @@ _RESPONSE_TYPES = frozenset(
         "ids",
         "sync_lock_granted",
         "sync_lock_denied",
+        "heal_challenge",
+        "group_host_attestation",
+        "inventory_attestation",
+        "inventory_missing",
+        "heal_batch_result",
     }
 )
 
@@ -74,6 +91,111 @@ def _json_to_group_status(d: dict) -> GroupStatus:
         count=d["count"],
         prev=d.get("prev"),
         ts=d["ts"],
+        sig=d["sig"],
+    )
+
+
+def _heal_challenge_to_json(c: HealChallenge) -> dict:
+    return {
+        "type": c.type,
+        "group": c.group,
+        "receiver": c.receiver,
+        "ids_hash": c.ids_hash,
+        "count": c.count,
+        "trusted_witnesses": [{"relay": w.relay, "url": w.url} for w in c.trusted_witnesses],
+        "threshold": {
+            "kind": c.threshold.kind,
+            "num": c.threshold.num,
+            "den": c.threshold.den,
+            "min": c.threshold.min,
+        },
+        "nonce": c.nonce,
+        "ts": c.ts,
+        "expires": c.expires,
+        "sig": c.sig,
+    }
+
+
+def _json_to_heal_challenge(d: dict) -> HealChallenge:
+    tw = tuple(
+        TrustedWitness(relay=w["relay"], url=w["url"])
+        for w in d.get("trusted_witnesses", [])
+    )
+    thr_data = d.get("threshold", {})
+    return HealChallenge(
+        type=d.get("type", "heal_challenge"),
+        group=d["group"],
+        receiver=d["receiver"],
+        ids_hash=d["ids_hash"],
+        count=d["count"],
+        trusted_witnesses=tw,
+        threshold=Threshold(
+            kind=thr_data.get("kind", "ratio"),
+            num=thr_data.get("num", 2),
+            den=thr_data.get("den", 3),
+            min=thr_data.get("min", 2),
+        ),
+        nonce=d["nonce"],
+        ts=d["ts"],
+        expires=d["expires"],
+        sig=d["sig"],
+    )
+
+
+def _group_host_attestation_to_json(a: GroupHostAttestation) -> dict:
+    return {
+        "type": a.type,
+        "group": a.group,
+        "relay": a.relay,
+        "receiver": a.receiver,
+        "challenge": a.challenge,
+        "hosts": a.hosts,
+        "ts": a.ts,
+        "expires": a.expires,
+        "sig": a.sig,
+    }
+
+
+def _json_to_group_host_attestation(d: dict) -> GroupHostAttestation:
+    return GroupHostAttestation(
+        type=d.get("type", "group_host_attestation"),
+        group=d["group"],
+        relay=d["relay"],
+        receiver=d["receiver"],
+        challenge=d["challenge"],
+        hosts=d["hosts"],
+        ts=d["ts"],
+        expires=d["expires"],
+        sig=d["sig"],
+    )
+
+
+def _inventory_attestation_to_json(a: InventoryAttestation) -> dict:
+    return {
+        "type": a.type,
+        "group": a.group,
+        "relay": a.relay,
+        "receiver": a.receiver,
+        "challenge": a.challenge,
+        "ids_hash": a.ids_hash,
+        "count": a.count,
+        "ts": a.ts,
+        "expires": a.expires,
+        "sig": a.sig,
+    }
+
+
+def _json_to_inventory_attestation(d: dict) -> InventoryAttestation:
+    return InventoryAttestation(
+        type=d.get("type", "inventory_attestation"),
+        group=d["group"],
+        relay=d["relay"],
+        receiver=d["receiver"],
+        challenge=d["challenge"],
+        ids_hash=d["ids_hash"],
+        count=d["count"],
+        ts=d["ts"],
+        expires=d["expires"],
         sig=d["sig"],
     )
 
@@ -367,6 +489,130 @@ class WebSocketRelayClient:
                     event_receipt=event_receipt,
                     evidence=fp.get("evidence", ""),
                 )
+
+    async def get_heal_challenge(self, group: str, ids: Sequence[str]) -> HealChallenge:
+        msg = {"action": "get_heal_challenge", "group": group, "ids": list(ids)}
+        self._awaiting_response = True
+        try:
+            await self._send(msg)
+            while True:
+                response = await self._recv_response()
+                r_type = response.get("type")
+                if r_type == "heal_challenge":
+                    return _json_to_heal_challenge(response["heal_challenge"])
+                if r_type == "error":
+                    raise ValueError(f"get_heal_challenge failed: {response.get('message')}")
+                if r_type in _PUSH_TYPES:
+                    self._route_push(response)
+                    continue
+                raise ValueError(f"unexpected response: {r_type}")
+        finally:
+            self._awaiting_response = False
+
+    async def get_group_host_attestation(
+        self, challenge: HealChallenge
+    ) -> GroupHostAttestation | None:
+        msg = {
+            "action": "get_group_host_attestation",
+            "heal_challenge": _heal_challenge_to_json(challenge),
+        }
+        self._awaiting_response = True
+        try:
+            await self._send(msg)
+            while True:
+                response = await self._recv_response()
+                r_type = response.get("type")
+                if r_type == "group_host_attestation":
+                    return _json_to_group_host_attestation(response["group_host_attestation"])
+                if r_type == "error":
+                    raise ValueError(f"get_group_host_attestation failed: {response.get('message')}")
+                if r_type in _PUSH_TYPES:
+                    self._route_push(response)
+                    continue
+                raise ValueError(f"unexpected response: {r_type}")
+        finally:
+            self._awaiting_response = False
+
+    async def get_inventory_attestation(
+        self, challenge: HealChallenge, ids: Sequence[str]
+    ) -> InventoryAttestationResult:
+        msg = {
+            "action": "get_inventory_attestation",
+            "heal_challenge": _heal_challenge_to_json(challenge),
+            "ids": list(ids),
+        }
+        self._awaiting_response = True
+        try:
+            await self._send(msg)
+            while True:
+                response = await self._recv_response()
+                r_type = response.get("type")
+                if r_type == "inventory_attestation":
+                    att = _json_to_inventory_attestation(response["inventory_attestation"])
+                    covered = tuple(response.get("ids", []))
+                    missing = tuple(response.get("missing", []))
+                    return InventoryAttestationResult(
+                        attestation=att, covered=covered, missing=missing
+                    )
+                if r_type == "inventory_missing":
+                    return InventoryAttestationResult(
+                        inventory_missing=True,
+                        missing=tuple(response.get("missing", [])),
+                    )
+                if r_type == "error":
+                    raise ValueError(f"get_inventory_attestation failed: {response.get('message')}")
+                if r_type in _PUSH_TYPES:
+                    self._route_push(response)
+                    continue
+                raise ValueError(f"unexpected response: {r_type}")
+        finally:
+            self._awaiting_response = False
+
+    async def heal_batch(
+        self,
+        *,
+        challenge: HealChallenge,
+        events: Sequence[Event],
+        group_host_attestations: Sequence[GroupHostAttestation],
+        inventory_attestations: Sequence[tuple[InventoryAttestation, Sequence[str]]],
+    ) -> HealBatchResult:
+        msg: dict = {
+            "action": "heal_batch",
+            "heal_challenge": _heal_challenge_to_json(challenge),
+            "events": [_event_to_json(e) for e in events],
+            "group_host_attestations": [
+                _group_host_attestation_to_json(a) for a in group_host_attestations
+            ],
+            "inventory_attestations": [
+                {
+                    "inventory_attestation": _inventory_attestation_to_json(a),
+                    "ids": list(covered),
+                }
+                for a, covered in inventory_attestations
+            ],
+        }
+        self._awaiting_response = True
+        try:
+            await self._send(msg)
+            while True:
+                response = await self._recv_response()
+                r_type = response.get("type")
+                if r_type == "heal_batch_result":
+                    return HealBatchResult(
+                        stored=tuple(response.get("stored", [])),
+                        already_have=tuple(response.get("already_have", [])),
+                        rejected=tuple(
+                            (r["id"], r["reason"]) for r in response.get("rejected", [])
+                        ),
+                    )
+                if r_type == "error":
+                    raise ValueError(f"heal_batch failed: {response.get('message')}")
+                if r_type in _PUSH_TYPES:
+                    self._route_push(response)
+                    continue
+                raise ValueError(f"unexpected response: {r_type}")
+        finally:
+            self._awaiting_response = False
 
     def on_event(self, callback: Callable[[Event], Awaitable[None]]) -> None:
         self._event_callbacks.append(callback)

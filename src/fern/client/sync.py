@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 
 from fern.completeness.group_statuses import compute_set_hash, verify_group_status
 from fern.events.event import Event
 from fern.events.validation import verify_event
 from fern.storage.interfaces import EventStore
 from fern.transport.interfaces import RelayTransport, SyncLockResult
+
+WitnessConnector = Callable[[str, str], Awaitable[RelayTransport | None]]
+
+
+class HealMode(Enum):
+    NONE = "none"
+    SLOW_ONLY = "slow"
+    AUTO = "auto"
 
 
 @dataclass(frozen=True)
@@ -16,6 +26,7 @@ class SyncDiffResult:
     healed: int = 0
     used_fallback: bool = False
     skipped_locked: bool = False
+    fast_healed: int = 0
 
 
 async def _full_sync(
@@ -86,6 +97,10 @@ async def sync_diff(
     client_id: str,
     batch_size: int = 10,
     wait_on_lock: bool = False,
+    heal_mode: HealMode = HealMode.AUTO,
+    sibling_transports: Sequence[RelayTransport] = (),
+    connect_witness_fn: WitnessConnector | None = None,
+    fast_heal_min_events: int = 3,
 ) -> SyncDiffResult:
     """Synchronise one relay using group_statuses, ID diffing, and advisory heal locks."""
     try:
@@ -164,14 +179,91 @@ async def sync_diff(
             for event in await _local_group_events(store, group)
             if event.id in missing_on_relay_set
         ]
-        healed = await _heal_events(
-            transport=transport, events=to_heal, batch_size=batch_size
-        )
 
-        return SyncDiffResult(fetched=fetched, healed=healed)
+        fast_healed = 0
+        healed = 0
+
+        if heal_mode == HealMode.NONE:
+            pass
+        elif heal_mode == HealMode.AUTO and len(to_heal) >= fast_heal_min_events:
+            fast_healed, healed = await _try_trusted_then_slow(
+                transport=transport,
+                group=group,
+                to_heal=to_heal,
+                sibling_transports=sibling_transports,
+                connect_witness_fn=connect_witness_fn,
+                batch_size=batch_size,
+                fast_heal_min_events=fast_heal_min_events,
+            )
+        else:
+            healed = await _heal_events(
+                transport=transport, events=to_heal, batch_size=batch_size
+            )
+
+        return SyncDiffResult(fetched=fetched, healed=healed, fast_healed=fast_healed)
     finally:
         if lock_acquired:
             try:
                 await transport.sync_unlock(group, client_id)
             except Exception:
                 pass
+
+
+async def _try_trusted_then_slow(
+    *,
+    transport: RelayTransport,
+    group: str,
+    to_heal: list[Event],
+    sibling_transports: Sequence[RelayTransport],
+    connect_witness_fn: WitnessConnector | None,
+    batch_size: int,
+    fast_heal_min_events: int,
+) -> tuple[int, int]:
+    from fern.client.trusted_heal import trusted_heal_missing
+
+    existing_witnesses: dict[str, RelayTransport] = {}
+    for t in sibling_transports:
+        if t.relay_pubkey and t.relay_pubkey != transport.relay_pubkey:
+            existing_witnesses[t.relay_pubkey] = t
+
+    connect_fn = connect_witness_fn or _default_connect_witness
+
+    result = await trusted_heal_missing(
+        target_relay=transport,
+        group=group,
+        to_heal=to_heal,
+        existing_witness_transports=existing_witnesses,
+        connect_witness=connect_fn,
+        fast_heal_min_events=fast_heal_min_events,
+    )
+
+    fast_healed = len(result.stored)
+    slow_healed = 0
+
+    if result.fell_back:
+        slow_healed = await _heal_events(
+            transport=transport, events=to_heal, batch_size=batch_size
+        )
+    elif result.rejected_ids:
+        rejected_set = set(result.rejected_ids)
+        slow_events = [e for e in to_heal if e.id in rejected_set]
+        slow_healed = await _heal_events(
+            transport=transport, events=slow_events, batch_size=batch_size
+        )
+
+    return fast_healed, slow_healed
+
+
+async def _default_connect_witness(url: str, expected_pubkey: str) -> RelayTransport | None:
+    from fern.transport.websocket_client import WebSocketRelayClient
+
+    try:
+        client = WebSocketRelayClient(url, expected_pubkey)
+        await client.connect()
+        await client.fetch_metadata()
+        if client.relay_pubkey != expected_pubkey:
+            await client.close()
+            return None
+        return client
+    except Exception:
+        return None

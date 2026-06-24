@@ -87,6 +87,11 @@ class _ColorFormatter(logging.Formatter):
         "If omitted, a new keypair is generated (not persisted across restarts)."
     ),
 )
+@click.option(
+    "--trust-config",
+    default=None,
+    help="Path to a JSON file configuring trusted witness relays, thresholds, and rate limits.",
+)
 @click.option("--log-level", default="INFO", help="Log level (DEBUG/INFO/WARNING/ERROR)")
 @click.option("--no-color", is_flag=True, help="Disable coloured log output")
 def main_fn(
@@ -95,6 +100,7 @@ def main_fn(
     name: str,
     store: str,
     key_file: str | None,
+    trust_config: str | None,
     log_level: str,
     no_color: bool,
 ) -> None:
@@ -125,6 +131,8 @@ def main_fn(
 
     keypair = _load_or_generate_keypair(key_file)
     click.echo(f"  {CYAN}Pubkey:{RESET}    {GREEN}{keypair.pubkey_hex}{RESET}")
+    if trust_config:
+        click.echo(f"  {CYAN}Trust:{RESET}     {trust_config}")
 
     server = RelayServer(
         host=host,
@@ -132,6 +140,7 @@ def main_fn(
         name=name,
         relay_keypair=keypair,
         store_path=store,
+        trust_config_path=trust_config,
     )
 
     asyncio.run(server.start())

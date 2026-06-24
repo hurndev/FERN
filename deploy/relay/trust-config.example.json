@@ -1,0 +1,35 @@
+{
+  "trusted_witness_relays": [
+    {
+      "url": "wss://relay-a.example.com/",
+      "pubkey": "YOUR_RELAY_A_PUBKEY_HEX_HERE"
+    },
+    {
+      "url": "wss://relay-b.example.com/",
+      "pubkey": "YOUR_RELAY_B_PUBKEY_HEX_HERE"
+    }
+  ],
+  "threshold": {
+    "kind": "ratio",
+    "num": 2,
+    "den": 3,
+    "min": 2
+  },
+  "batch_limits": {
+    "max_events": 500,
+    "max_bytes": 2097152
+  },
+  "rate_limits": {
+    "publish": {"max": 60, "window_seconds": 60},
+    "slow_heal": {"max": 60, "window_seconds": 60},
+    "heal_batch": {"max": 10, "window_seconds": 60},
+    "get_heal_challenge": {"max": 10, "window_seconds": 60},
+    "get_group_host_attestation": {"max": 30, "window_seconds": 60},
+    "get_inventory_attestation": {"max": 15, "window_seconds": 60}
+  },
+  "per_group_storage_quota": 100000,
+  "max_message_bytes": 2097152,
+  "witnessing_enabled": true,
+  "witness_for_receivers": null,
+  "challenge_expiry_seconds": 300
+}

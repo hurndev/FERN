@@ -9,6 +9,7 @@ from fern.identity.user import UserIdentity
 from fern.events.event import Event
 from fern.state.machine import derive_group_state
 from cli.sync import sync_group_from_transports
+from fern.client.sync import HealMode
 from cli.config import (
     load_config,
     get_cache_path,
@@ -82,11 +83,12 @@ def _format_admin_action(event: Event, nicknames: dict[str, str]) -> str | None:
 @click.option("-n", "--count", default=50, help="Number of entries to show")
 @click.option("--show-rejected", is_flag=True, help="Show messages from non-joined/banned users")
 @click.argument("group_id")
-def command(channel: str | None, count: int, show_rejected: bool, group_id: str) -> None:
-    asyncio.run(_read(channel, count, show_rejected, group_id))
+@click.pass_context
+def command(ctx: click.Context, channel: str | None, count: int, show_rejected: bool, group_id: str) -> None:
+    asyncio.run(_read(ctx, channel, count, show_rejected, group_id))
 
 
-async def _read(channel: str | None, count: int, show_rejected: bool, group_id: str) -> None:
+async def _read(ctx: click.Context, channel: str | None, count: int, show_rejected: bool, group_id: str) -> None:
     config = load_config()
     privkey = config.get("user_privkey_hex")
     if not privkey:
@@ -104,11 +106,13 @@ async def _read(channel: str | None, count: int, show_rejected: bool, group_id: 
         store = SqliteStore(cache_path)
         await store.open()
         try:
+            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
             await sync_group_from_transports(
                 group_pubkey=group_pubkey,
                 transports=transports,
                 store=store,
                 client_id=user.pubkey,
+                heal_mode=heal_mode,
             )
         finally:
             await store.close()

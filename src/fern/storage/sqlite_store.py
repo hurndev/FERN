@@ -62,6 +62,16 @@ CREATE TABLE IF NOT EXISTS group_statuses_issued (
     ts INTEGER NOT NULL,
     PRIMARY KEY (relay_pubkey, group_pubkey)
 );
+
+CREATE TABLE IF NOT EXISTS heal_admission_provenance (
+    event_id TEXT NOT NULL,
+    group_pubkey TEXT NOT NULL,
+    witness_pubkey TEXT NOT NULL,
+    admitted_ts INTEGER NOT NULL,
+    PRIMARY KEY (event_id, witness_pubkey)
+);
+CREATE INDEX IF NOT EXISTS idx_heal_prov_witness ON heal_admission_provenance(witness_pubkey);
+CREATE INDEX IF NOT EXISTS idx_heal_prov_group ON heal_admission_provenance(group_pubkey);
 """
 
 
@@ -399,3 +409,72 @@ class SqliteStore:
             return str(row[0])
 
         return await self._run(_get)
+
+    async def put_heal_provenance(
+        self, event_id: str, group: str, witness_pubkeys: list[str], ts: int
+    ) -> None:
+        def _put() -> None:
+            for w in witness_pubkeys:
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO heal_admission_provenance
+                       (event_id, group_pubkey, witness_pubkey, admitted_ts)
+                       VALUES (?, ?, ?, ?)""",
+                    (event_id, group, w, ts),
+                )
+            self.conn.commit()
+
+        await self._run(_put)
+
+    async def get_heal_provenance(self, event_id: str) -> list[str]:
+        def _get() -> list[str]:
+            cursor = self.conn.execute(
+                "SELECT witness_pubkey FROM heal_admission_provenance WHERE event_id = ?",
+                (event_id,),
+            )
+            return [str(row[0]) for row in cursor]
+
+        return await self._run(_get)
+
+    async def iter_events_admitted_by(
+        self, witness_pubkey: str, group: str | None = None
+    ) -> AsyncIterator[str]:
+        def _fetch() -> list[str]:
+            if group is not None:
+                cursor = self.conn.execute(
+                    "SELECT event_id FROM heal_admission_provenance "
+                    "WHERE witness_pubkey = ? AND group_pubkey = ?",
+                    (witness_pubkey, group),
+                )
+            else:
+                cursor = self.conn.execute(
+                    "SELECT event_id FROM heal_admission_provenance WHERE witness_pubkey = ?",
+                    (witness_pubkey,),
+                )
+            return [str(row[0]) for row in cursor]
+
+        ids = await self._run(_fetch)
+        for eid in ids:
+            yield eid
+
+    async def delete_events_admitted_only_by(self, witness_pubkey: str) -> list[str]:
+        def _delete() -> list[str]:
+            cursor = self.conn.execute(
+                """SELECT event_id FROM heal_admission_provenance
+                   WHERE witness_pubkey = ?
+                   AND event_id NOT IN (
+                       SELECT event_id FROM heal_admission_provenance
+                       WHERE witness_pubkey != ?
+                   )""",
+                (witness_pubkey, witness_pubkey),
+            )
+            orphans = [str(row[0]) for row in cursor]
+            for eid in orphans:
+                self.conn.execute("DELETE FROM heal_admission_provenance WHERE event_id = ?", (eid,))
+                self.conn.execute("DELETE FROM events WHERE id = ?", (eid,))
+                self.conn.execute("DELETE FROM parent_refs WHERE child_id = ?", (eid,))
+                self.conn.execute("DELETE FROM parent_refs WHERE parent_id = ?", (eid,))
+            if orphans:
+                self.conn.commit()
+            return orphans
+
+        return await self._run(_delete)

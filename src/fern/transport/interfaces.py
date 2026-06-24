@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from fern.events.event import Event
 from fern.completeness.event_receipts import EventReceipt
-from fern.completeness.group_statuses import GroupStatus
 from fern.completeness.fraud_proofs import FraudProof
+from fern.completeness.group_statuses import GroupStatus
+from fern.completeness.heal_attestations import (
+    GroupHostAttestation,
+    HealChallenge,
+    InventoryAttestation,
+)
+from fern.events.event import Event
 
 
 @dataclass(frozen=True)
@@ -26,6 +31,21 @@ class SyncLockResult:
     granted: bool
     ttl: int | None = None
     expires_in: int | None = None
+
+
+@dataclass(frozen=True)
+class InventoryAttestationResult:
+    attestation: InventoryAttestation | None = None
+    covered: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    inventory_missing: bool = False
+
+
+@dataclass(frozen=True)
+class HealBatchResult:
+    stored: tuple[str, ...] = ()
+    already_have: tuple[str, ...] = ()
+    rejected: tuple[tuple[str, str], ...] = ()
 
 
 class RelayTransport(Protocol):
@@ -51,6 +71,24 @@ class RelayTransport(Protocol):
     def query_fraud_proofs(
         self, *, relay: str | None = None, group: str | None = None
     ) -> AsyncIterator[FraudProof]: ...
+
+    async def get_heal_challenge(
+        self, group: str, ids: Sequence[str]
+    ) -> HealChallenge: ...
+    async def get_group_host_attestation(
+        self, challenge: HealChallenge
+    ) -> GroupHostAttestation | None: ...
+    async def get_inventory_attestation(
+        self, challenge: HealChallenge, ids: Sequence[str]
+    ) -> InventoryAttestationResult: ...
+    async def heal_batch(
+        self,
+        *,
+        challenge: HealChallenge,
+        events: Sequence[Event],
+        group_host_attestations: Sequence[GroupHostAttestation],
+        inventory_attestations: Sequence[tuple[InventoryAttestation, Sequence[str]]],
+    ) -> HealBatchResult: ...
 
     def on_event(self, callback: Callable[[Event], Awaitable[None]]) -> None: ...
     def on_group_status(self, callback: Callable[[GroupStatus], Awaitable[None]]) -> None: ...

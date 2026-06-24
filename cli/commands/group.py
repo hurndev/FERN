@@ -14,6 +14,7 @@ from fern.storage.sqlite_store import SqliteStore
 from fern.transport.websocket_client import WebSocketRelayClient
 from fern.client.bootstrap import fetch_genesis
 from cli.sync import sync_group_from_transports
+from fern.client.sync import HealMode
 from cli.config import (
     load_config,
     save_config,
@@ -190,11 +191,12 @@ async def _create(name: str, description: str, public: bool, relay_urls: list[st
 
 @command.command()
 @click.argument("address")
-def join(address: str) -> None:
-    asyncio.run(_join(address))
+@click.pass_context
+def join(ctx: click.Context, address: str) -> None:
+    asyncio.run(_join(ctx, address))
 
 
-async def _join(address: str) -> None:
+async def _join(ctx: click.Context, address: str) -> None:
     config = load_config()
     user = _get_user(config)
     group_pubkey, relay_urls = parse_group_address(address)
@@ -226,11 +228,13 @@ async def _join(address: str) -> None:
         await store.open()
         try:
             await store.put_event(genesis)
+            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
             await sync_group_from_transports(
                 group_pubkey=group_pubkey,
                 transports=transports,
                 store=store,
                 client_id=user.pubkey,
+                heal_mode=heal_mode,
             )
             tips = await _accepted_tips(store, group_pubkey)
         finally:
@@ -297,11 +301,12 @@ def list_groups() -> None:
 
 @command.command()
 @click.argument("group_id")
-def info(group_id: str) -> None:
-    asyncio.run(_info(group_id))
+@click.pass_context
+def info(ctx: click.Context, group_id: str) -> None:
+    asyncio.run(_info(ctx, group_id))
 
 
-async def _info(group_id: str) -> None:
+async def _info(ctx: click.Context, group_id: str) -> None:
     config = load_config()
     group_pubkey, group_info = resolve_group(group_id, config)
 
@@ -313,11 +318,13 @@ async def _info(group_id: str) -> None:
         if relay_urls:
             transports = await connect_transports(relay_urls)
             try:
+                heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
                 await sync_group_from_transports(
                     group_pubkey=group_pubkey,
                     transports=transports,
                     store=store,
                     client_id=get_client_id(config),
+                    heal_mode=heal_mode,
                 )
             finally:
                 await _close_transports(transports)
@@ -353,11 +360,12 @@ async def _info(group_id: str) -> None:
 
 @command.command()
 @click.argument("group_id")
-def members(group_id: str) -> None:
-    asyncio.run(_members(group_id))
+@click.pass_context
+def members(ctx: click.Context, group_id: str) -> None:
+    asyncio.run(_members(ctx, group_id))
 
 
-async def _members(group_id: str) -> None:
+async def _members(ctx: click.Context, group_id: str) -> None:
     config = load_config()
     group_pubkey, group_info = resolve_group(group_id, config)
 
@@ -369,11 +377,13 @@ async def _members(group_id: str) -> None:
         if relay_urls:
             transports = await connect_transports(relay_urls)
             try:
+                heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
                 await sync_group_from_transports(
                     group_pubkey=group_pubkey,
                     transports=transports,
                     store=store,
                     client_id=get_client_id(config),
+                    heal_mode=heal_mode,
                 )
             finally:
                 await _close_transports(transports)
@@ -419,11 +429,12 @@ async def _members(group_id: str) -> None:
 
 @command.command()
 @click.argument("group_id")
-def leave(group_id: str) -> None:
-    asyncio.run(_leave(group_id))
+@click.pass_context
+def leave(ctx: click.Context, group_id: str) -> None:
+    asyncio.run(_leave(ctx, group_id))
 
 
-async def _leave(group_id: str) -> None:
+async def _leave(ctx: click.Context, group_id: str) -> None:
     config = load_config()
     user = _get_user(config)
     group_pubkey, group_info = resolve_group(group_id, config)
@@ -439,11 +450,13 @@ async def _leave(group_id: str) -> None:
         store = SqliteStore(cache_path)
         await store.open()
         try:
+            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
             await sync_group_from_transports(
                 group_pubkey=group_pubkey,
                 transports=transports,
                 store=store,
                 client_id=user.pubkey,
+                heal_mode=heal_mode,
             )
             tips = await _accepted_tips(store, group_pubkey)
         finally:
@@ -488,11 +501,12 @@ async def _leave(group_id: str) -> None:
 @command.command(name="relay-update")
 @click.argument("group_id")
 @click.argument("urls", nargs=-1, required=True)
-def relay_update(group_id: str, urls: tuple[str, ...]) -> None:
-    asyncio.run(_relay_update(group_id, list(urls)))
+@click.pass_context
+def relay_update(ctx: click.Context, group_id: str, urls: tuple[str, ...]) -> None:
+    asyncio.run(_relay_update(ctx, group_id, list(urls)))
 
 
-async def _relay_update(group_id: str, urls: list[str]) -> None:
+async def _relay_update(ctx: click.Context, group_id: str, urls: list[str]) -> None:
     config = load_config()
     user = _get_user(config)
     group_pubkey, group_info = resolve_group(group_id, config)
@@ -514,11 +528,13 @@ async def _relay_update(group_id: str, urls: list[str]) -> None:
         store = SqliteStore(cache_path)
         await store.open()
         try:
+            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
             await sync_group_from_transports(
                 group_pubkey=group_pubkey,
                 transports=transports,
                 store=store,
                 client_id=user.pubkey,
+                heal_mode=heal_mode,
             )
             tips = await _accepted_tips(store, group_pubkey)
         finally:
@@ -579,6 +595,7 @@ async def _relay_update(group_id: str, urls: list[str]) -> None:
 
 
 async def _publish_admin_event(
+    ctx: click.Context,
     group_id: str,
     event_type: str,
     content: dict[str, object],
@@ -598,11 +615,13 @@ async def _publish_admin_event(
         store = SqliteStore(cache_path)
         await store.open()
         try:
+            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
             await sync_group_from_transports(
                 group_pubkey=group_pubkey,
                 transports=transports,
                 store=store,
                 client_id=user.pubkey,
+                heal_mode=heal_mode,
             )
             tips = await _accepted_tips(store, group_pubkey)
         finally:
@@ -660,8 +679,10 @@ async def _publish_admin_event(
 @command.command(name="kick")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-def kick(group_id: str, target_pubkey: str) -> None:
+@click.pass_context
+def kick(ctx: click.Context, group_id: str, target_pubkey: str) -> None:
     asyncio.run(_publish_admin_event(
+        ctx,
         group_id,
         ProtocolTypes.KICK,
         {"target": target_pubkey},
@@ -674,9 +695,11 @@ def kick(group_id: str, target_pubkey: str) -> None:
 @click.argument("target_pubkey")
 @click.option("--until", type=int, default=None, help="Unix timestamp when ban expires")
 @click.option("--reason", default="", help="Reason for ban")
-def ban(group_id: str, target_pubkey: str, until: int | None, reason: str) -> None:
+@click.pass_context
+def ban(ctx: click.Context, group_id: str, target_pubkey: str, until: int | None, reason: str) -> None:
     content: dict[str, object] = {"target": target_pubkey, "until": until, "reason": reason}
     asyncio.run(_publish_admin_event(
+        ctx,
         group_id,
         ProtocolTypes.BAN,
         content,
@@ -687,8 +710,10 @@ def ban(group_id: str, target_pubkey: str, until: int | None, reason: str) -> No
 @command.command(name="unban")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-def unban(group_id: str, target_pubkey: str) -> None:
+@click.pass_context
+def unban(ctx: click.Context, group_id: str, target_pubkey: str) -> None:
     asyncio.run(_publish_admin_event(
+        ctx,
         group_id,
         ProtocolTypes.UNBAN,
         {"target": target_pubkey},
@@ -699,8 +724,10 @@ def unban(group_id: str, target_pubkey: str) -> None:
 @command.command(name="invite")
 @click.argument("group_id")
 @click.argument("invitee_pubkey")
-def invite(group_id: str, invitee_pubkey: str) -> None:
+@click.pass_context
+def invite(ctx: click.Context, group_id: str, invitee_pubkey: str) -> None:
     asyncio.run(_publish_admin_event(
+        ctx,
         group_id,
         ProtocolTypes.INVITE,
         {"invitee": invitee_pubkey, "role": "member"},
@@ -711,8 +738,10 @@ def invite(group_id: str, invitee_pubkey: str) -> None:
 @command.command(name="admin-add")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-def admin_add_cmd(group_id: str, target_pubkey: str) -> None:
+@click.pass_context
+def admin_add_cmd(ctx: click.Context, group_id: str, target_pubkey: str) -> None:
     asyncio.run(_publish_admin_event(
+        ctx,
         group_id,
         ProtocolTypes.ADMIN_ADD,
         {"target": target_pubkey},
@@ -723,8 +752,10 @@ def admin_add_cmd(group_id: str, target_pubkey: str) -> None:
 @command.command(name="admin-remove")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-def admin_remove_cmd(group_id: str, target_pubkey: str) -> None:
+@click.pass_context
+def admin_remove_cmd(ctx: click.Context, group_id: str, target_pubkey: str) -> None:
     asyncio.run(_publish_admin_event(
+        ctx,
         group_id,
         ProtocolTypes.ADMIN_REMOVE,
         {"target": target_pubkey},
@@ -735,11 +766,12 @@ def admin_remove_cmd(group_id: str, target_pubkey: str) -> None:
 @command.command(name="nickname")
 @click.argument("group_id")
 @click.argument("name")
-def nickname(group_id: str, name: str) -> None:
-    asyncio.run(_nickname(group_id, name))
+@click.pass_context
+def nickname(ctx: click.Context, group_id: str, name: str) -> None:
+    asyncio.run(_nickname(ctx, group_id, name))
 
 
-async def _nickname(group_id: str, name: str) -> None:
+async def _nickname(ctx: click.Context, group_id: str, name: str) -> None:
     config = load_config()
     user = _get_user(config)
     group_pubkey, group_info = resolve_group(group_id, config)
@@ -754,11 +786,13 @@ async def _nickname(group_id: str, name: str) -> None:
         store = SqliteStore(cache_path)
         await store.open()
         try:
+            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
             await sync_group_from_transports(
                 group_pubkey=group_pubkey,
                 transports=transports,
                 store=store,
                 client_id=user.pubkey,
+                heal_mode=heal_mode,
             )
             tips = await _accepted_tips(store, group_pubkey)
         finally:

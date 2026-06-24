@@ -20,15 +20,31 @@ from fern.completeness.event_receipts import EventReceipt, build_event_receipt
 from fern.completeness.group_statuses import (
     GroupStatus,
     build_group_status,
+    compute_set_hash,
 )
 from fern.completeness.fraud_proofs import (
     FraudProof,
     verify_fraud_proof,
     compute_fraud_proof_id,
 )
+from fern.completeness.heal_attestations import (
+    GroupHostAttestation,
+    HealChallenge,
+    InventoryAttestation,
+    Threshold,
+    TrustedWitness,
+    build_group_host_attestation,
+    build_heal_challenge,
+    build_inventory_attestation,
+    compute_challenge_id,
+    verify_heal_challenge,
+)
 from fern.crypto.keys import Keypair
+from fern.relay.admission import InventoryEvidence, compute_admission
 from fern.relay.metadata_handler import build_metadata
+from fern.relay.rate_limiter import RateLimiter
 from fern.relay.store import RelayStore
+from fern.relay.trust_config import load_trust_config
 from fern.storage.sqlite_store import SqliteStore
 
 
@@ -129,6 +145,7 @@ class RelayServer:
         description: str = "",
         relay_keypair: Keypair | None = None,
         store_path: str = "relay.db",
+        trust_config_path: str | None = None,
     ):
         self.host = host
         self.port = port
@@ -145,6 +162,9 @@ class RelayServer:
         self._hosted_groups: set[str] = set()
         self._sync_locks: dict[str, SyncLockLease] = {}
         self._started = False
+        self._trust_config = load_trust_config(trust_config_path)
+        self._rate_limiter = RateLimiter()
+        self._max_message_bytes = self._trust_config.max_message_bytes
 
     @property
     def pubkey(self) -> str:
@@ -175,7 +195,7 @@ class RelayServer:
             self.host,
             self.port,
             process_request=self._handle_http_request,
-            max_size=MAX_EVENT_BYTES,
+            max_size=self._max_message_bytes,
         ):
             await asyncio.get_running_loop().create_future()
 
@@ -225,10 +245,14 @@ class RelayServer:
             async for raw in ws:
                 try:
                     raw_size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
-                    if raw_size > MAX_EVENT_BYTES:
+                    msg = json.loads(raw)
+                    action = msg.get("action", "")
+                    if action != "heal_batch" and raw_size > MAX_EVENT_BYTES:
                         await ws.send(json.dumps({"type": "error", "message": "message exceeds 32 KiB"}))
                         continue
-                    msg = json.loads(raw)
+                    if raw_size > self._max_message_bytes:
+                        await ws.send(json.dumps({"type": "error", "message": "message exceeds relay limit"}))
+                        continue
                     responses = await self._process_message(msg, ws)
                     if responses is not None:
                         for response in responses:
@@ -283,6 +307,14 @@ class RelayServer:
             return await self._handle_submit_fraud_proof(msg)
         elif action == "query_fraud_proofs":
             return await self._handle_query_fraud_proofs(msg, ws)
+        elif action == "get_heal_challenge":
+            return await self._handle_get_heal_challenge(msg, ws)
+        elif action == "get_group_host_attestation":
+            return await self._handle_get_group_host_attestation(msg, ws)
+        elif action == "get_inventory_attestation":
+            return await self._handle_get_inventory_attestation(msg, ws)
+        elif action == "heal_batch":
+            return await self._handle_heal_batch(msg, ws)
         else:
             return [{"type": "error", "message": f"unknown action: {action}"}]
 
@@ -316,11 +348,17 @@ class RelayServer:
         return [{"type": "ok", "message": "unsubscribed"}]
 
     async def _handle_publish(self, msg: dict, ws: ws_server.ServerConnection) -> list[dict] | None:
+        rl = self._check_rate_limit("publish", ws)
+        if rl is not None:
+            return rl
         return await self._store_event_message(msg, action="publish", broadcast=True)
 
     async def _handle_heal(
         self, msg: dict, ws: ws_server.ServerConnection
     ) -> list[dict] | None:
+        rl = self._check_rate_limit("slow_heal", ws)
+        if rl is not None:
+            return rl
         return await self._store_event_message(msg, action="heal", broadcast=False)
 
     def _event_receipt_response(self, event_receipt: EventReceipt) -> list[dict]:
@@ -336,6 +374,22 @@ class RelayServer:
                 },
             }
         ]
+
+    def _client_ip(self, ws: ws_server.ServerConnection) -> str:
+        peer = getattr(ws, "remote_address", None)
+        if peer is None:
+            return "unknown"
+        return str(peer[0]) if isinstance(peer, tuple) and len(peer) >= 1 else "unknown"
+
+    def _check_rate_limit(self, action: str, ws: ws_server.ServerConnection) -> list[dict] | None:
+        rl = self._trust_config.rate_limits.get(action)
+        if rl is None:
+            return None
+        ip = self._client_ip(ws)
+        if not self._rate_limiter.allow(action, ip, rl.max, rl.window_seconds):
+            logger.warning("rate limit hit action=%s ip=%s", action, ip)
+            return [{"type": "error", "message": "rate limit exceeded"}]
+        return None
 
     async def _store_event_message(
         self, msg: dict, *, action: str, broadcast: bool
@@ -575,6 +629,367 @@ class RelayServer:
                 "evidence": fp.evidence,
             },
         }
+
+    def _heal_challenge_to_json(self, c: HealChallenge) -> dict:
+        return {
+            "type": c.type,
+            "group": c.group,
+            "receiver": c.receiver,
+            "ids_hash": c.ids_hash,
+            "count": c.count,
+            "trusted_witnesses": [{"relay": w.relay, "url": w.url} for w in c.trusted_witnesses],
+            "threshold": {
+                "kind": c.threshold.kind,
+                "num": c.threshold.num,
+                "den": c.threshold.den,
+                "min": c.threshold.min,
+            },
+            "nonce": c.nonce,
+            "ts": c.ts,
+            "expires": c.expires,
+            "sig": c.sig,
+        }
+
+    def _json_to_heal_challenge(self, d: dict) -> HealChallenge:
+        tw = tuple(
+            TrustedWitness(relay=w["relay"], url=w["url"])
+            for w in d.get("trusted_witnesses", [])
+        )
+        thr_data = d.get("threshold", {})
+        return HealChallenge(
+            type=d.get("type", "heal_challenge"),
+            group=d["group"],
+            receiver=d["receiver"],
+            ids_hash=d["ids_hash"],
+            count=d["count"],
+            trusted_witnesses=tw,
+            threshold=Threshold(
+                kind=thr_data.get("kind", "ratio"),
+                num=thr_data.get("num", 2),
+                den=thr_data.get("den", 3),
+                min=thr_data.get("min", 2),
+            ),
+            nonce=d["nonce"],
+            ts=d["ts"],
+            expires=d["expires"],
+            sig=d["sig"],
+        )
+
+    def _group_host_attestation_to_json(self, a: GroupHostAttestation) -> dict:
+        return {
+            "type": a.type,
+            "group": a.group,
+            "relay": a.relay,
+            "receiver": a.receiver,
+            "challenge": a.challenge,
+            "hosts": a.hosts,
+            "ts": a.ts,
+            "expires": a.expires,
+            "sig": a.sig,
+        }
+
+    def _json_to_group_host_attestation(self, d: dict) -> GroupHostAttestation:
+        return GroupHostAttestation(
+            type=d.get("type", "group_host_attestation"),
+            group=d["group"],
+            relay=d["relay"],
+            receiver=d["receiver"],
+            challenge=d["challenge"],
+            hosts=d["hosts"],
+            ts=d["ts"],
+            expires=d["expires"],
+            sig=d["sig"],
+        )
+
+    def _inventory_attestation_to_json(self, a: InventoryAttestation) -> dict:
+        return {
+            "type": a.type,
+            "group": a.group,
+            "relay": a.relay,
+            "receiver": a.receiver,
+            "challenge": a.challenge,
+            "ids_hash": a.ids_hash,
+            "count": a.count,
+            "ts": a.ts,
+            "expires": a.expires,
+            "sig": a.sig,
+        }
+
+    def _json_to_inventory_attestation(self, d: dict) -> InventoryAttestation:
+        return InventoryAttestation(
+            type=d.get("type", "inventory_attestation"),
+            group=d["group"],
+            relay=d["relay"],
+            receiver=d["receiver"],
+            challenge=d["challenge"],
+            ids_hash=d["ids_hash"],
+            count=d["count"],
+            ts=d["ts"],
+            expires=d["expires"],
+            sig=d["sig"],
+        )
+
+    async def _handle_get_heal_challenge(
+        self, msg: dict, ws: ws_server.ServerConnection
+    ) -> list[dict]:
+        rl = self._check_rate_limit("get_heal_challenge", ws)
+        if rl is not None:
+            return rl
+
+        if not self._trust_config.has_trusted_witnesses:
+            return [{"type": "error", "message": "no trusted witnesses configured"}]
+
+        group = msg.get("group", "")
+        ids = msg.get("ids", [])
+        if not group or not isinstance(ids, list) or not ids:
+            return [{"type": "error", "message": "group and ids required"}]
+
+        unique_ids = sorted(set(ids))
+        if len(unique_ids) != len(ids):
+            return [{"type": "error", "message": "duplicate event IDs"}]
+        if len(unique_ids) > self._trust_config.batch_limits.max_events:
+            return [{"type": "error", "message": "batch too large"}]
+
+        for eid in unique_ids:
+            if not isinstance(eid, str) or len(eid) != 64:
+                return [{"type": "error", "message": "invalid event ID"}]
+
+        now = int(time.time())
+        challenge = build_heal_challenge(
+            group=group,
+            receiver_keypair=self._keypair,
+            ids=unique_ids,
+            trusted_witnesses=self._trust_config.trusted_witness_relays,
+            threshold=self._trust_config.threshold,
+            ts=now,
+            expires=now + self._trust_config.challenge_expiry_seconds,
+        )
+        logger.info(
+            "get_heal_challenge group=%s... ids=%d witnesses=%d",
+            group[:16], len(unique_ids), len(challenge.trusted_witnesses),
+        )
+        return [{"type": "heal_challenge", "heal_challenge": self._heal_challenge_to_json(challenge)}]
+
+    async def _handle_get_group_host_attestation(
+        self, msg: dict, ws: ws_server.ServerConnection
+    ) -> list[dict]:
+        rl = self._check_rate_limit("get_group_host_attestation", ws)
+        if rl is not None:
+            return rl
+
+        try:
+            challenge = self._json_to_heal_challenge(msg.get("heal_challenge", {}))
+        except Exception as e:
+            return [{"type": "error", "message": f"invalid challenge: {e}"}]
+
+        now = int(time.time())
+        if not verify_heal_challenge(challenge, now_ts=now):
+            return [{"type": "error", "message": "invalid challenge"}]
+
+        own_pub = self._keypair.pubkey_hex
+        witness_pubkeys = {w.relay for w in challenge.trusted_witnesses}
+        if own_pub not in witness_pubkeys:
+            return [{"type": "error", "message": "not a witness for this challenge"}]
+
+        if not self._trust_config.is_willing_to_witness_for(challenge.receiver):
+            return [{"type": "error", "message": "not willing to witness for this receiver"}]
+
+        hosts = challenge.group in self._hosted_groups
+        att = build_group_host_attestation(
+            group=challenge.group,
+            witness_keypair=self._keypair,
+            receiver=challenge.receiver,
+            challenge_id=compute_challenge_id(challenge),
+            hosts=hosts,
+            ts=now,
+            expires=min(challenge.expires, now + self._trust_config.challenge_expiry_seconds),
+        )
+        logger.info(
+            "get_group_host_attestation group=%s... hosts=%s",
+            challenge.group[:16], hosts,
+        )
+        return [{"type": "group_host_attestation", "group_host_attestation": self._group_host_attestation_to_json(att)}]
+
+    async def _handle_get_inventory_attestation(
+        self, msg: dict, ws: ws_server.ServerConnection
+    ) -> list[dict]:
+        rl = self._check_rate_limit("get_inventory_attestation", ws)
+        if rl is not None:
+            return rl
+
+        try:
+            challenge = self._json_to_heal_challenge(msg.get("heal_challenge", {}))
+        except Exception as e:
+            return [{"type": "error", "message": f"invalid challenge: {e}"}]
+
+        ids = msg.get("ids", [])
+        if not isinstance(ids, list) or not ids:
+            return [{"type": "error", "message": "ids required"}]
+
+        now = int(time.time())
+        if not verify_heal_challenge(challenge, now_ts=now):
+            return [{"type": "error", "message": "invalid challenge"}]
+
+        own_pub = self._keypair.pubkey_hex
+        witness_pubkeys = {w.relay for w in challenge.trusted_witnesses}
+        if own_pub not in witness_pubkeys:
+            return [{"type": "error", "message": "not a witness for this challenge"}]
+
+        if compute_set_hash(ids) != challenge.ids_hash or len(ids) != challenge.count:
+            return [{"type": "error", "message": "ids do not match challenge"}]
+
+        covered: list[str] = []
+        missing: list[str] = []
+        for eid in ids:
+            if await self._store.has_event(eid):
+                covered.append(eid)
+            else:
+                missing.append(eid)
+
+        if not covered:
+            logger.info(
+                "get_inventory_attestation group=%s... -> inventory_missing",
+                challenge.group[:16],
+            )
+            return [{"type": "inventory_missing", "missing": missing}]
+
+        att = build_inventory_attestation(
+            group=challenge.group,
+            witness_keypair=self._keypair,
+            receiver=challenge.receiver,
+            challenge_id=compute_challenge_id(challenge),
+            covered_ids=covered,
+            ts=now,
+            expires=min(challenge.expires, now + self._trust_config.challenge_expiry_seconds),
+        )
+        logger.info(
+            "get_inventory_attestation group=%s... covered=%d missing=%d",
+            challenge.group[:16], len(covered), len(missing),
+        )
+        return [{
+            "type": "inventory_attestation",
+            "inventory_attestation": self._inventory_attestation_to_json(att),
+            "ids": covered,
+            "missing": missing,
+        }]
+
+    async def _handle_heal_batch(
+        self, msg: dict, ws: ws_server.ServerConnection
+    ) -> list[dict]:
+        rl = self._check_rate_limit("heal_batch", ws)
+        if rl is not None:
+            return rl
+
+        try:
+            challenge = self._json_to_heal_challenge(msg.get("heal_challenge", {}))
+        except Exception as e:
+            return [{"type": "error", "message": f"invalid challenge: {e}"}]
+
+        now = int(time.time())
+        if not verify_heal_challenge(challenge, receiver_pubkey=self._keypair.pubkey_hex, now_ts=now):
+            return [{"type": "error", "message": "invalid challenge"}]
+        if challenge.expires <= now:
+            return [{"type": "error", "message": "challenge expired"}]
+
+        raw_events = msg.get("events", [])
+        if not isinstance(raw_events, list) or not raw_events:
+            return [{"type": "error", "message": "events required"}]
+
+        events: list[Event] = []
+        event_ids: list[str] = []
+        for ed in raw_events:
+            try:
+                event = _json_to_event_dict(ed)
+            except Exception as e:
+                return [{"type": "error", "message": f"invalid event: {e}"}]
+
+            event_json_bytes = len(json.dumps(ed, ensure_ascii=False).encode("utf-8"))
+            if event_json_bytes > MAX_EVENT_BYTES:
+                return [{"type": "error", "message": "event exceeds 32 KiB"}]
+
+            try:
+                verify_event(event)
+            except Exception as e:
+                return [{"type": "error", "message": f"event verification failed: {e}"}]
+
+            if event.group != challenge.group:
+                return [{"type": "error", "message": "event group does not match challenge"}]
+
+            if event.id is not None:
+                event_ids.append(event.id)
+            events.append(event)
+
+        unique_ids = sorted(set(event_ids))
+        if len(unique_ids) != len(event_ids):
+            return [{"type": "error", "message": "duplicate event IDs in batch"}]
+        if compute_set_hash(unique_ids) != challenge.ids_hash or len(unique_ids) != challenge.count:
+            return [{"type": "error", "message": "event IDs do not match challenge"}]
+
+        raw_host_atts = msg.get("group_host_attestations", [])
+        host_atts: list[GroupHostAttestation] = []
+        for hd in raw_host_atts:
+            try:
+                host_atts.append(self._json_to_group_host_attestation(hd))
+            except Exception as e:
+                return [{"type": "error", "message": f"invalid host attestation: {e}"}]
+
+        raw_inv_atts = msg.get("inventory_attestations", [])
+        inv_evidence: list[InventoryEvidence] = []
+        for item in raw_inv_atts:
+            try:
+                att = self._json_to_inventory_attestation(item.get("inventory_attestation", {}))
+            except Exception as e:
+                return [{"type": "error", "message": f"invalid inventory attestation: {e}"}]
+            covered = item.get("ids", [])
+            inv_evidence.append(InventoryEvidence(att, frozenset(covered)))
+
+        already_have_ids: set[str] = set()
+        for eid in unique_ids:
+            if await self._store.has_event(eid):
+                already_have_ids.add(eid)
+
+        remaining_quota: int | None = None
+        if self._trust_config.per_group_storage_quota is not None:
+            current = await self._store.count_events(challenge.group)
+            remaining_quota = max(0, self._trust_config.per_group_storage_quota - current)
+
+        decision = compute_admission(
+            challenge=challenge,
+            event_ids=unique_ids,
+            already_have_ids=frozenset(already_have_ids),
+            group_host_attestations=host_atts,
+            inventory_evidence=inv_evidence,
+            now_ts=now,
+            remaining_quota=remaining_quota,
+        )
+
+        events_by_id = {e.id: e for e in events if e.id is not None}
+        stored: list[str] = []
+        for eid in decision.accepted:
+            event = events_by_id.get(eid)
+            if event is None:
+                continue
+            if event.type == "genesis" and event.group not in self._hosted_groups:
+                self._hosted_groups.add(event.group)
+                logger.info("auto-hosting group %s (genesis in heal_batch)", event.group[:16] + "...")
+            await self._relay_store.ingest(event)
+            witnesses = decision.admitted_by.get(eid, ())
+            await self._store.put_heal_provenance(eid, challenge.group, list(witnesses), now)
+            stored.append(eid)
+
+        if stored:
+            await self._build_and_store_group_status(challenge.group)
+
+        logger.info(
+            "heal_batch group=%s... stored=%d already_have=%d rejected=%d",
+            challenge.group[:16], len(stored), len(decision.already_have), len(decision.rejected),
+        )
+        return [{
+            "type": "heal_batch_result",
+            "stored": list(stored),
+            "already_have": list(decision.already_have),
+            "rejected": [{"id": eid, "reason": reason} for eid, reason in decision.rejected],
+        }]
 
     async def _broadcast_event(self, event: Event) -> None:
         subs = self._subscribers.get(event.group, set())

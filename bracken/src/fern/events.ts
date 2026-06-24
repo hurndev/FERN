@@ -17,7 +17,7 @@ export interface FernEvent {
 
 export type EventInput = Omit<FernEvent, 'id' | 'sig'>
 
-function sortKeysDeep(obj: unknown): unknown {
+export function sortKeysDeep(obj: unknown): unknown {
   if (obj === null || typeof obj !== 'object') return obj
   if (Array.isArray(obj)) return obj.map(sortKeysDeep)
   const sorted: Record<string, unknown> = {}

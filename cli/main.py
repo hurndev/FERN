@@ -6,8 +6,11 @@ from cli.commands import init, whoami, group, post, read, relay, verify, watch, 
 
 
 @click.group()
-def fern_cli() -> None:
-    pass
+@click.option("--no-heal", is_flag=True, help="Disable relay heal during sync (fetch only).")
+@click.pass_context
+def fern_cli(ctx: click.Context, no_heal: bool) -> None:
+    ctx.ensure_object(dict)
+    ctx.obj["no_heal"] = no_heal
 
 
 fern_cli.add_command(init.command, name="init")

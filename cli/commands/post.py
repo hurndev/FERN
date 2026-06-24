@@ -10,6 +10,7 @@ from fern.chat.messages import build_chat_message
 from fern.storage.sqlite_store import SqliteStore
 from fern.state.machine import compute_accepted_heads, derive_group_state
 from cli.sync import sync_group_from_transports
+from fern.client.sync import HealMode
 from cli.config import (
     load_config,
     save_config,
@@ -26,11 +27,12 @@ from cli.output import print_success, print_error
 @click.option("--reply-to", default=None, help="Event ID to reply to")
 @click.argument("group_id")
 @click.argument("text")
-def command(channel: str, reply_to: str | None, group_id: str, text: str) -> None:
-    asyncio.run(_post(channel, reply_to, group_id, text))
+@click.pass_context
+def command(ctx: click.Context, channel: str, reply_to: str | None, group_id: str, text: str) -> None:
+    asyncio.run(_post(ctx, channel, reply_to, group_id, text))
 
 
-async def _post(channel: str, reply_to: str | None, group_id: str, text: str) -> None:
+async def _post(ctx: click.Context, channel: str, reply_to: str | None, group_id: str, text: str) -> None:
     config = load_config()
     privkey = config.get("user_privkey_hex")
     if not privkey:
@@ -51,11 +53,13 @@ async def _post(channel: str, reply_to: str | None, group_id: str, text: str) ->
     store = SqliteStore(cache_path)
     await store.open()
     try:
+        heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
         await sync_group_from_transports(
             group_pubkey=group_pubkey,
             transports=transports,
             store=store,
             client_id=user.pubkey,
+            heal_mode=heal_mode,
         )
 
         events = []

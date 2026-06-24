@@ -17,15 +17,17 @@ from cli.config import (
 )
 from cli.output import print_success, print_error
 from cli.sync import sync_group_from_transports
+from fern.client.sync import HealMode
 
 
 @click.command()
 @click.argument("group_id")
-def command(group_id: str) -> None:
-    asyncio.run(_verify(group_id))
+@click.pass_context
+def command(ctx: click.Context, group_id: str) -> None:
+    asyncio.run(_verify(ctx, group_id))
 
 
-async def _verify(group_id: str) -> None:
+async def _verify(ctx: click.Context, group_id: str) -> None:
     config = load_config()
     group_pubkey, group_info = resolve_group(group_id, config)
     relay_urls = list(group_info.get("relays", []))
@@ -44,11 +46,13 @@ async def _verify(group_id: str) -> None:
     known_set: frozenset[str] = frozenset()
     sync_results = []
     try:
+        heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
         sync_results = await sync_group_from_transports(
             group_pubkey=group_pubkey,
             transports=transports,
             store=store,
             client_id=get_client_id(config),
+            heal_mode=heal_mode,
         )
         known_set = await store.get_known_set(group_pubkey)
     finally:

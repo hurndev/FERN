@@ -5,6 +5,7 @@ import asyncio
 import click
 
 from fern.transport.metadata import fetch_relay_metadata
+from cli.output import print_error
 
 
 def _display_relay_url(host: str, port: int) -> str:
@@ -22,9 +23,22 @@ def command() -> None:
 @click.option("--name", default="FERN Relay", help="Relay name")
 @click.option("--store", default="relay.db", help="SQLite store path")
 @click.option("--host", default="0.0.0.0", help="Bind address")
+@click.option(
+    "--trust-config",
+    default=None,
+    help="Path to a JSON file configuring trusted witness relays, thresholds, and rate limits.",
+)
 @click.option("--log-level", default="INFO", help="Log level (DEBUG/INFO/WARNING/ERROR)")
 @click.option("--no-color", is_flag=True, help="Disable coloured log output")
-def start(port: int, name: str, store: str, host: str, log_level: str, no_color: bool) -> None:
+def start(
+    port: int,
+    name: str,
+    store: str,
+    host: str,
+    trust_config: str | None,
+    log_level: str,
+    no_color: bool,
+) -> None:
     import logging
 
     from cli.relay_main import _ColorFormatter
@@ -64,6 +78,7 @@ def start(port: int, name: str, store: str, host: str, log_level: str, no_color:
         name=name,
         relay_keypair=keypair,
         store_path=store,
+        trust_config_path=trust_config,
     )
     asyncio.run(server.start())
 
@@ -72,6 +87,34 @@ def start(port: int, name: str, store: str, host: str, log_level: str, no_color:
 @click.argument("url")
 def info(url: str) -> None:
     asyncio.run(_info(url))
+
+
+@command.command(name="revoke-witness")
+@click.argument("witness_pubkey")
+@click.option("--store", default="relay.db", help="SQLite store path")
+def revoke_witness(witness_pubkey: str, store: str) -> None:
+    """Delete events admitted only by the given witness pubkey, and clean provenance."""
+    asyncio.run(_revoke_witness(witness_pubkey, store))
+
+
+async def _revoke_witness(witness_pubkey: str, store: str) -> None:
+    from fern.storage.sqlite_store import SqliteStore
+
+    if len(witness_pubkey) != 64:
+        print_error("Witness pubkey must be 64-char hex.")
+        return
+    s = SqliteStore(store)
+    await s.open()
+    try:
+        orphans = await s.delete_events_admitted_only_by(witness_pubkey)
+    finally:
+        await s.close()
+    if orphans:
+        click.echo(f"Deleted {len(orphans)} event(s) admitted only by {witness_pubkey[:16]}...")
+        for eid in orphans:
+            click.echo(f"  {eid}")
+    else:
+        click.echo(f"No events were admitted only by {witness_pubkey[:16]}...")
 
 
 async def _info(url: str) -> None:

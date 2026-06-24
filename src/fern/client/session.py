@@ -17,7 +17,7 @@ from fern.storage.interfaces import EventStore, EventReceiptStore
 from fern.transport.interfaces import RelayTransport
 from fern.client.bootstrap import fetch_genesis, initial_sync
 from fern.client.publisher import publish_event
-from fern.client.sync import sync_diff
+from fern.client.sync import HealMode, sync_diff
 from fern.client.subscriber import subscribe_to_relays
 from fern.client.monitor_runner import run_monitor_pass
 
@@ -202,12 +202,16 @@ class GroupSession:
                 if key not in self._syncs_in_flight:
                     self._syncs_in_flight.add(key)
                     try:
+                        siblings = [t for t in self._transports if t is not transport]
                         result = await sync_diff(
                             transport=transport,
                             group=self._group_pubkey,
                             store=self._store,
                             client_id=self._user.pubkey,
                             wait_on_lock=False,
+                            heal_mode=HealMode.AUTO,
+                            sibling_transports=siblings,
+                            fast_heal_min_events=1,
                         )
                         if result.fetched > 0:
                             await self.refresh_state()

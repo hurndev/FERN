@@ -13,6 +13,18 @@ import {
 import { RelayClient, parseGroupAddress } from '../fern/relay'
 import type { GroupStatus, EventReceipt } from '../fern/relay'
 import { computeSetHash, verifyGroupStatus } from '../fern/completeness'
+import type {
+  HealChallenge,
+  GroupHostAttestation,
+  InventoryAttestation,
+  HealBatchResult,
+} from '../fern/heal_attestations'
+import {
+  computeChallengeId,
+  verifyHealChallenge,
+  verifyGroupHostAttestation,
+  verifyInventoryAttestation,
+} from '../fern/heal_attestations'
 
 export interface GroupEntry {
   pubkey: string
@@ -120,11 +132,164 @@ function sortForHeal(events: FernEvent[]): FernEvent[] {
   })
 }
 
+async function attemptTrustedHeal(
+  laggingClient: RelayClient,
+  groupPubkey: string,
+  events: FernEvent[],
+  relays?: Map<string, RelayClient>,
+): Promise<{ healed: number; failedIds: string[] } | null> {
+  if (events.length === 0) return { healed: 0, failedIds: [] }
+
+  const BATCH_LIMIT = 500
+  let challenge: HealChallenge
+  try {
+    const ids = events.map((e) => e.id)
+    challenge = await laggingClient.getHealChallenge(groupPubkey, ids)
+    const now = Math.floor(Date.now() / 1000)
+    if (!(await verifyHealChallenge(challenge, undefined, now))) {
+      console.warn('trusted-heal: challenge verification failed')
+      return null
+    }
+  } catch (e) {
+    console.warn('trusted-heal: getHealChallenge failed, falling back to slow heal', e)
+    return null
+  }
+
+  const hostAtts: GroupHostAttestation[] = []
+  const invAtts: { attestation: InventoryAttestation; ids: string[] }[] = []
+  const tempClients: RelayClient[] = []
+
+  try {
+    const challengeId = await computeChallengeId(challenge)
+
+    for (const witness of challenge.trusted_witnesses) {
+      let witnessClient: RelayClient | undefined
+      if (relays) {
+        for (const c of relays.values()) {
+          if (c.relayPubkey === witness.relay && c.isConnected) {
+            witnessClient = c
+            break
+          }
+        }
+      }
+
+      if (!witnessClient) {
+        try {
+          witnessClient = new RelayClient(witness.url)
+          await witnessClient.connect()
+          const meta = await witnessClient.fetchMetadata()
+          if (meta.pubkey !== witness.relay) {
+            console.warn(`trusted-heal: witness ${witness.relay.slice(0, 12)}… pubkey mismatch`)
+            await witnessClient.close()
+            continue
+          }
+          tempClients.push(witnessClient)
+        } catch {
+          console.warn(`trusted-heal: failed to connect to witness ${witness.url}`)
+          if (witnessClient) await witnessClient.close()
+          continue
+        }
+      }
+
+      try {
+        const hostAtt = await witnessClient.getGroupHostAttestation(challenge)
+        const now = Math.floor(Date.now() / 1000)
+        if (!(await verifyGroupHostAttestation(hostAtt, challengeId, witness.relay, now))) {
+          console.warn('trusted-heal: host attestation verification failed for', witness.relay.slice(0, 12))
+          continue
+        }
+        if (!hostAtt.hosts) {
+          console.warn('trusted-heal: witness does not host group', witness.relay.slice(0, 12))
+          continue
+        }
+        hostAtts.push(hostAtt)
+      } catch (e) {
+        console.warn('trusted-heal: getGroupHostAttestation failed for', witness.relay.slice(0, 12), e)
+        continue
+      }
+
+      try {
+        const ids = events.map((ev) => ev.id)
+        const invResult = await witnessClient.getInventoryAttestation(challenge, ids)
+        if (invResult.inventoryMissing) {
+          console.warn('trusted-heal: witness missing all events', witness.relay.slice(0, 12))
+          continue
+        }
+        const att = invResult.attestation
+        if (!att) continue
+        const now = Math.floor(Date.now() / 1000)
+        if (!(await verifyInventoryAttestation(att, challengeId, witness.relay, now, invResult.covered))) {
+          console.warn('trusted-heal: inventory attestation verification failed for', witness.relay.slice(0, 12))
+          continue
+        }
+        invAtts.push({ attestation: att, ids: invResult.covered })
+      } catch (e) {
+        console.warn('trusted-heal: getInventoryAttestation failed for', witness.relay.slice(0, 12), e)
+      }
+    }
+
+    if (hostAtts.length === 0 || invAtts.length === 0) {
+      console.warn('trusted-heal: no valid attestations collected')
+      return null
+    }
+
+    let totalHealed = 0
+    const allFailedIds: string[] = []
+
+    for (let i = 0; i < events.length; i += BATCH_LIMIT) {
+      const batch = events.slice(i, i + BATCH_LIMIT)
+      const batchIds = batch.map((e) => e.id)
+
+      const relevantInvAtts = invAtts
+        .map((ia) => ({
+          attestation: ia.attestation,
+          ids: ia.ids.filter((id) => batchIds.includes(id)),
+        }))
+        .filter((ia) => ia.ids.length > 0)
+
+      if (relevantInvAtts.length === 0) {
+        allFailedIds.push(...batchIds)
+        continue
+      }
+
+      let result: HealBatchResult
+      try {
+        result = await laggingClient.healBatch(challenge, batch, hostAtts, relevantInvAtts)
+      } catch (e) {
+        console.warn('trusted-heal: healBatch failed', e)
+        allFailedIds.push(...batchIds)
+        continue
+      }
+
+      totalHealed += result.stored.length
+      for (const rej of result.rejected) {
+        if (rej.reason === 'insufficient_trusted_witnesses') {
+          allFailedIds.push(rej.id)
+        }
+      }
+    }
+
+    return { healed: totalHealed, failedIds: allFailedIds }
+  } catch (e) {
+    console.warn('trusted-heal: unexpected error, falling back to slow heal', e)
+    return null
+  } finally {
+    for (const tc of tempClients) {
+      try {
+        await tc.close()
+      } catch {
+        // best effort
+      }
+    }
+  }
+}
+
 async function syncDiff(
   client: RelayClient,
   groupPubkey: string,
   identityPubkey: string,
   onLockDenied?: (expiresIn: number) => void,
+  relays?: Map<string, RelayClient>,
 ): Promise<{ fetched: number; healed: number }> {
   let att: GroupStatus
   try {
@@ -191,7 +356,27 @@ async function syncDiff(
     const localEvents = sortForHeal(
       (await getGroupEvents(groupPubkey)).filter((event) => missingSet.has(event.id)),
     )
-    const healed = await batchHeal(localEvents, client)
+
+    let healed = 0
+    const BATCH_LIMIT = 500
+
+    const trustedHealResult = await attemptTrustedHeal(
+      client,
+      groupPubkey,
+      localEvents,
+      relays,
+    )
+    if (trustedHealResult !== null) {
+      healed += trustedHealResult.healed
+      if (trustedHealResult.failedIds.length > 0) {
+        const failedSet = new Set(trustedHealResult.failedIds)
+        const fallbackEvents = localEvents.filter((e) => failedSet.has(e.id))
+        healed += await batchHeal(fallbackEvents, client, BATCH_LIMIT)
+      }
+    } else {
+      healed += await batchHeal(localEvents, client, BATCH_LIMIT)
+    }
+
     return { fetched, healed }
   } finally {
     try {
@@ -356,6 +541,7 @@ export function useBracken() {
               (expiresIn) => {
                 healRetryGateRef.current.set(key, Date.now() + expiresIn * 1000)
               },
+              clientMap,
             )
             if (result.fetched > 0 || result.healed > 0) {
               healRetryGateRef.current.delete(key)

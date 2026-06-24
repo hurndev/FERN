@@ -289,7 +289,68 @@ Use docstrings and clear naming. Comments should explain WHY (when non-obvious).
 
 ---
 
-## 8. What's Explicitly Out of Scope
+## 8. Trusted Heal
+
+Trusted heal adds a gated fast-heal path (`heal_batch`) on top of the existing slow `heal`. The receiving relay chooses which relays it trusts for witness attestations. The client acts as courier for all signed evidence. There is no relay-to-relay communication in the fast path.
+
+### 8.1 Architecture
+
+The trusted heal flow:
+1. Client requests a `heal_challenge` from the receiving relay (the one missing events).
+2. Client asks each trusted witness in the challenge for a `group_host_attestation` (`hosts: true/false`).
+3. Missing host answers count as `hosts: true` (fail-closed rule — client can't shrink the denominator by omitting inconvenient relays).
+4. Client asks host-true witnesses for `inventory_attestation`s covering the event IDs.
+5. Receiving relay admits each event only if enough trusted witnesses attest (quorum scales with denominator size).
+6. Events without enough witnesses fall back to slow rate-limited `heal`.
+
+### 8.2 Pure module layout
+
+- `src/fern/completeness/heal_attestations.py` — the three signed objects (`HealChallenge`, `GroupHostAttestation`, `InventoryAttestation`), canonical serialization, build/sign, verify, `threshold_required()`.
+- `src/fern/relay/admission.py` — pure admission logic: `compute_admission()` takes validated inputs and returns which events to accept. Handles denominator computation, tainted relay detection, quota enforcement.
+- `src/fern/relay/trust_config.py` — `RelayTrustConfig` dataclass and JSON loader.
+- `src/fern/relay/rate_limiter.py` — per-key sliding-window rate limiter.
+
+### 8.3 Relay trust configuration
+
+Each relay has a local, operator-configured trust set loaded from a JSON file (passed via `--trust-config`). The trust set is:
+- Local to the receiving relay
+- Directional
+- Independent of group state
+- Never modified by `genesis` or `relay_update` events
+
+This prevents an attacker-created group from choosing the relays that the receiving relay trusts.
+
+### 8.4 Threshold rule
+
+For a challenge with witness set T, denominator D = T minus relays with valid `hosts:false`:
+```
+threshold_required(n) = max(min, ceil(num * n / den))
+```
+Default: `num=2, den=3, min=2`. One-witness groups can only use slow heal. Two witnesses need both. Larger sets need a quorum. Offline/missing witnesses stay in the denominator (omission-proof).
+
+### 8.5 Security properties
+
+- Client cannot shrink the denominator (missing host answers = hosts:true).
+- Conflicting evidence from the same relay (hosts:false + inventory, or conflicting host attestations) is ignored entirely.
+- Witnesses sign only inventory they actually store (not a cache).
+- heal_batch does NOT broadcast events — only a fresh group_status push.
+- Slow heal remains as a rate-limited fallback.
+- Per-group storage quota (default 100k events) blocks heal_batch only (publish is exempt).
+
+### 8.6 Client integration
+
+- `src/fern/client/trusted_heal.py` — courier orchestration: `trusted_heal_missing()` connects to witnesses, gathers attestations, calls `heal_batch`.
+- `src/fern/client/sync.py` — `HealMode` enum (NONE/SLOW_ONLY/AUTO). `sync_diff()` tries trusted heal when AUTO + enough events, falls back to slow heal for rejects.
+- `cli/commands/*.py` — `--no-heal` global flag disables heal entirely (fetch only).
+- `bracken/src/hooks/useBracken.ts` — `attemptTrustedHeal()` tries fast heal before `batchHeal` fallback.
+
+### 8.7 Admission provenance
+
+The relay records which witness pubkeys admitted each event (sqlite `heal_admission_provenance` table). If a witness is removed from the trust set, the relay may delete events whose only admission provenance is that witness via `fern relay revoke-witness <pubkey> --store <db>`.
+
+---
+
+## 9. What's Explicitly Out of Scope
 
 - Threshold founder signing (founder single-key)
 - Merkle exclusion proofs (simple sorted-set-hash group_statuses)
@@ -305,11 +366,12 @@ Note: `bracken/` is a separate TypeScript SPA (Vite + React) implementing the sa
 
 ---
 
-## 9. Quick Reference
+## 10. Quick Reference
 
-### 9.1 Key constants
+### 10.1 Key constants
 
-- Max event size: 32 KiB (enforced by relay, not client)
+- Max event size: 32 KiB (per event; `heal_batch` message can be larger)
+- Max WebSocket message size: 2 MiB (relay-configurable via `max_message_bytes`; only `heal_batch` uses the larger limit)
 - Pubkey: 32 bytes → 64-char lowercase hex
 - Signature: 64 bytes → 128-char lowercase hex
 - Hash output: 32 bytes → 64-char lowercase hex
@@ -318,15 +380,20 @@ Note: `bracken/` is a separate TypeScript SPA (Vite + React) implementing the sa
 - Suggested group_status interval: 5 seconds or 100 events
 - Sync lock TTL: 30 seconds
 - Sync lock renewal interval: 60% of TTL
-- Heal batch size: 10 concurrent events
+- Heal batch size: 10 concurrent events (slow heal); 500 max (trusted heal_batch)
+- Trusted heal challenge expiry: 300 seconds (5 minutes)
+- Default per-group storage quota: 100,000 events (blocks `heal_batch` only; `publish` exempt)
 - Default K (relays per publish): 3 (all canonical relays)
 - Default K_min (event_receipts for safe ack): 2
+- Trusted heal fast-heal min events (CLI): 3 (below this, uses slow heal directly)
+- Trusted heal fast-heal min events (Bracken/GroupSession): 1 (always attempt fast heal)
 - `FERN_HOME` env var: overrides `~/.fern` for CLI data storage
 - Relay log formatter: coloured output by level (INFO=green, WARN=yellow, ERROR=red), `--no-color` to disable
 - Relay metadata endpoint: HTTP GET on same host/port (wss→https scheme swap), returns JSON with CORS headers
 - `fern-relay --key-file PATH`: load the relay's 64-char hex private key from a file instead of generating one. The default behaviour (no flag) mints a fresh keypair every start, which breaks client trust pins and invalidates outstanding event_receipts — only acceptable for ephemeral/dev use. For a long-lived relay, pass `--key-file` and persist the keyfile outside the container. The `deploy/relay/relay-entrypoint.sh` wrapper handles first-run generation automatically.
+- `fern-relay --trust-config PATH`: load trusted-witness relays, threshold rules, rate limits, and quota from a JSON config. Enables fast `heal_batch` admission. See `deploy/relay/trust-config.example.json`.
 
-### 9.2 Event type names
+### 10.2 Event type names
 
 Protocol types (no dot): `genesis`, `join`, `leave`, `invite`, `kick`, `ban`, `unban`, `admin_add`, `admin_remove`, `relay_update`, `metadata_update`
 
@@ -334,14 +401,17 @@ Protocol types (no dot): `genesis`, `join`, `leave`, `invite`, `kick`, `ban`, `u
 
 Future namespaces: `<appname>.<type>` (e.g., `poll.vote`, `schedule.event`)
 
-### 9.3 Canonical serialization order
+### 10.3 Canonical serialization order
 
 - Event: `[type, group, author, sorted(parents), sorted_content_recursively, ts, sorted(tags)]`
 - EventReceipt: `[event_id, group, relay, ts]`
 - GroupStatus: `[group, relay, set_hash, sorted(tips), count, prev_or_null, ts]`
 - Fraud proof: `[type, group, relay, event_id, event_array, event_receipt_array, evidence]`
+- heal_challenge: `[type, group, receiver, ids_hash, count, sorted_witnesses, threshold_sorted, nonce, ts, expires]`
+- group_host_attestation: `[type, group, relay, receiver, challenge, hosts, ts, expires]`
+- inventory_attestation: `[type, group, relay, receiver, challenge, ids_hash, count, ts, expires]`
 
-### 9.4 WebSocket actions
+### 10.4 WebSocket actions
 
 | Action | Purpose |
 |---|---|
@@ -357,8 +427,12 @@ Future namespaces: `<appname>.<type>` (e.g., `poll.vote`, `schedule.event`)
 | `submit_fraud_proof` | Submit a fraud proof for storage and gossip |
 | `query_fraud_proofs` | Query stored fraud proofs |
 | `unsubscribe` | Stop receiving events for a group |
+| `get_heal_challenge` | Request a signed heal_challenge from a receiving relay |
+| `get_group_host_attestation` | Request a host attestation from a trusted witness relay |
+| `get_inventory_attestation` | Request an inventory attestation from a trusted witness relay |
+| `heal_batch` | Admit events via trusted-witness quorum (fast heal) |
 
-### 9.5 CLI commands quick reference
+### 10.5 CLI commands quick reference
 
 ```bash
 # Identity
@@ -366,36 +440,37 @@ fern init
 fern whoami
 
 # Groups
-fern group create --name "Chat" --relay ws://localhost:8765
-fern group join fern:<pubkey>@<relays>
+fern [--no-heal] group create --name "Chat" --relay ws://localhost:8765
+fern [--no-heal] group join fern:<pubkey>@<relays>
 fern group list
-fern group info 1
-fern group members 1
-fern group leave 1
-fern group nickname 1 "Alice"
+fern [--no-heal] group info 1
+fern [--no-heal] group members 1
+fern [--no-heal] group leave 1
+fern [--no-heal] group nickname 1 "Alice"
 
 # Moderation (admin-only)
-fern group kick 1 <pubkey>
-fern group ban 1 <pubkey> [--until <ts>] [--reason <text>]
-fern group unban 1 <pubkey>
-fern group invite 1 <pubkey>
-fern group admin-add 1 <pubkey>
-fern group admin-remove 1 <pubkey>
-fern group relay-update 1 ws://new-relay:9000
+fern [--no-heal] group kick 1 <pubkey>
+fern [--no-heal] group ban 1 <pubkey> [--until <ts>] [--reason <text>]
+fern [--no-heal] group unban 1 <pubkey>
+fern [--no-heal] group invite 1 <pubkey>
+fern [--no-heal] group admin-add 1 <pubkey>
+fern [--no-heal] group admin-remove 1 <pubkey>
+fern [--no-heal] group relay-update 1 ws://new-relay:9000
 
 # Messaging
-fern post 1 "hello"
-fern post --channel general 1 "hello"
-fern read 1 [--show-rejected]
-fern watch 1 [--show-rejected]
+fern [--no-heal] post 1 "hello"
+fern [--no-heal] post --channel general 1 "hello"
+fern [--no-heal] read 1 [--show-rejected]
+fern [--no-heal] watch 1 [--show-rejected]
 
 # Relay
-fern relay start --port 8765 --store relay.db
+fern relay start --port 8765 --store relay.db [--trust-config trust.json]
 fern relay info ws://localhost:8765
+fern relay revoke-witness <witness-pubkey> --store relay.db
 
 # DAG viewer
 fern dag --db relay.db
 
 # Standalone relay
-fern-relay --port 8765 --store relay.db
+fern-relay --port 8765 --store relay.db [--trust-config trust.json] [--key-file path]
 ```

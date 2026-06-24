@@ -50,6 +50,7 @@ async def initial_sync(
 ) -> list[Event]:
     if client_id is not None:
         for transport in transports:
+            siblings = [t for t in transports if t is not transport]
             try:
                 await sync_diff(
                     transport=transport,
@@ -57,6 +58,7 @@ async def initial_sync(
                     store=store,
                     client_id=client_id,
                     wait_on_lock=wait_on_lock,
+                    sibling_transports=siblings,
                 )
             except Exception:
                 continue

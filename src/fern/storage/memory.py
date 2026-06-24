@@ -10,6 +10,7 @@ class MemoryStore:
     def __init__(self) -> None:
         self._events: dict[str, Event] = {}
         self._event_receipts: dict[tuple[str, str], EventReceipt] = {}
+        self._heal_provenance: dict[str, set[str]] = {}
 
     async def put_event(self, event: Event) -> None:
         assert event.id is not None
@@ -71,3 +72,31 @@ class MemoryStore:
 
     async def delete_event(self, event_id: str) -> None:
         self._events.pop(event_id, None)
+        self._heal_provenance.pop(event_id, None)
+
+    async def put_heal_provenance(
+        self, event_id: str, group: str, witness_pubkeys: list[str], ts: int
+    ) -> None:
+        existing = self._heal_provenance.setdefault(event_id, set())
+        existing.update(witness_pubkeys)
+
+    async def get_heal_provenance(self, event_id: str) -> list[str]:
+        return sorted(self._heal_provenance.get(event_id, set()))
+
+    async def iter_events_admitted_by(
+        self, witness_pubkey: str, group: str | None = None
+    ) -> AsyncIterator[str]:
+        for event_id, witnesses in self._heal_provenance.items():
+            if witness_pubkey in witnesses:
+                yield event_id
+
+    async def delete_events_admitted_only_by(self, witness_pubkey: str) -> list[str]:
+        orphans = [
+            event_id
+            for event_id, witnesses in self._heal_provenance.items()
+            if witnesses == {witness_pubkey}
+        ]
+        for eid in orphans:
+            self._events.pop(eid, None)
+            self._heal_provenance.pop(eid, None)
+        return orphans

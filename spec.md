@@ -97,6 +97,8 @@ The complete UTF-8 JSON encoding of an event object, as received by a relay or
 client, MUST NOT exceed 32 KiB. Implementations MAY set lower local policy
 limits, but canonical relays SHOULD advertise lower limits if they use them.
 
+The 32 KiB limit applies per event, not per WebSocket message. The `heal_batch` action (Section 10.4.16) carries multiple events in a single message; each individual event in the batch MUST still satisfy the 32 KiB limit. The aggregate `heal_batch` message is bounded by a separate, larger relay-configured limit.
+
 ### 3.3 Canonical Serialisation
 
 The canonical serialisation of an event is a UTF-8 encoded JSON array with fields in this exact order:
@@ -1081,6 +1083,108 @@ This ID is used by relays when acknowledging storage (Section 10.4.7 returns `{"
 
 The fraud proof is not signed by the submitter — it doesn't need to be. The proof's validity comes from the signatures within it (the event's author signature and the relay's event_receipt signature), both of which are independently verifiable. The submitter is merely a courier.
 
+### 9.6 Trusted-Heal Attestations
+
+Trusted-heal attestation objects are signed relay protocol objects used to gate fast `heal_batch` admission. They are NOT events in the DAG and do not affect event IDs. They are shared between clients and relays as evidence during the trusted-heal protocol.
+
+#### 9.6.1 `heal_challenge`
+
+Issued by the receiving relay to authorise a fast `heal_batch`.
+
+```json
+{
+  "type": "heal_challenge",
+  "group": "<group pubkey hex>",
+  "receiver": "<receiving relay pubkey hex>",
+  "ids_hash": "<sha256 of sorted newline-joined event ids>",
+  "count": 3,
+  "trusted_witnesses": [
+    {"relay": "<witness pubkey hex>", "url": "wss://r1.example/"}
+  ],
+  "threshold": {"kind": "ratio", "num": 2, "den": 3, "min": 2},
+  "nonce": "<random 64-char hex>",
+  "ts": 1711234567,
+  "expires": 1711234867,
+  "sig": "<receiving relay signature hex>"
+}
+```
+
+Canonical signing payload:
+
+```
+[type, group, receiver, ids_hash, count, trusted_witnesses, threshold, nonce, ts, expires]
+```
+
+- `trusted_witnesses` MUST be sorted by `relay` pubkey before signing.
+- `threshold` keys MUST be sorted lexicographically per the event serialisation rules (Section 3.3).
+- `ids_hash` is `compute_set_hash(event_ids)` (Section 9.2.3).
+
+#### 9.6.2 `group_host_attestation`
+
+Issued by a trusted witness relay indicating whether it hosts or is willing to witness the group for a given challenge.
+
+```json
+{
+  "type": "group_host_attestation",
+  "group": "<group pubkey hex>",
+  "relay": "<witness relay pubkey hex>",
+  "receiver": "<receiving relay pubkey hex>",
+  "challenge": "<challenge_id hex>",
+  "hosts": true,
+  "ts": 1711234567,
+  "expires": 1711234867,
+  "sig": "<witness relay signature hex>"
+}
+```
+
+Canonical signing payload:
+
+```
+[type, group, relay, receiver, challenge, hosts, ts, expires]
+```
+
+A missing `group_host_attestation` is treated as `hosts: true` by the receiving relay. This is the fail-closed rule that prevents a client from lowering the threshold by omitting answers from inconvenient relays.
+
+#### 9.6.3 `inventory_attestation`
+
+Issued by a trusted witness relay attesting that it stores specific event IDs.
+
+```json
+{
+  "type": "inventory_attestation",
+  "group": "<group pubkey hex>",
+  "relay": "<witness relay pubkey hex>",
+  "receiver": "<receiving relay pubkey hex>",
+  "challenge": "<challenge_id hex>",
+  "ids_hash": "<sha256 of sorted newline-joined attested event ids>",
+  "count": 3,
+  "ts": 1711234567,
+  "expires": 1711234867,
+  "sig": "<witness relay signature hex>"
+}
+```
+
+Canonical signing payload:
+
+```
+[type, group, relay, receiver, challenge, ids_hash, count, ts, expires]
+```
+
+The witness relay MUST sign only event IDs that it currently stores in its normal event store. It MUST NOT sign IDs it has only in a temporary cache.
+
+#### 9.6.4 Threshold Rule
+
+For a challenge with witness set T, the receiving relay computes:
+
+```
+D = T minus relays with valid, non-conflicting hosts:false attestations
+required(n) = max(min, ceil(num * n / den))
+```
+
+Default: `num=2, den=3, min=2`. Examples: n=1→2 (impossible), n=2→2, n=3→2, n=4→3, n=5→4, n=10→7.
+
+A group with only one trusted witness uses slow rate-limited `heal`; fast `heal_batch` requires at least two trusted inventory witnesses.
+
 ---
 
 ## 10. Relays
@@ -1392,6 +1496,130 @@ or
 `heal` is identical to `publish` except the relay does NOT broadcast the
 event to subscribed clients. It is used for historical events during healing and
 new relay seeding. `publish` remains the action for newly-created events.
+
+#### 10.4.13 Get Heal Challenge
+
+Client → Receiving Relay:
+
+```json
+{
+  "action": "get_heal_challenge",
+  "group": "<group pubkey hex>",
+  "ids": ["<event id hex>", "<event id hex>"]
+}
+```
+
+Receiving Relay → Client:
+
+```json
+{
+  "type": "heal_challenge",
+  "heal_challenge": { "..." }
+}
+```
+
+The receiving relay SHOULD reject challenges that exceed local batch limits (maximum event count, maximum total estimated bytes, invalid or duplicate event IDs). The receiving relay issues the challenge regardless of whether it currently hosts the group.
+
+#### 10.4.14 Get Group Host Attestation
+
+Client → Witness Relay:
+
+```json
+{
+  "action": "get_group_host_attestation",
+  "heal_challenge": { "...": "full heal_challenge object" }
+}
+```
+
+Witness Relay → Client:
+
+```json
+{
+  "type": "group_host_attestation",
+  "group_host_attestation": { "..." }
+}
+```
+
+The witness relay verifies the `heal_challenge` signature, expiry, and that its own pubkey appears in `trusted_witnesses`. It returns `hosts: true` if it hosts the group, `hosts: false` if it does not know or witness the group. Temporary inability to answer inventory requests MUST NOT be represented as `hosts: false`.
+
+#### 10.4.15 Get Inventory Attestation
+
+Client → Witness Relay:
+
+```json
+{
+  "action": "get_inventory_attestation",
+  "heal_challenge": { "...": "full heal_challenge object" },
+  "ids": ["<event id hex>", "..."]
+}
+```
+
+Witness Relay → Client (has some or all events):
+
+```json
+{
+  "type": "inventory_attestation",
+  "inventory_attestation": { "..." },
+  "ids": ["<covered event id>"],
+  "missing": ["<missing event id>"]
+}
+```
+
+Witness Relay → Client (has none of the requested events):
+
+```json
+{
+  "type": "inventory_missing",
+  "missing": ["<event id>", "..."]
+}
+```
+
+The witness verifies that the supplied `ids` match the challenge `ids_hash` and `count`. It signs an attestation covering only the event IDs it actually stores.
+
+#### 10.4.16 Heal Batch
+
+Client → Receiving Relay:
+
+```json
+{
+  "action": "heal_batch",
+  "heal_challenge": { "...": "full heal_challenge object" },
+  "events": [{ "...": "full event object" }],
+  "group_host_attestations": [{ "..." }],
+  "inventory_attestations": [
+    {
+      "inventory_attestation": { "..." },
+      "ids": ["<covered event id>"]
+    }
+  ]
+}
+```
+
+Receiving Relay → Client:
+
+```json
+{
+  "type": "heal_batch_result",
+  "stored": ["<event id hex>"],
+  "already_have": ["<event id hex>"],
+  "rejected": [
+    {"id": "<event id hex>", "reason": "insufficient_trusted_witnesses"}
+  ]
+}
+```
+
+The receiving relay:
+
+1. Verifies the `heal_challenge` was signed by itself and is not expired.
+2. Verifies each event's structure, hash, signature, and that `event.group` matches the challenge group. Per-event size MUST NOT exceed 32 KiB.
+3. Verifies all group host and inventory attestation signatures, expiry, challenge_id binding, and that attestations come from relays in the challenge witness set.
+4. Computes the denominator D (challenge witness set minus valid `hosts:false` relays). Conflicting evidence from the same relay is ignored.
+5. For each new event, counts inventory attestations from relays still in D.
+6. Stores the event only if the count meets the threshold and local quotas allow.
+7. Issues a fresh `group_status` promptly if any new events were admitted.
+8. Stores admission provenance (which witness pubkeys admitted each event).
+
+`heal_batch` does NOT broadcast events to subscribed clients. Subscribers discover healed events via the pushed `group_status`.
 
 ### 10.5 GroupStatus Push
 
@@ -1903,6 +2131,7 @@ FERN is a decentralised, censorship-resistant protocol for public group chats. T
 - The causal DAG for completeness propagation
 - A deterministic group state machine folded from the genesis-connected DAG subset
 - A completeness layer (event_receipts, group_statuses, monitor pass, heal, fraud proofs)
+- Trusted-heal attestation objects (`heal_challenge`, `group_host_attestation`, `inventory_attestation`) for gating fast `heal_batch` admission behind trusted-witness quorum
 - A relay protocol over WebSockets
 - Discovery, migration, and client behaviour
 

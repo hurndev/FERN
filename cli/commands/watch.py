@@ -17,17 +17,19 @@ from cli.config import (
 )
 from cli.commands.read import ADMIN_TYPES, _compute_nicknames, _display_name, _format_admin_action
 from cli.sync import sync_group_from_transports
+from fern.client.sync import HealMode
 
 
 @click.command()
 @click.option("--channel", default=None, help="Filter by channel")
 @click.option("--show-rejected", is_flag=True, help="Show messages from non-joined/banned users")
 @click.argument("group_id")
-def command(channel: str | None, show_rejected: bool, group_id: str) -> None:
-    asyncio.run(_watch(channel, show_rejected, group_id))
+@click.pass_context
+def command(ctx: click.Context, channel: str | None, show_rejected: bool, group_id: str) -> None:
+    asyncio.run(_watch(ctx, channel, show_rejected, group_id))
 
 
-async def _watch(channel: str | None, show_rejected: bool, group_id: str) -> None:
+async def _watch(ctx: click.Context, channel: str | None, show_rejected: bool, group_id: str) -> None:
     config = load_config()
     group_pubkey, group_info = resolve_group(group_id, config)
     relay_urls = list(group_info.get("relays", []))
@@ -41,11 +43,13 @@ async def _watch(channel: str | None, show_rejected: bool, group_id: str) -> Non
     store = SqliteStore(cache_path)
     await store.open()
     try:
+        heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
         await sync_group_from_transports(
             group_pubkey=group_pubkey,
             transports=transports,
             store=store,
             client_id=get_client_id(config),
+            heal_mode=heal_mode,
         )
     finally:
         await store.close()

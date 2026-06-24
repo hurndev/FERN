@@ -1,4 +1,11 @@
 import type { FernEvent } from './events'
+import type {
+  HealChallenge,
+  GroupHostAttestation,
+  InventoryAttestation,
+  InventoryAttestationResult,
+  HealBatchResult,
+} from './heal_attestations'
 
 export interface EventReceipt {
   event_id: string
@@ -285,6 +292,75 @@ export class RelayClient {
       groups: data.groups ?? [],
       retention: data.retention?.default ?? 'full',
     }
+  }
+
+  async getHealChallenge(group: string, ids: string[]): Promise<HealChallenge> {
+    const msg = await this.sendRequest<{ heal_challenge: HealChallenge }>(
+      'heal_challenge',
+      'get_heal_challenge',
+      { group, ids },
+    )
+    return msg.heal_challenge
+  }
+
+  async getGroupHostAttestation(challenge: HealChallenge): Promise<GroupHostAttestation> {
+    const msg = await this.sendRequest<{ group_host_attestation: GroupHostAttestation }>(
+      'group_host_attestation',
+      'get_group_host_attestation',
+      { heal_challenge: challenge },
+    )
+    return msg.group_host_attestation
+  }
+
+  async getInventoryAttestation(
+    challenge: HealChallenge,
+    ids: string[],
+  ): Promise<InventoryAttestationResult> {
+    const msg = await this.sendRequest<{
+      type: string
+      attestation?: InventoryAttestation
+      ids?: string[]
+      missing?: string[]
+    }>(
+      ['inventory_attestation', 'inventory_missing'],
+      'get_inventory_attestation',
+      { heal_challenge: challenge, ids },
+      15000,
+    )
+    if (msg.type === 'inventory_missing') {
+      return {
+        attestation: null,
+        covered: [],
+        missing: (msg.missing as string[]) ?? [],
+        inventoryMissing: true,
+      }
+    }
+    return {
+      attestation: (msg.attestation as InventoryAttestation) ?? null,
+      covered: (msg.ids as string[]) ?? [],
+      missing: (msg.missing as string[]) ?? [],
+      inventoryMissing: false,
+    }
+  }
+
+  async healBatch(
+    challenge: HealChallenge,
+    events: FernEvent[],
+    hostAtts: GroupHostAttestation[],
+    invAtts: { attestation: InventoryAttestation; ids: string[] }[],
+  ): Promise<HealBatchResult> {
+    const msg = await this.sendRequest<{ heal_batch_result: HealBatchResult }>(
+      'heal_batch_result',
+      'heal_batch',
+      {
+        heal_challenge: challenge,
+        events,
+        group_host_attestations: hostAtts,
+        inventory_attestations: invAtts,
+      },
+      30000,
+    )
+    return msg.heal_batch_result
   }
 }
 

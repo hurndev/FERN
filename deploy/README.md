@@ -122,6 +122,26 @@ This drops the compose-managed `fern-relay` / `fern-bracken` networks and
 puts both services on `npm_network` directly. The proxy reaches them by
 container name (`fern-relay:8765`, `fern-bracken:80`).
 
+## Trusted-heal configuration
+
+The relay supports **trusted-witness fast heal**, where missing events are
+fetched from peer relays that countersign attestations, rather than relying
+solely on rate-limited slow heal from clients.
+
+To enable it:
+
+1. Copy `deploy/relay/trust-config.example.json` to your data directory (e.g.
+   `deploy/relay/data/trust-config.json`) and fill in the witness relay URLs
+   and pubkeys.
+2. Set `FERN_TRUST_CONFIG=/data/trust-config.json` in `deploy/.env`.
+3. Restart the relay: `cd deploy/relay && docker compose up -d`.
+
+Without a trust config the relay works normally — only slow heal (client-driven
+re-request with rate limits) is available.
+
+See `trust-config.example.json` for all options (thresholds, rate limits, batch
+limits, quotas).
+
 ## Backup
 
 The relay persists two files in `deploy/relay/data/` (or whatever

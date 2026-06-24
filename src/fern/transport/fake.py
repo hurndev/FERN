@@ -2,24 +2,45 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 from fern.events.event import Event
 from fern.events.validation import verify_event
 from fern.completeness.event_receipts import EventReceipt, build_event_receipt
-from fern.completeness.group_statuses import GroupStatus, build_group_status
+from fern.completeness.group_statuses import GroupStatus, build_group_status, compute_set_hash
 from fern.completeness.fraud_proofs import (
     FraudProof,
     verify_fraud_proof,
     compute_fraud_proof_id,
 )
+from fern.completeness.heal_attestations import (
+    GroupHostAttestation,
+    HealChallenge,
+    InventoryAttestation,
+    build_group_host_attestation,
+    build_heal_challenge,
+    build_inventory_attestation,
+    compute_challenge_id,
+    verify_heal_challenge,
+)
 from fern.crypto.keys import Keypair
+from fern.relay.admission import InventoryEvidence, compute_admission
+from fern.relay.trust_config import RelayTrustConfig
 from fern.storage.memory import MemoryStore
-from fern.transport.interfaces import RelayMetadata, SyncLockResult
+from fern.transport.interfaces import (
+    HealBatchResult,
+    InventoryAttestationResult,
+    RelayMetadata,
+    SyncLockResult,
+)
 
 
 class FakeRelay:
-    def __init__(self, relay_keypair: Keypair | None = None):
+    def __init__(
+        self,
+        relay_keypair: Keypair | None = None,
+        trust_config: RelayTrustConfig | None = None,
+    ):
         if relay_keypair is None:
             relay_keypair = Keypair.generate()
         self._keypair = relay_keypair
@@ -30,9 +51,11 @@ class FakeRelay:
         self._event_callbacks: list[Callable[[Event], Awaitable[None]]] = []
         self._group_status_callbacks: list[Callable[[GroupStatus], Awaitable[None]]] = []
         self._subscribed_groups: set[str] = set()
+        self._hosted_groups: set[str] = set()
         self._last_group_statuses: dict[str, GroupStatus] = {}
         self._publish_lock = asyncio.Lock()
         self._sync_locks: dict[str, tuple[str, float]] = {}
+        self._trust_config = trust_config or RelayTrustConfig()
 
     @property
     def url(self) -> str:
@@ -64,6 +87,7 @@ class FakeRelay:
 
     async def subscribe(self, group: str) -> None:
         self._subscribed_groups.add(group)
+        self._hosted_groups.add(group)
 
     async def unsubscribe(self, group: str) -> None:
         self._subscribed_groups.discard(group)
@@ -71,6 +95,8 @@ class FakeRelay:
     async def publish(self, event: Event) -> EventReceipt:
         async with self._publish_lock:
             verify_event(event)
+            if event.type == "genesis":
+                self._hosted_groups.add(event.group)
             await self._store.put_event(event)
             event_receipt = build_event_receipt(
                 event=event,
@@ -89,6 +115,8 @@ class FakeRelay:
     async def heal(self, event: Event) -> EventReceipt:
         async with self._publish_lock:
             verify_event(event)
+            if event.type == "genesis":
+                self._hosted_groups.add(event.group)
             await self._store.put_event(event)
             event_receipt = build_event_receipt(
                 event=event,
@@ -176,6 +204,179 @@ class FakeRelay:
 
     def on_group_status(self, callback: Callable[[GroupStatus], Awaitable[None]]) -> None:
         self._group_status_callbacks.append(callback)
+
+    @property
+    def trust_config(self) -> RelayTrustConfig:
+        return self._trust_config
+
+    @property
+    def hosted_groups(self) -> set[str]:
+        return self._hosted_groups
+
+    async def get_heal_challenge(self, group: str, ids: Sequence[str]) -> HealChallenge:
+        if not self._trust_config.has_trusted_witnesses:
+            raise ValueError("no trusted witnesses configured")
+        unique_ids = sorted(set(ids))
+        if len(unique_ids) > self._trust_config.batch_limits.max_events:
+            raise ValueError("batch too large")
+        now = int(time.time())
+        return build_heal_challenge(
+            group=group,
+            receiver_keypair=self._keypair,
+            ids=unique_ids,
+            trusted_witnesses=self._trust_config.trusted_witness_relays,
+            threshold=self._trust_config.threshold,
+            ts=now,
+            expires=now + self._trust_config.challenge_expiry_seconds,
+        )
+
+    async def get_group_host_attestation(
+        self, challenge: HealChallenge
+    ) -> GroupHostAttestation | None:
+        if not verify_heal_challenge(
+            challenge, receiver_pubkey=challenge.receiver, now_ts=int(time.time())
+        ):
+            raise ValueError("invalid challenge")
+        own_pub = self._keypair.pubkey_hex
+        witness_pubkeys = {w.relay for w in challenge.trusted_witnesses}
+        if own_pub not in witness_pubkeys:
+            raise ValueError("not a witness for this challenge")
+        if not self._trust_config.is_willing_to_witness_for(challenge.receiver):
+            raise ValueError("not willing to witness for this receiver")
+        hosts = challenge.group in self._hosted_groups
+        now = int(time.time())
+        return build_group_host_attestation(
+            group=challenge.group,
+            witness_keypair=self._keypair,
+            receiver=challenge.receiver,
+            challenge_id=compute_challenge_id(challenge),
+            hosts=hosts,
+            ts=now,
+            expires=min(challenge.expires, now + self._trust_config.challenge_expiry_seconds),
+        )
+
+    async def get_inventory_attestation(
+        self, challenge: HealChallenge, ids: Sequence[str]
+    ) -> InventoryAttestationResult:
+        if not verify_heal_challenge(
+            challenge, receiver_pubkey=challenge.receiver, now_ts=int(time.time())
+        ):
+            raise ValueError("invalid challenge")
+        own_pub = self._keypair.pubkey_hex
+        witness_pubkeys = {w.relay for w in challenge.trusted_witnesses}
+        if own_pub not in witness_pubkeys:
+            raise ValueError("not a witness for this challenge")
+        if compute_set_hash(ids) != challenge.ids_hash or len(ids) != challenge.count:
+            raise ValueError("ids do not match challenge")
+        covered: list[str] = []
+        missing: list[str] = []
+        for eid in ids:
+            if await self._store.has_event(eid):
+                covered.append(eid)
+            else:
+                missing.append(eid)
+        if not covered:
+            return InventoryAttestationResult(inventory_missing=True, missing=tuple(missing))
+        now = int(time.time())
+        att = build_inventory_attestation(
+            group=challenge.group,
+            witness_keypair=self._keypair,
+            receiver=challenge.receiver,
+            challenge_id=compute_challenge_id(challenge),
+            covered_ids=covered,
+            ts=now,
+            expires=min(challenge.expires, now + self._trust_config.challenge_expiry_seconds),
+        )
+        return InventoryAttestationResult(
+            attestation=att, covered=tuple(covered), missing=tuple(missing)
+        )
+
+    async def heal_batch(
+        self,
+        *,
+        challenge: HealChallenge,
+        events: Sequence[Event],
+        group_host_attestations: Sequence[GroupHostAttestation],
+        inventory_attestations: Sequence[tuple[InventoryAttestation, Sequence[str]]],
+    ) -> HealBatchResult:
+        now = int(time.time())
+        if not verify_heal_challenge(
+            challenge, receiver_pubkey=self._keypair.pubkey_hex, now_ts=now
+        ):
+            raise ValueError("invalid challenge")
+        if challenge.expires <= now:
+            raise ValueError("challenge expired")
+
+        event_ids = sorted({e.id for e in events if e.id is not None})
+        if compute_set_hash(event_ids) != challenge.ids_hash or len(event_ids) != challenge.count:
+            raise ValueError("event ids do not match challenge")
+
+        for event in events:
+            verify_event(event)
+            if event.group != challenge.group:
+                raise ValueError("event group mismatch")
+
+        already_have_ids: frozenset[str] = frozenset()
+        for eid in event_ids:
+            if await self._store.has_event(eid):
+                already_have_ids = already_have_ids | {eid}
+
+        inv_evidence: list[InventoryEvidence] = []
+        for att, covered in inventory_attestations:
+            inv_evidence.append(InventoryEvidence(att, frozenset(covered)))
+
+        remaining_quota: int | None = None
+        if self._trust_config.per_group_storage_quota is not None:
+            current = await self._store.count_events(challenge.group)
+            remaining_quota = max(0, self._trust_config.per_group_storage_quota - current)
+
+        decision = compute_admission(
+            challenge=challenge,
+            event_ids=event_ids,
+            already_have_ids=already_have_ids,
+            group_host_attestations=group_host_attestations,
+            inventory_evidence=inv_evidence,
+            now_ts=now,
+            remaining_quota=remaining_quota,
+        )
+
+        events_by_id = {e.id: e for e in events if e.id is not None}
+        for eid in decision.accepted:
+            event = events_by_id[eid]
+            if event.type == "genesis":
+                self._hosted_groups.add(event.group)
+            await self._store.put_event(event)
+            witnesses = decision.admitted_by.get(eid, ())
+            await self._store.put_heal_provenance(eid, challenge.group, list(witnesses), now)
+
+        if decision.accepted:
+            await self._request_group_status_internal(challenge.group)
+
+        return HealBatchResult(
+            stored=decision.accepted,
+            already_have=decision.already_have,
+            rejected=decision.rejected,
+        )
+
+    async def _request_group_status_internal(self, group: str) -> GroupStatus:
+        known_set = await self._store.get_known_set(group)
+        tips = await self._store.get_tips(group)
+        count = await self._store.count_events(group)
+        prev = self._last_group_statuses.get(group)
+        att = build_group_status(
+            group=group,
+            relay_keypair=self._keypair,
+            known_set=known_set,
+            tips=tips,
+            count=count,
+            prev=prev,
+            ts=int(time.time()),
+        )
+        self._last_group_statuses[group] = att
+        if group in self._subscribed_groups:
+            for cb in self._group_status_callbacks:
+                asyncio.ensure_future(cb(att))
+        return att
 
     def drop_event(self, event_id: str) -> None:
         if event_id in self._store._events:

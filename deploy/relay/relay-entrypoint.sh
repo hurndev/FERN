@@ -27,4 +27,10 @@ else
     echo "[entrypoint] Loading existing key from $KEY_FILE"
 fi
 
-exec "$@"
+TRUST_CONFIG_ARGS=""
+if [ -n "${FERN_TRUST_CONFIG:-}" ] && [ -f "$FERN_TRUST_CONFIG" ]; then
+    echo "[entrypoint] Trust config: $FERN_TRUST_CONFIG"
+    TRUST_CONFIG_ARGS="--trust-config $FERN_TRUST_CONFIG"
+fi
+
+exec $TRUST_CONFIG_ARGS "$@"
