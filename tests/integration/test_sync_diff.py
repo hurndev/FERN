@@ -44,9 +44,9 @@ def make_genesis(founder: UserIdentity, group_keypair: GroupKeypair, relay: Fake
             "admins": [founder.pubkey],
             "relays": [relay.url],
             "app": "chat",
-            "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-            "chat.default_channel": "general",
-            "chat.system_channel": "general",
+            "chat.channels": [{"id": "11" * 32, "name": "general", "position": 0}],
+            "chat.default_channel": "11" * 32,
+            "chat.system_channel": "11" * 32,
         },
         group_keypair=group_keypair.keypair,
         ts=1,
@@ -76,6 +76,7 @@ async def test_heal_stores_without_broadcast(
         group=group_keypair.pubkey,
         parents=(genesis.id,),
         text="hello",
+        channel="11" * 32,
         ts=2,
     )
     await relay.heal(message)
@@ -98,6 +99,7 @@ async def test_sync_diff_fetches_events_missing_locally(
         group=group_keypair.pubkey,
         parents=(genesis.id,),
         text="hello",
+        channel="11" * 32,
         ts=2,
     )
     await relay.publish(genesis)
@@ -130,6 +132,7 @@ async def test_sync_diff_heals_events_missing_on_relay(
         group=group_keypair.pubkey,
         parents=(genesis.id,),
         text="hello",
+        channel="11" * 32,
         ts=2,
     )
     await relay.publish(genesis)
@@ -177,6 +180,7 @@ async def test_sync_diff_skips_locked_relay_without_waiting(
         group=group_keypair.pubkey,
         parents=(genesis.id,),
         text="local only",
+        channel="11" * 32,
         ts=3,
     )
     await store.put_event(extra)

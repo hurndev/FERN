@@ -30,10 +30,10 @@ class GroupState:
     public: bool
     app: str = "chat"
     channels: Mapping[str, Channel] = field(
-        default_factory=lambda: {"general": Channel(id="general", name="general")}
+        default_factory=dict
     )
     chat_settings: Mapping[str, str] = field(
-        default_factory=lambda: {"default_channel": "general", "system_channel": "general"}
+        default_factory=dict
     )
 
     def is_banned_at(self, pubkey: str, ts: int) -> bool:

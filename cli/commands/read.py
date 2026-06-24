@@ -8,6 +8,7 @@ from fern.storage.sqlite_store import SqliteStore
 from fern.identity.user import UserIdentity
 from fern.events.event import Event
 from fern.state.machine import derive_group_state
+from fern.state.types import GroupState
 from cli.sync import sync_group_from_transports
 from fern.client.sync import HealMode
 from cli.config import (
@@ -45,6 +46,18 @@ def _compute_nicknames(events: list[Event]) -> dict[str, str]:
 
 def _display_name(pubkey: str, nicknames: dict[str, str]) -> str:
     return nicknames.get(pubkey) or f"{pubkey[:12]}..."
+
+
+def _channel_display_name(channel_id: str, state: GroupState) -> str:
+    ch = state.channels.get(channel_id)
+    return ch.name if ch else channel_id
+
+
+def _resolve_channel_filter(name_or_id: str, state: GroupState) -> str:
+    for ch in state.channels.values():
+        if ch.name == name_or_id:
+            return ch.id
+    return name_or_id
 
 
 def _format_admin_action(event: Event, nicknames: dict[str, str]) -> str | None:
@@ -138,6 +151,8 @@ async def _read(ctx: click.Context, channel: str | None, count: int, show_reject
         rejected_ids = {e.id for e in rejected if e.id is not None}
         nicknames = _compute_nicknames(events)
 
+        channel_filter = _resolve_channel_filter(channel, state) if channel else None
+
         entries: list[tuple[int, str]] = []
         for event in events:
             ts = event.ts
@@ -145,10 +160,11 @@ async def _read(ctx: click.Context, channel: str | None, count: int, show_reject
 
             if event.type == "chat.message":
                 msg_channel = event.content.get("channel", "")
-                if channel and msg_channel != channel:
+                if channel_filter and msg_channel != channel_filter:
                     continue
                 text = event.content.get("text", "")
-                channel_tag = f"#{msg_channel}" if msg_channel else ""
+                display_ch = _channel_display_name(msg_channel, state)
+                channel_tag = f"#{display_ch}" if msg_channel else ""
                 line = f"[{channel_tag}] <{author}> {text}"
                 if event.id in rejected_ids:
                     line += "  [not authorized]"

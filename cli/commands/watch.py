@@ -15,7 +15,14 @@ from cli.config import (
     connect_transports,
     get_client_id,
 )
-from cli.commands.read import ADMIN_TYPES, _compute_nicknames, _display_name, _format_admin_action
+from cli.commands.read import (
+    ADMIN_TYPES,
+    _compute_nicknames,
+    _display_name,
+    _format_admin_action,
+    _channel_display_name,
+    _resolve_channel_filter,
+)
 from cli.sync import sync_group_from_transports
 from fern.client.sync import HealMode
 
@@ -68,6 +75,9 @@ async def _watch(ctx: click.Context, channel: str | None, show_rejected: bool, g
 
     nicknames = _compute_nicknames(events)
 
+    initial_state, _ = derive_group_state(events) if events else (None, [])
+    channel_filter = _resolve_channel_filter(channel, initial_state) if channel and initial_state else None
+
     async def handle_event(event: Event) -> None:
         try:
             verify_event(event)
@@ -97,14 +107,15 @@ async def _watch(ctx: click.Context, channel: str | None, show_rejected: bool, g
         if event.type != "chat.message":
             return
         msg_channel = event.content.get("channel", "")
-        if channel and msg_channel != channel:
+        if channel_filter and msg_channel != channel_filter:
             return
 
         authorised = True
+        live_state = None
         if events:
             live_events = events + [event]
             try:
-                _, rejected = derive_group_state(live_events)
+                live_state, rejected = derive_group_state(live_events)
                 authorised = event.id not in {e.id for e in rejected if e.id is not None}
             except Exception:
                 pass
@@ -120,7 +131,8 @@ async def _watch(ctx: click.Context, channel: str | None, show_rejected: bool, g
 
         text = event.content.get("text", "")
         author = _display_name(event.author, nicknames)
-        channel_tag = f"#{msg_channel}" if msg_channel else ""
+        display_ch = _channel_display_name(msg_channel, live_state) if live_state else msg_channel
+        channel_tag = f"#{display_ch}" if msg_channel else ""
         click.echo(f"[{channel_tag}] <{author}> {text}{tag}")
 
     for t in transports:

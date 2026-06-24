@@ -60,9 +60,9 @@ def sample_genesis(founder_identity: UserIdentity, group_keypair: GroupKeypair) 
             "admins": [founder_identity.pubkey],
             "relays": ["wss://relay1.test", "wss://relay2.test"],
             "app": "chat",
-            "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-            "chat.default_channel": "general",
-            "chat.system_channel": "general",
+            "chat.channels": [{"id": "11" * 32, "name": "general", "position": 0}],
+            "chat.default_channel": "11" * 32,
+            "chat.system_channel": "11" * 32,
         },
         group_keypair=group_keypair.keypair,
     )

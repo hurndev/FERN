@@ -39,9 +39,9 @@ async def test_relay_healing_actions(tmp_path, monkeypatch: pytest.MonkeyPatch) 
                 "admins": [founder.pubkey],
                 "relays": ["ws://localhost:8765"],
                 "app": "chat",
-                "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-            "chat.default_channel": "general",
-            "chat.system_channel": "general",
+                "chat.channels": [{"id": "11" * 32, "name": "general", "position": 0}],
+            "chat.default_channel": "11" * 32,
+            "chat.system_channel": "11" * 32,
             },
             group_keypair=group_keypair.keypair,
             ts=1,
@@ -77,6 +77,7 @@ async def test_relay_healing_actions(tmp_path, monkeypatch: pytest.MonkeyPatch) 
             group=group_keypair.pubkey,
             parents=(genesis.id,),
             text="hello",
+            channel="11" * 32,
             ts=2,
         )
         broadcasts: list[Any] = []

@@ -17,11 +17,11 @@ class TestChatMessages:
             group=group_keypair.pubkey,
             parents=("p" * 64,),
             text="Hello!",
-            channel="general",
+            channel="11" * 32,
         )
         assert event.type == ChatTypes.MESSAGE
         assert event.content["text"] == "Hello!"
-        assert event.content["channel"] == "general"
+        assert event.content["channel"] == "11" * 32
 
     def test_is_chat_message(
         self, alice_identity: UserIdentity, group_keypair: GroupKeypair
@@ -31,6 +31,7 @@ class TestChatMessages:
             group=group_keypair.pubkey,
             parents=("p" * 64,),
             text="Hi",
+            channel="11" * 32,
         )
         assert is_chat_message(event)
 

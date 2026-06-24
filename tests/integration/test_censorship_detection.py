@@ -33,9 +33,9 @@ async def test_censorship_detection_via_group_status_divergence() -> None:
             "admins": [founder.pubkey],
             "relays": [relay_a.url, relay_b.url, relay_c.url],
         "app": "chat",
-        "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-            "chat.default_channel": "general",
-            "chat.system_channel": "general",
+        "chat.channels": [{"id": "11" * 32, "name": "general", "position": 0}],
+            "chat.default_channel": "11" * 32,
+            "chat.system_channel": "11" * 32,
         },
         group_keypair=group_kp,
     )
@@ -49,7 +49,7 @@ async def test_censorship_detection_via_group_status_divergence() -> None:
         group=group_kp.pubkey_hex,
         author_keypair=founder.keypair,
         parents=(genesis.id,),
-        content={"text": "hello", "channel": "general"},
+        content={"text": "hello", "channel": "11" * 32},
     )
 
     await relay_a.publish(msg)
@@ -86,9 +86,9 @@ async def test_monitor_pass_detects_missing_event_with_event_receipt() -> None:
             "admins": [founder.pubkey],
             "relays": [relay_a.url, relay_b.url, relay_c.url],
         "app": "chat",
-        "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-            "chat.default_channel": "general",
-            "chat.system_channel": "general",
+        "chat.channels": [{"id": "11" * 32, "name": "general", "position": 0}],
+            "chat.default_channel": "11" * 32,
+            "chat.system_channel": "11" * 32,
         },
         group_keypair=group_kp,
     )
@@ -102,7 +102,7 @@ async def test_monitor_pass_detects_missing_event_with_event_receipt() -> None:
         group=group_kp.pubkey_hex,
         author_keypair=founder.keypair,
         parents=(genesis.id,),
-        content={"text": "hello", "channel": "general"},
+        content={"text": "hello", "channel": "11" * 32},
     )
 
     event_receipt_a = await relay_a.publish(msg)

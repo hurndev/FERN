@@ -73,11 +73,14 @@ def _relay_url(value: object) -> str:
     return url
 
 
-def _channel_id(value: object, field = "channel id") -> str:
-    return _string(value, field, min_bytes=1, max_bytes=MAX_CHANNEL_ID_BYTES)
+def _channel_id(value: object, field: str = "channel id") -> str:
+    s = _string(value, field, min_bytes=MAX_CHANNEL_ID_BYTES, max_bytes=MAX_CHANNEL_ID_BYTES)
+    if not is_valid_event_id_hex(s):
+        raise SemanticValidationError(f"{field} must be 64-char lowercase hex")
+    return s
 
 
-def _validate_chat_channel(raw: object, *, require_general = False) -> str:
+def _validate_chat_channel(raw: object) -> str:
     if not isinstance(raw, dict):
         raise SemanticValidationError("chat channel must be an object")
     _only(raw, {"id", "name", "description", "position"})
@@ -87,8 +90,6 @@ def _validate_chat_channel(raw: object, *, require_general = False) -> str:
         _string(raw["description"], "channel.description", max_bytes=MAX_CHANNEL_DESCRIPTION_BYTES)
     if "position" in raw:
         _int(raw["position"], "channel.position")
-    if require_general and channel_id != "general":
-        raise SemanticValidationError('chat channel id must be "general"')
     return channel_id
 
 
@@ -129,9 +130,8 @@ def validate_event_semantics(event: Event) -> None:
             channels = c.get("chat.channels")
             if not isinstance(channels, list) or not channels:
                 raise SemanticValidationError("chat.channels must be a non-empty array")
-            ids = [_validate_chat_channel(raw) for raw in channels]
-            if "general" not in ids:
-                raise SemanticValidationError('chat.channels must include "general"')
+            for raw in channels:
+                _validate_chat_channel(raw)
             if "chat.default_channel" in c:
                 _channel_id(c["chat.default_channel"], "chat.default_channel")
             if "chat.system_channel" in c:
@@ -185,7 +185,8 @@ def validate_event_semantics(event: Event) -> None:
         _only(c, {"nickname"})
         _string(c.get("nickname"), "nickname", min_bytes=1, max_bytes=MAX_NICKNAME_BYTES)
     elif t == ChatTypes.CHANNEL_CREATE:
-        _only(c, {"name", "description", "position"})
+        _only(c, {"id", "name", "description", "position"})
+        _channel_id(c.get("id"), "id")
         _string(c.get("name"), "name", min_bytes=1, max_bytes=MAX_CHANNEL_NAME_BYTES)
         if "description" in c:
             _string(c["description"], "description", max_bytes=MAX_CHANNEL_DESCRIPTION_BYTES)
@@ -204,9 +205,7 @@ def validate_event_semantics(event: Event) -> None:
             _int(c["position"], "position")
     elif t == ChatTypes.CHANNEL_DELETE:
         _only(c, {"id", "name"})
-        channel_id = _channel_id(c.get("id"), "id")
-        if channel_id == "general":
-            raise SemanticValidationError("general channel cannot be deleted")
+        _channel_id(c.get("id"), "id")
         if "name" in c:
             _string(c["name"], "name", min_bytes=1, max_bytes=MAX_CHANNEL_NAME_BYTES)
     elif t == ChatTypes.SETTINGS_UPDATE:

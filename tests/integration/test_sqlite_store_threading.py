@@ -33,9 +33,9 @@ async def test_sqlite_store_allows_concurrent_to_thread_calls(tmp_path) -> None:
                 "admins": [founder.pubkey],
                 "relays": ["ws://localhost:8765"],
                 "app": "chat",
-                "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-            "chat.default_channel": "general",
-            "chat.system_channel": "general",
+                "chat.channels": [{"id": "11" * 32, "name": "general", "position": 0}],
+            "chat.default_channel": "11" * 32,
+            "chat.system_channel": "11" * 32,
             },
             group_keypair=group_keypair.keypair,
             ts=1,
@@ -48,6 +48,7 @@ async def test_sqlite_store_allows_concurrent_to_thread_calls(tmp_path) -> None:
                 group=group_keypair.pubkey,
                 parents=(genesis.id,),
                 text=f"message {i}",
+                channel="11" * 32,
                 ts=2 + i,
             )
             for i in range(20)

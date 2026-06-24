@@ -9,6 +9,7 @@ from fern.identity.user import UserIdentity
 from fern.identity.group import GroupKeypair
 from fern.events.build import build_event
 from fern.events.types import ProtocolTypes
+from fern.crypto.hashes import random_channel_id
 from fern.state.machine import compute_accepted_heads, derive_group_state
 from fern.storage.sqlite_store import SqliteStore
 from fern.transport.websocket_client import WebSocketRelayClient
@@ -123,6 +124,7 @@ async def _create(name: str, description: str, public: bool, relay_urls: list[st
 
     ensure_config_dir()
     group_kp = GroupKeypair.generate()
+    general_id = random_channel_id()
 
     transports = await connect_transports(list(relay_urls))
     genesis: Any = None
@@ -140,9 +142,9 @@ async def _create(name: str, description: str, public: bool, relay_urls: list[st
                 "admins": [user.pubkey],
                 "relays": list(relay_urls),
                 "app": "chat",
-                "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-                "chat.default_channel": "general",
-                "chat.system_channel": "general",
+                "chat.channels": [{"id": general_id, "name": "general", "position": 0}],
+                "chat.default_channel": general_id,
+                "chat.system_channel": general_id,
             },
             group_keypair=group_kp.keypair,
         )

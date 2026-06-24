@@ -276,10 +276,10 @@ Content schema:
   "relays":      ["wss://relay1.example.com", "wss://relay2.example.com"],
   "app":         "chat",
   "chat.channels": [
-    {"id": "general", "name": "general", "description": "", "position": 0}
+    {"id": "<random 64-char hex>", "name": "general", "description": "", "position": 0}
   ],
-  "chat.default_channel": "general",
-  "chat.system_channel":  "general"
+  "chat.default_channel": "<same random hex id>",
+  "chat.system_channel":  "<same random hex id>"
 }
 ```
 
@@ -293,24 +293,24 @@ Content schema:
 | `relays` | array of strings | Initial canonical relay URLs (e.g., `wss://...`). MUST be non-empty. |
 | `app` | string | The primary app profile this group uses. For example `"app": "chat"` means the main user experience is the `chat` app. This is a rendering/profile declaration, not a relay storage constraint. A client that does not understand `app` SHOULD NOT pretend to provide the full group experience. |
 | dotted keys | any JSON value allowed by the owning app schema | Initial app configuration. Bare keys are protocol-reserved; dotted keys are app- or extension-owned. Unknown dotted keys MUST be preserved and ignored by clients that do not understand them. |
-| `chat.channels` | array of channel objects | Required when `app` is `"chat"`. Initial channel objects. MUST contain an object with `id == "general"`. |
-| `chat.default_channel` | string | Optional when `app` is `"chat"`. Channel ID selected by default. Defaults to `"general"` if absent. |
-| `chat.system_channel` | string | Optional when `app` is `"chat"`. Channel ID for system messages. Defaults to `"general"` if absent. |
+| `chat.channels` | array of channel objects | Required when `app` is `"chat"`. Initial channel objects. MUST be non-empty. Each channel `id` MUST be a 64-char lowercase hex string chosen randomly by the client. |
+| `chat.default_channel` | string | Optional when `app` is `"chat"`. Channel ID selected by default. Defaults to the first channel's ID if absent. |
+| `chat.system_channel` | string | Optional when `app` is `"chat"`. Channel ID for system messages. Defaults to the first channel's ID if absent. |
 
 For `chat.channels`, each object has this schema:
 
 ```json
 {
-  "id": "general",
+  "id": "<random 64-char hex>",
   "name": "general",
   "description": "",
   "position": 0
 }
 ```
 
-`id` and `name` are required non-empty strings. `description` is optional and defaults to `""`. `position` is optional and defaults to the object's array position.
+`id` is a required 64-char lowercase hex string generated randomly by the client. `name` is a required non-empty string. `description` is optional and defaults to `""`. `position` is optional and defaults to the object's array position.
 
-Verification: `sig` MUST verify against the `group` field as the public key. The `founder` field MUST equal the `author` field. The `admins` array MUST contain the `founder` pubkey. Bare genesis keys are protocol-reserved. If `app == "chat"`, `chat.channels` MUST be present and non-empty and MUST contain the reserved channel ID `"general"`.
+Verification: `sig` MUST verify against the `group` field as the public key. The `founder` field MUST equal the `author` field. The `admins` array MUST contain the `founder` pubkey. Bare genesis keys are protocol-reserved. If `app == "chat"`, `chat.channels` MUST be present and non-empty, and each channel `id` MUST be a 64-char lowercase hex string.
 
 ### 5.2 `join`
 
@@ -556,6 +556,7 @@ Content schema:
 
 ```json
 {
+  "id":          "<random 64-char hex>",
   "name":        "announcements",
   "description": "Release notes and project updates",
   "position":    1
@@ -564,13 +565,12 @@ Content schema:
 
 | Field | Type | Description |
 |---|---|---|
+| `id` | string | Stable channel ID. A 64-char lowercase hex string generated randomly by the client. Required. |
 | `name` | string | Channel name. Non-empty, case-sensitive, max 80 UTF-8 bytes. Alphanumeric, hyphens, and underscores permitted. |
 | `description` | string | Optional channel description. Defaults to `""`. Max 500 UTF-8 bytes. |
 | `position` | integer | Optional display ordering hint. Defaults to append order. |
 
-The stable channel ID for a created channel is the event ID of the
-`chat.channel_create` event itself. Messages and later channel operations MUST
-refer to that ID, not to the channel's mutable name.
+The stable channel ID for a created channel is the `id` field in the `chat.channel_create` event content. Messages and later channel operations MUST refer to that ID, not to the channel's mutable name.
 
 Authorisation: `author` MUST be an admin. The `name` SHOULD NOT already exist in `channels`; clients SHOULD discard duplicate-name creates from app state while still storing the event.
 
@@ -619,7 +619,7 @@ Content schema:
 | `id` | string | Stable channel ID. Required. |
 | `name` | string | Optional channel-name snapshot for display after deletion. If present, non-empty and max 80 UTF-8 bytes. |
 
-Authorisation: `author` MUST be an admin. The reserved `"general"` channel ID MUST NOT be deleted. Messages in a deleted channel remain in the DAG but are hidden from normal rendering. Clients MUST NOT delete events from storage when a channel is deleted.
+Authorisation: `author` MUST be an admin. The default channel (as set in `chat_settings.default_channel`) MUST NOT be deleted. Messages in a deleted channel remain in the DAG but are hidden from normal rendering. Clients MUST NOT delete events from storage when a channel is deleted.
 
 ### 6.7 `chat.settings_update`
 
@@ -769,7 +769,7 @@ For each event in canonical linearisation order (skipping the genesis, which has
 | `metadata_update` | For each field present in `content`, update `metadata[field]`. |
 | `chat.channel_create` | Add a channel object to `channels` with `id = event.id`, plus `name`, `description`, and `position` from content. Discard from app state if the name duplicates an existing channel name. |
 | `chat.channel_update` | Update the named fields of `channels[content.id]`. Ignore unknown channel IDs. |
-| `chat.channel_delete` | Remove `channels[content.id]`. Reject if `content.id` is `"general"`. If a deleted channel was selected by `chat_settings`, reset that setting to `"general"`. |
+| `chat.channel_delete` | Remove `channels[content.id]`. Reject if `content.id` is the default channel. If a deleted channel was selected by `chat_settings`, reset that setting to the first remaining channel. |
 | `chat.settings_update` | Update `chat_settings.default_channel` and/or `chat_settings.system_channel` if present and if the target channel IDs exist. |
 | (any other type) | No state effect. The event is stored but does not affect group state. |
 

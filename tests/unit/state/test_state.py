@@ -4,6 +4,8 @@ from fern.events.limits import MAX_CHANNEL_NAME_BYTES
 from fern.events.types import ProtocolTypes
 from fern.state.machine import derive_group_state
 
+GENERAL_ID = "11" * 32
+
 
 def make_genesis(
     group: str,
@@ -30,9 +32,9 @@ def make_genesis(
             "admins": admins,
             "relays": relays,
             "app": "chat",
-            "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-            "chat.default_channel": "general",
-            "chat.system_channel": "general",
+            "chat.channels": [{"id": GENERAL_ID, "name": "general", "position": 0}],
+            "chat.default_channel": GENERAL_ID,
+            "chat.system_channel": GENERAL_ID,
         },
         ts=1,
         tags=(),
@@ -135,14 +137,15 @@ class TestGroupState:
         state, rejected = derive_group_state([genesis, add, remove])
         assert "a" * 64 not in state.admins
 
-    def test_channel_create_update_delete_uses_stable_event_id(self) -> None:
+    def test_channel_create_update_delete_uses_content_id(self) -> None:
         genesis = make_genesis("0" * 64, "f" * 64)
+        channel_id = "cc" * 32
         create = make_event(
             "chat.channel_create",
             "f" * 64,
             "0" * 64,
             ts=2,
-            content={"name": "announcements", "description": "News", "position": 1},
+            content={"id": channel_id, "name": "announcements", "description": "News", "position": 1},
             event_id="c" * 64,
         )
         update = make_event(
@@ -150,32 +153,33 @@ class TestGroupState:
             "f" * 64,
             "0" * 64,
             ts=3,
-            content={"id": "c" * 64, "name": "news"},
+            content={"id": channel_id, "name": "news"},
             event_id="d" * 64,
         )
         state, rejected = derive_group_state([genesis, create, update])
-        assert state.channels["c" * 64].name == "news"
-        assert state.channels["c" * 64].description == "News"
+        assert state.channels[channel_id].name == "news"
+        assert state.channels[channel_id].description == "News"
 
         delete = make_event(
             "chat.channel_delete",
             "f" * 64,
             "0" * 64,
             ts=4,
-            content={"id": "c" * 64},
+            content={"id": channel_id},
             event_id="e" * 64,
         )
         state, rejected = derive_group_state([genesis, create, update, delete])
-        assert "c" * 64 not in state.channels
+        assert channel_id not in state.channels
 
     def test_chat_settings_update_uses_channel_ids(self) -> None:
         genesis = make_genesis("0" * 64, "f" * 64)
+        channel_id = "cc" * 32
         create = make_event(
             "chat.channel_create",
             "f" * 64,
             "0" * 64,
             ts=2,
-            content={"name": "audit"},
+            content={"id": channel_id, "name": "audit"},
             event_id="c" * 64,
         )
         settings = make_event(
@@ -183,11 +187,11 @@ class TestGroupState:
             "f" * 64,
             "0" * 64,
             ts=3,
-            content={"system_channel": "c" * 64},
+            content={"system_channel": channel_id},
             event_id="d" * 64,
         )
         state, rejected = derive_group_state([genesis, create, settings])
-        assert state.chat_settings["system_channel"] == "c" * 64
+        assert state.chat_settings["system_channel"] == channel_id
 
     def test_metadata_update(self) -> None:
         genesis = make_genesis("0" * 64, "f" * 64)
@@ -204,7 +208,7 @@ class TestGroupState:
             "f" * 64,
             "0" * 64,
             ts=2,
-            content={"name": "x" * (MAX_CHANNEL_NAME_BYTES + 1)},
+            content={"id": "bb" * 32, "name": "x" * (MAX_CHANNEL_NAME_BYTES + 1)},
             event_id="b" * 64,
         )
 
@@ -220,7 +224,7 @@ class TestGroupState:
             "f" * 64,
             "0" * 64,
             ts=2,
-            content={"name": "x" * (MAX_CHANNEL_NAME_BYTES + 1)},
+            content={"id": "bb" * 32, "name": "x" * (MAX_CHANNEL_NAME_BYTES + 1)},
             event_id="b" * 64,
         )
         child = make_event(
@@ -228,7 +232,7 @@ class TestGroupState:
             "f" * 64,
             "0" * 64,
             ts=3,
-            content={"text": "hello", "channel": "general"},
+            content={"text": "hello", "channel": GENERAL_ID},
             parents=("b" * 64,),
             event_id="c" * 64,
         )

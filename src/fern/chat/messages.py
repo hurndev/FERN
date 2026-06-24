@@ -14,7 +14,7 @@ def build_chat_message(
     group: str,
     parents: Sequence[str],
     text: str,
-    channel: str = "general",
+    channel: str,
     reply_to: str | None = None,
     ts: int | None = None,
 ) -> Event:

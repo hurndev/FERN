@@ -114,7 +114,7 @@ class TestBuildEvent:
             group=group_keypair.pubkey,
             author_keypair=alice_identity.keypair,
             parents=("a" * 64,),
-            content={"text": "hello", "channel": "general"},
+            content={"text": "hello", "channel": "11" * 32},
         )
         assert event.id is not None
         assert event.sig is not None

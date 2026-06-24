@@ -8,8 +8,6 @@ from fern.events.types import ChatTypes, ProtocolTypes
 from fern.state.authorization import is_authorised
 from fern.state.types import BanEntry, Channel, GroupState
 
-_GENERAL = "general"
-
 
 def _channel_from_config(raw: object, position: int) -> Channel:
     if isinstance(raw, dict):
@@ -18,11 +16,8 @@ def _channel_from_config(raw: object, position: int) -> Channel:
         description = str(raw.get("description", ""))
         raw_position = raw.get("position", position)
         pos = raw_position if isinstance(raw_position, int) else position
-        if not channel_id:
-            channel_id = name
         return Channel(id=channel_id, name=name or channel_id, description=description, position=pos)
-    name = str(raw).strip()
-    return Channel(id=name, name=name, position=position)
+    raise ValueError("channel config must be a dict with 'id' and 'name' fields")
 
 
 def _initialise_from_genesis(genesis: Event) -> GroupState:
@@ -37,11 +32,13 @@ def _initialise_from_genesis(genesis: Event) -> GroupState:
             channel = _channel_from_config(raw, idx)
             if channel.id:
                 channels[channel.id] = channel
-        if _GENERAL not in channels:
-            channels[_GENERAL] = Channel(id=_GENERAL, name=_GENERAL, position=0)
+        if not channels:
+            first_id = next(iter(channels))
+            channels[first_id] = Channel(id=first_id, name=first_id, position=0)
+        first_id = next(iter(channels))
         chat_settings = {
-            "default_channel": str(c.get("chat.default_channel", _GENERAL)),
-            "system_channel": str(c.get("chat.system_channel", _GENERAL)),
+            "default_channel": str(c.get("chat.default_channel", first_id)),
+            "system_channel": str(c.get("chat.system_channel", first_id)),
         }
     return GroupState(
         members=frozenset({founder}),
@@ -110,13 +107,14 @@ def apply_event(state: GroupState, event: Event) -> GroupState:
                 metadata[key] = c[key]
 
     elif t == ChatTypes.CHANNEL_CREATE:
+        channel_id = str(c.get("id", ""))
         name = c["name"]
         description = str(c.get("description", ""))
         raw_position = c.get("position", len(channels))
         position = raw_position if isinstance(raw_position, int) else len(channels)
-        if event.id and not any(ch.name == name for ch in channels.values()):
-            channels[event.id] = Channel(
-                id=event.id,
+        if channel_id and not any(ch.name == name for ch in channels.values()):
+            channels[channel_id] = Channel(
+                id=channel_id,
                 name=str(name),
                 description=description,
                 position=position,
@@ -137,11 +135,13 @@ def apply_event(state: GroupState, event: Event) -> GroupState:
 
     elif t == ChatTypes.CHANNEL_DELETE:
         channel_id = str(c["id"])
-        if channel_id != _GENERAL:
+        default_id = chat_settings.get("default_channel", "")
+        if channel_id != default_id:
             channels.pop(channel_id, None)
             for key in ("default_channel", "system_channel"):
                 if chat_settings.get(key) == channel_id:
-                    chat_settings[key] = _GENERAL
+                    first_remaining = next(iter(channels), "")
+                    chat_settings[key] = first_remaining
 
     elif t == ChatTypes.SETTINGS_UPDATE:
         for key in ("default_channel", "system_channel"):
@@ -166,10 +166,17 @@ def _validate_state_dependent_semantics(state: GroupState, event: Event) -> None
     c = event.content
     if event.type == ChatTypes.MESSAGE and c["channel"] not in state.channels:
         raise SemanticValidationError("message channel does not exist")
-    if event.type == ChatTypes.CHANNEL_CREATE and any(
-        channel.name == c["name"] for channel in state.channels.values()
-    ):
-        raise SemanticValidationError("channel name already exists")
+    if event.type == ChatTypes.CHANNEL_CREATE:
+        channel_id = str(c.get("id", ""))
+        if channel_id in state.channels:
+            raise SemanticValidationError("channel id already exists")
+        if any(channel.name == c["name"] for channel in state.channels.values()):
+            raise SemanticValidationError("channel name already exists")
+    if event.type == ChatTypes.CHANNEL_DELETE:
+        channel_id = str(c["id"])
+        default_id = state.chat_settings.get("default_channel", "")
+        if channel_id == default_id:
+            raise SemanticValidationError("cannot delete the default channel")
 
 
 def derive_group_state_details(events: Iterable[Event]) -> tuple[GroupState, list[Event], frozenset[str]]:

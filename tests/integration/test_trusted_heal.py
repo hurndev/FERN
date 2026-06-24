@@ -35,9 +35,9 @@ def _make_genesis(founder, gkp, relays):
             "admins": [founder.pubkey],
             "relays": relays,
             "app": "chat",
-            "chat.channels": [{"id": "general", "name": "general", "position": 0}],
-            "chat.default_channel": "general",
-            "chat.system_channel": "general",
+            "chat.channels": [{"id": "11" * 32, "name": "general", "position": 0}],
+            "chat.default_channel": "11" * 32,
+            "chat.system_channel": "11" * 32,
         },
         group_keypair=gkp,
     )
@@ -64,7 +64,7 @@ async def test_trusted_heal_seeds_missing_relay(founder, group_kp):
         group=group_kp.pubkey_hex,
         author_keypair=founder.keypair,
         parents=(genesis.id,),
-        content={"text": "hello", "channel": "general"},
+        content={"text": "hello", "channel": "11" * 32},
     )
 
     await r1.publish(genesis)
@@ -132,7 +132,7 @@ async def test_trusted_heal_insufficient_witnesses_falls_back(founder, group_kp)
         group=group_kp.pubkey_hex,
         author_keypair=founder.keypair,
         parents=(genesis.id,),
-        content={"text": "hello", "channel": "general"},
+        content={"text": "hello", "channel": "11" * 32},
     )
 
     await r1.publish(genesis)
@@ -188,7 +188,7 @@ async def test_trusted_heal_one_witness_cannot_fast_heal(founder, group_kp):
         group=group_kp.pubkey_hex,
         author_keypair=founder.keypair,
         parents=(genesis.id,),
-        content={"text": "hello", "channel": "general"},
+        content={"text": "hello", "channel": "11" * 32},
     )
 
     await r1.publish(genesis)
@@ -237,7 +237,7 @@ async def test_trusted_heal_does_not_broadcast(founder, group_kp):
         group=group_kp.pubkey_hex,
         author_keypair=founder.keypair,
         parents=(genesis.id,),
-        content={"text": "hello", "channel": "general"},
+        content={"text": "hello", "channel": "11" * 32},
     )
 
     await r1.publish(genesis)
@@ -288,7 +288,7 @@ async def test_trusted_heal_auto_hosts_on_genesis(founder, group_kp):
         group=group_kp.pubkey_hex,
         author_keypair=founder.keypair,
         parents=(genesis.id,),
-        content={"text": "hello", "channel": "general"},
+        content={"text": "hello", "channel": "11" * 32},
     )
 
     await r1.publish(genesis)
