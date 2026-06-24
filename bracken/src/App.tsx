@@ -15,6 +15,7 @@ import { getEventIds } from './fern/db'
 import { deriveGroupState } from './fern/state'
 import type { FernEvent } from './fern/events'
 import { isValidPubkey } from './fern/utils'
+import { randomHexId } from './fern/utils'
 import { useDefiniteOverlayClick } from './hooks/useDefiniteOverlayClick'
 import styles from './styles/components.module.css'
 
@@ -58,21 +59,18 @@ function computeChannelNames(events: FernEvent[]): Map<string, string> {
           const id = String(record['id'] ?? '').trim()
           const name = String(record['name'] ?? id).trim()
           if (id && name) names.set(id, name)
-        } else {
-          const name = String(entry ?? '').trim()
-          if (name) names.set(name, name)
         }
       }
     } else if (event.type === 'chat.channel_create') {
+      const id = event.content['id'] as string | undefined
       const name = event.content['name'] as string | undefined
-      if (name) names.set(event.id, name)
+      if (id && name) names.set(id, name)
     } else if (event.type === 'chat.channel_update') {
       const id = event.content['id'] as string | undefined
       const name = event.content['name'] as string | undefined
       if (id && name) names.set(id, name)
     }
   }
-  if (!names.has('general')) names.set('general', 'general')
   return names
 }
 
@@ -223,18 +221,18 @@ export default function App() {
 
   const [selectedChannels, setSelectedChannels] = useState<Record<string, string>>({})
   const storedSelectedChannel = bracken.activeGroup
-    ? selectedChannels[bracken.activeGroup] ?? 'general'
-    : 'general'
+    ? selectedChannels[bracken.activeGroup] ?? bracken.state?.chatSettings.default_channel ?? ''
+    : ''
 
   const channels = useMemo(() => {
-    if (!bracken.state) return [{ id: 'general', name: 'general', description: '', position: 0 }]
+    if (!bracken.state) return [] as { id: string; name: string; description: string; number: number }[]
     return [...bracken.state.channels.values()].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
   }, [bracken.state])
   const selectedChannel = bracken.state?.channels.has(storedSelectedChannel)
     ? storedSelectedChannel
     : bracken.state?.channels.has(bracken.state.chatSettings.default_channel)
       ? bracken.state.chatSettings.default_channel
-      : 'general'
+      : channels[0]?.id ?? ''
 
   const isViewerAdmin = bracken.identity ? admins.has(bracken.identity.publicKey) : false
   const slashCommands = useMemo(() => {
@@ -467,7 +465,7 @@ export default function App() {
                 } else if (isViewerAdmin && cmd === '/description') {
                   await bracken.adminAction('metadata_update', '', { description: args.trim() })
                 } else if (isViewerAdmin && cmd === '/channel-create' && args.trim()) {
-                  await bracken.adminAction('chat.channel_create', '', { name: args.trim() })
+                  await bracken.adminAction('chat.channel_create', '', { id: randomHexId(), name: args.trim() })
                 } else if (isViewerAdmin && cmd === '/channel-delete' && args.trim()) {
                   const channel = [...(bracken.state?.channels.values() ?? [])].find((ch) => ch.name === args.trim() || ch.id === args.trim())
                   if (channel) await bracken.adminAction('chat.channel_delete', '', { id: channel.id, name: channel.name })

@@ -106,7 +106,7 @@ export function MessageList({
   deliveries,
   channelNames,
   viewerPubkey = '',
-  selectedChannel = 'general',
+  selectedChannel = '',
   onAdminAction,
   onRetryMessage,
 }: Props) {
@@ -123,7 +123,7 @@ export function MessageList({
       .filter((e) => {
         if (ADMIN_TYPES.has(e.type)) return true
         if (e.type === 'chat.message') {
-          const ch = (e.content['channel'] as string) || 'general'
+          const ch = (e.content['channel'] as string) || ''
           return ch === selectedChannel
         }
         return true

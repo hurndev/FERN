@@ -83,7 +83,9 @@ function relayUrl(value: unknown): string {
 }
 
 function channelId(value: unknown, field = 'channel id'): string {
-  return stringField(value, field, { min: 1, max: MAX_CHANNEL_ID_BYTES })
+  const s = stringField(value, field, { min: MAX_CHANNEL_ID_BYTES, max: MAX_CHANNEL_ID_BYTES })
+  if (!isValidEventId(s)) throw new SemanticValidationError(`${field} must be 64-char lowercase hex`)
+  return s
 }
 
 function validateChatChannel(raw: unknown): string {
@@ -136,8 +138,7 @@ export function validateEventSemantics(event: FernEvent): void {
         if (!Array.isArray(channels) || channels.length === 0) {
           throw new SemanticValidationError('chat.channels must be a non-empty array')
         }
-        const ids = channels.map(validateChatChannel)
-        if (!ids.includes('general')) throw new SemanticValidationError('chat.channels must include general')
+        for (const raw of channels) validateChatChannel(raw)
         if ('chat.default_channel' in c) channelId(c['chat.default_channel'], 'chat.default_channel')
         if ('chat.system_channel' in c) channelId(c['chat.system_channel'], 'chat.system_channel')
       }
@@ -202,7 +203,8 @@ export function validateEventSemantics(event: FernEvent): void {
       stringField(c['nickname'], 'nickname', { min: 1, max: MAX_NICKNAME_BYTES })
       return
     case 'chat.channel_create':
-      only(c, ['name', 'description', 'position'])
+      only(c, ['id', 'name', 'description', 'position'])
+      channelId(c['id'], 'id')
       stringField(c['name'], 'name', { min: 1, max: MAX_CHANNEL_NAME_BYTES })
       if ('description' in c) stringField(c['description'], 'description', { max: MAX_CHANNEL_DESCRIPTION_BYTES })
       if ('position' in c) integerField(c['position'], 'position')
@@ -219,7 +221,7 @@ export function validateEventSemantics(event: FernEvent): void {
       return
     case 'chat.channel_delete':
       only(c, ['id', 'name'])
-      if (channelId(c['id'], 'id') === 'general') throw new SemanticValidationError('general channel cannot be deleted')
+      channelId(c['id'], 'id')
       if ('name' in c) stringField(c['name'], 'name', { min: 1, max: MAX_CHANNEL_NAME_BYTES })
       return
     case 'chat.settings_update':

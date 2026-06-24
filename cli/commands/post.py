@@ -143,7 +143,10 @@ async def _post(ctx: click.Context, channel: str | None, reply_to: str | None, g
     save_config(config)
 
     print_success(f"Posted to group {group_id}: {event.id[:16] if event.id else ''}...")
-    display_channel = channel or channel_id
+    if state:
+        display_channel = state.channels[channel_id].name if channel_id in state.channels else channel_id
+    else:
+        display_channel = channel_id
     click.echo(f"  Channel: #{display_channel}")
     click.echo(f"  Event receipts: {event_receipts}/{len(relay_urls)}")
     if errors:

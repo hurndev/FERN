@@ -7,6 +7,8 @@ from typing import ClassVar
 
 import click
 
+from dataclasses import replace
+
 from fern.relay.config import (
     RelayConfig,
     add_witness,
@@ -63,10 +65,12 @@ class _ColorFormatter(logging.Formatter):
 
 @click.group(invoke_without_command=True)
 @click.option("--config", "config_path", default=None, help="Path to relay config file.")
+@click.option("--port", default=None, type=int, help="Override port to listen on")
 @click.pass_context
-def main_fn(ctx: click.Context, config_path: str | None) -> None:
+def main_fn(ctx: click.Context, config_path: str | None, port: int | None) -> None:
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = Path(config_path) if config_path else None
+    ctx.obj["port"] = port
     if ctx.invoked_subcommand is None:
         ctx.invoke(run)
 
@@ -106,10 +110,11 @@ def init(ctx: click.Context, name: str, host: str, port: int, store: str, log_le
 
 
 @main_fn.command()
+@click.option("--port", default=None, type=int, help="Override port to listen on")
 @click.option("--log-level", default=None, help="Override log level")
 @click.option("--no-color", is_flag=True, help="Disable coloured log output")
 @click.pass_context
-def run(ctx: click.Context, log_level: str | None, no_color: bool) -> None:
+def run(ctx: click.Context, port: int | None, log_level: str | None, no_color: bool) -> None:
     """Start the relay server."""
     from fern.transport.websocket_server import RelayServer
 
@@ -124,6 +129,9 @@ def run(ctx: click.Context, log_level: str | None, no_color: bool) -> None:
         click.echo()
     else:
         config = load_config(cfg_path)
+    effective_port = port or ctx.obj.get("port")
+    if effective_port is not None:
+        config = replace(config, port=effective_port)
 
     handler = logging.StreamHandler()
     if no_color:

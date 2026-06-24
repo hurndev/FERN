@@ -14,7 +14,7 @@ export const MAX_ADMINS = 256
 export const MAX_BAN_REASON_BYTES = 500
 
 export const MAX_MESSAGE_TEXT_BYTES = 16000
-export const MAX_CHANNEL_ID_BYTES = 128
+export const MAX_CHANNEL_ID_BYTES = 64
 export const MAX_CHANNEL_NAME_BYTES = 80
 export const MAX_CHANNEL_DESCRIPTION_BYTES = 500
 export const MAX_NICKNAME_BYTES = 80

@@ -12,6 +12,7 @@ import {
 } from '../fern/db'
 import { RelayClient, parseGroupAddress } from '../fern/relay'
 import type { GroupStatus, EventReceipt } from '../fern/relay'
+import { randomHexId } from '../fern/utils'
 import { computeSetHash, verifyGroupStatus } from '../fern/completeness'
 import type {
   HealChallenge,
@@ -849,7 +850,7 @@ export function useBracken() {
   )
 
   const sendMessage = useCallback(
-    async (text: string, channel = 'general'): Promise<boolean> => {
+    async (text: string, channel: string): Promise<boolean> => {
       if (!identity || !activeGroup) return false
       const group = groups.find((g) => g.pubkey === activeGroup)
       if (!group) return false
@@ -1016,14 +1017,11 @@ export function useBracken() {
     async (
       name: string,
       relayUrls: string[],
-      options?: { description?: string; public?: boolean; channels?: string[] },
+      options?: { description?: string; public?: boolean },
     ): Promise<{ ok: number; total: number; error?: string }> => {
       if (!identity) throw new Error('No identity')
       const groupKeypair = generateKeypair()
-      const channelList = new Set(['general'])
-      for (const ch of options?.channels ?? []) {
-        channelList.add(ch.trim())
-      }
+      const defaultChannelId = randomHexId()
       const input: EventInput = {
         type: 'genesis',
         group: groupKeypair.publicKey,
@@ -1037,13 +1035,13 @@ export function useBracken() {
           admins: [identity.publicKey],
           relays: relayUrls,
           app: 'chat',
-          'chat.channels': [...channelList].map((channel, idx) => ({
-            id: channel,
-            name: channel,
-            position: idx,
-          })),
-          'chat.default_channel': 'general',
-          'chat.system_channel': 'general',
+          'chat.channels': [{
+            id: defaultChannelId,
+            name: 'general',
+            position: 0,
+          }],
+          'chat.default_channel': defaultChannelId,
+          'chat.system_channel': defaultChannelId,
         },
         ts: Math.floor(Date.now() / 1000),
         tags: [],

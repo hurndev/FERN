@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -21,9 +22,10 @@ def command() -> None:
 
 @command.command()
 @click.option("--config", "config_path", default=None, help="Path to relay config file.")
+@click.option("--port", default=None, type=int, help="Override port to listen on")
 @click.option("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
 @click.option("--no-color", is_flag=True, help="Disable coloured log output")
-def start(config_path: str | None, log_level: str | None, no_color: bool) -> None:
+def start(config_path: str | None, port: int | None, log_level: str | None, no_color: bool) -> None:
     """Start the relay server using the config file."""
     import logging
 
@@ -33,6 +35,8 @@ def start(config_path: str | None, log_level: str | None, no_color: bool) -> Non
 
     cfg_path = Path(config_path) if config_path else None
     config = load_config(cfg_path)
+    if port is not None:
+        config = replace(config, port=port)
 
     handler = logging.StreamHandler()
     if no_color:

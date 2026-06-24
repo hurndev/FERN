@@ -34,18 +34,17 @@ const PROTOCOL_TYPES = new Set([
 function channelFromConfig(raw: unknown, position: number): Channel {
   if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
     const record = raw as Record<string, unknown>
+    const id = String(record['id'] ?? '').trim()
     const name = String(record['name'] ?? '').trim()
-    const id = String(record['id'] ?? name).trim()
     const rawPosition = record['position']
     return {
-      id: id || name,
+      id,
       name: name || id,
       description: String(record['description'] ?? ''),
       position: typeof rawPosition === 'number' ? rawPosition : position,
     }
   }
-  const name = String(raw ?? '').trim()
-  return { id: name, name, description: '', position }
+  throw new Error('channel config must be a dict with id and name fields')
 }
 
 function initialiseFromGenesis(genesis: FernEvent): GroupState {
@@ -59,10 +58,11 @@ function initialiseFromGenesis(genesis: FernEvent): GroupState {
       const channel = channelFromConfig(entry, idx)
       if (channel.id) channels.set(channel.id, channel)
     })
-    if (!channels.has('general')) {
-      channels.set('general', { id: 'general', name: 'general', description: '', position: 0 })
+    if (channels.size === 0) {
+      throw new Error('chat.channels must contain at least one channel')
     }
   }
+  const firstChannelId = channels.size > 0 ? channels.keys().next().value! : ''
   return {
     members: new Set([founder]),
     joined: new Set([founder]),
@@ -77,8 +77,8 @@ function initialiseFromGenesis(genesis: FernEvent): GroupState {
     app,
     channels,
     chatSettings: {
-      default_channel: String(c['chat.default_channel'] ?? 'general'),
-      system_channel: String(c['chat.system_channel'] ?? 'general'),
+      default_channel: String(c['chat.default_channel'] ?? firstChannelId),
+      system_channel: String(c['chat.system_channel'] ?? firstChannelId),
     },
   }
 }
@@ -161,12 +161,13 @@ function applyEvent(state: GroupState, event: FernEvent): GroupState {
       break
     case 'chat.channel_create':
       {
+        const id = c['id'] as string
         const name = c['name'] as string
         const duplicateName = [...channels.values()].some((channel) => channel.name === name)
-        if (event.id && name && !duplicateName) {
+        if (id && name && !duplicateName) {
           const position = typeof c['position'] === 'number' ? c['position'] as number : channels.size
-          channels.set(event.id, {
-            id: event.id,
+          channels.set(id, {
+            id,
             name,
             description: (c['description'] as string) ?? '',
             position,
@@ -191,10 +192,12 @@ function applyEvent(state: GroupState, event: FernEvent): GroupState {
     case 'chat.channel_delete':
       {
         const id = c['id'] as string
-        if (id && id !== 'general') {
+        const defaultId = chatSettings.default_channel ?? ''
+        if (id && id !== defaultId) {
           channels.delete(id)
-          if (chatSettings.default_channel === id) chatSettings.default_channel = 'general'
-          if (chatSettings.system_channel === id) chatSettings.system_channel = 'general'
+          const firstRemaining = channels.size > 0 ? channels.keys().next().value! : ''
+          if (chatSettings.default_channel === id) chatSettings.default_channel = firstRemaining
+          if (chatSettings.system_channel === id) chatSettings.system_channel = firstRemaining
         }
       }
       break
@@ -218,11 +221,21 @@ function validateStateDependentSemantics(state: GroupState, event: FernEvent): v
   if (event.type === 'chat.message' && !state.channels.has(event.content['channel'] as string)) {
     throw new Error('message channel does not exist')
   }
-  if (
-    event.type === 'chat.channel_create' &&
-    [...state.channels.values()].some((channel) => channel.name === event.content['name'])
-  ) {
-    throw new Error('channel name already exists')
+  if (event.type === 'chat.channel_create') {
+    const id = event.content['id'] as string
+    if (state.channels.has(id)) {
+      throw new Error('channel id already exists')
+    }
+    if ([...state.channels.values()].some((channel) => channel.name === event.content['name'])) {
+      throw new Error('channel name already exists')
+    }
+  }
+  if (event.type === 'chat.channel_delete') {
+    const id = event.content['id'] as string
+    const defaultId = state.chatSettings.default_channel ?? ''
+    if (id === defaultId) {
+      throw new Error('cannot delete the default channel')
+    }
   }
 }
 

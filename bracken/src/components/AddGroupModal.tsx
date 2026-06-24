@@ -8,7 +8,7 @@ interface Props {
   onCreate: (
     name: string,
     relays: string[],
-    options?: { description?: string; public?: boolean; channels?: string[] },
+    options?: { description?: string; public?: boolean },
   ) => Promise<{ ok: number; total: number; error?: string }>
   onClose: () => void
   initialAddress?: string
@@ -48,7 +48,6 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
   const [description, setDescription] = useState('')
   const [relays, setRelays] = useState(DEFAULT_RELAY_HINTS.join(', '))
   const [isPublic, setIsPublic] = useState(true)
-  const [channelsInput, setChannelsInput] = useState('')
   const [createBusy, setCreateBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createProgress, setCreateProgress] = useState<string[]>([])
@@ -100,14 +99,10 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
     try {
       setCreateProgress((p) => [...p, 'Generating group keypair…'])
       setCreateProgress((p) => [...p, 'Publishing genesis to relays…'])
-      const parsedChannels = channelsInput
-        .split(/[\s,]+/)
-        .map((c) => c.trim())
-        .filter(Boolean)
       const result = await onCreate(
         name.trim(),
         parsedRelays,
-        { description: description.trim(), public: isPublic, channels: parsedChannels },
+        { description: description.trim(), public: isPublic },
       )
       if (result.total === 0) {
         throw new Error('No relays configured.')
@@ -207,19 +202,6 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
                 disabled={createBusy}
                 rows={2}
               />
-            </div>
-
-            <div className={styles.modalField}>
-              <span className={styles.profileLabel}>Channels (OPTIONAL)</span>
-              <input
-                className={styles.modalInput}
-                value={channelsInput}
-                onChange={(e) => setChannelsInput(e.target.value)}
-                placeholder="general"
-                disabled={createBusy}
-                spellCheck={false}
-              />
-
             </div>
 
             <div className={styles.modalField}>

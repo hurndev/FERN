@@ -33,6 +33,12 @@ export function isValidSig(s: string): boolean {
   return isValidHex(s, 128)
 }
 
+export function randomHexId(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return toHex(bytes)
+}
+
 export function truncateId(id: string, prefix = 8): string {
   if (id.length <= prefix + 4) return id
   return `${id.slice(0, prefix)}\u2026${id.slice(-4)}`
