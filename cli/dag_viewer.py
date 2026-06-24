@@ -242,9 +242,9 @@ const typeColors = {
   'moderation':     '#ff5722',  // kick, ban, unban
   'admin':          '#9c27b0',  // admin_add, admin_remove
   'infrastructure': '#00bcd4',  // relay_update, metadata_update
-  'chat_message':   '#2196f3',  // chat.message
-  'chat_social':    '#03a9f4',  // chat.reaction, chat.nickname_set
-  'chat_channel':   '#3f51b5',  // chat.channel_create, chat.channel_update, chat.channel_delete, chat.settings_update
+  'chat_message':   '#1565c0',  // chat.message
+  'chat_social':    '#607d8b',  // chat.reaction, chat.nickname_set
+  'chat_channel':   '#795548',  // chat.channel_create, chat.channel_update, chat.channel_delete, chat.settings_update
   'unknown':        '#ff9800',
 };
 

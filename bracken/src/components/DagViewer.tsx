@@ -29,9 +29,9 @@ const TYPE_COLORS: Record<TypeGroup, string> = {
   moderation: '#ff5722',
   admin: '#9c27b0',
   infrastructure: '#00bcd4',
-  chat_message: '#2196f3',
-  chat_social: '#03a9f4',
-  chat_channel: '#3f51b5',
+  chat_message: '#1565c0',
+  chat_social: '#607d8b',
+  chat_channel: '#795548',
   unknown: '#ff9800',
 }
 
