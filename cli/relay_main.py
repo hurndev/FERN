@@ -114,7 +114,17 @@ def run(ctx: click.Context, log_level: str | None, no_color: bool) -> None:
     from fern.transport.websocket_server import RelayServer
 
     cfg_path = ctx.obj.get("config_path")
-    config = load_config(cfg_path)
+    resolved_path = cfg_path or default_config_file()
+
+    if not resolved_path.exists():
+        click.echo("No config found. Initialising...")
+        store_path = str(resolved_path.parent / "relay.db")
+        config, keypair = init_config(config_path=cfg_path, store=store_path)
+        click.echo(f"  Config: {resolved_path}")
+        click.echo(f"  Pubkey: {keypair.pubkey_hex}")
+        click.echo()
+    else:
+        config = load_config(cfg_path)
 
     handler = logging.StreamHandler()
     if no_color:
