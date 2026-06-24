@@ -392,6 +392,10 @@ Note: `bracken/` is a separate TypeScript SPA (Vite + React) implementing the sa
 - Relay metadata endpoint: HTTP GET on same host/port (wss→https scheme swap), returns JSON with CORS headers
 - `fern-relay --key-file PATH`: load the relay's 64-char hex private key from a file instead of generating one. The default behaviour (no flag) mints a fresh keypair every start, which breaks client trust pins and invalidates outstanding event_receipts — only acceptable for ephemeral/dev use. For a long-lived relay, pass `--key-file` and persist the keyfile outside the container. The `deploy/relay/relay-entrypoint.sh` wrapper handles first-run generation automatically.
 - `fern-relay --trust-config PATH`: load trusted-witness relays, threshold rules, rate limits, and quota from a JSON config. Enables fast `heal_batch` admission. See `deploy/relay/trust-config.example.json`.
+- `fern-relay init`: generate a relay keypair and create the default config file at `~/.fern-relay/config.json`. The keypair is persisted and reused across restarts.
+- `fern-relay config show`: display the current relay configuration.
+- `fern-relay config add-witness <url> <pubkey>`: add a trusted witness relay to the config.
+- `fern-relay config remove-witness <pubkey>`: remove a trusted witness relay from the config.
 
 ### 10.2 Event type names
 
@@ -464,7 +468,8 @@ fern [--no-heal] read 1 [--show-rejected]
 fern [--no-heal] watch 1 [--show-rejected]
 
 # Relay
-fern relay start --port 8765 --store relay.db [--trust-config trust.json]
+fern relay start [--config path.json]
+fern relay init [--config path.json]
 fern relay info ws://localhost:8765
 fern relay revoke-witness <witness-pubkey> --store relay.db
 
@@ -472,5 +477,10 @@ fern relay revoke-witness <witness-pubkey> --store relay.db
 fern dag --db relay.db
 
 # Standalone relay
-fern-relay --port 8765 --store relay.db [--trust-config trust.json] [--key-file path]
+fern-relay [--config path.json]                   # start server (default command)
+fern-relay init [--config path.json]              # generate keypair + create config
+fern-relay run [--log-level DEBUG]                # explicit start
+fern-relay config show                            # display config
+fern-relay config add-witness <url> <pubkey>      # add trusted witness
+fern-relay config remove-witness <pubkey>         # remove trusted witness
 ```

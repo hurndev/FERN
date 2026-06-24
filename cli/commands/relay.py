@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import click
 
@@ -19,31 +20,19 @@ def command() -> None:
 
 
 @command.command()
-@click.option("--port", default=8765, help="Port to listen on")
-@click.option("--name", default="FERN Relay", help="Relay name")
-@click.option("--store", default="relay.db", help="SQLite store path")
-@click.option("--host", default="0.0.0.0", help="Bind address")
-@click.option(
-    "--trust-config",
-    default=None,
-    help="Path to a JSON file configuring trusted witness relays, thresholds, and rate limits.",
-)
-@click.option("--log-level", default="INFO", help="Log level (DEBUG/INFO/WARNING/ERROR)")
+@click.option("--config", "config_path", default=None, help="Path to relay config file.")
+@click.option("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
 @click.option("--no-color", is_flag=True, help="Disable coloured log output")
-def start(
-    port: int,
-    name: str,
-    store: str,
-    host: str,
-    trust_config: str | None,
-    log_level: str,
-    no_color: bool,
-) -> None:
+def start(config_path: str | None, log_level: str | None, no_color: bool) -> None:
+    """Start the relay server using the config file."""
     import logging
 
     from cli.relay_main import _ColorFormatter
-    from fern.crypto.keys import Keypair
+    from fern.relay.config import default_config_file, load_config, load_keypair
     from fern.transport.websocket_server import RelayServer
+
+    cfg_path = Path(config_path) if config_path else None
+    config = load_config(cfg_path)
 
     handler = logging.StreamHandler()
     if no_color:
@@ -53,7 +42,7 @@ def start(
     else:
         handler.setFormatter(_ColorFormatter())
     logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
+        level=getattr(logging, (log_level or "INFO").upper(), logging.INFO),
         handlers=[handler],
     )
     logging.getLogger("websockets").setLevel(logging.WARNING)
@@ -64,23 +53,54 @@ def start(
     MAGENTA = "\033[35m" if not no_color else ""
     GREEN = "\033[32m" if not no_color else ""
 
-    keypair = Keypair.generate()
-    click.echo(f"{BOLD}{MAGENTA}Starting FERN relay{RESET} on {host}:{port}")
-    click.echo(f"  {CYAN}Name:{RESET}     {name}")
-    click.echo(f"  {CYAN}Address:{RESET}  {GREEN}{_display_relay_url(host, port)}{RESET}")
-    click.echo(f"  {CYAN}Store:{RESET}    {store}")
-    click.echo(f"  {CYAN}Log level:{RESET} {log_level.upper()}")
-    click.echo(f"  {CYAN}Pubkey:{RESET}    {GREEN}{keypair.pubkey_hex}{RESET}")
+    try:
+        keypair = load_keypair(config)
+    except FileNotFoundError as e:
+        raise click.ClickException(str(e)) from e
+
+    resolved_path = cfg_path or default_config_file()
+    click.echo(f"{BOLD}{MAGENTA}Starting FERN relay{RESET} on {config.host}:{config.port}")
+    click.echo(f"  {CYAN}Name:{RESET}     {config.name}")
+    click.echo(f"  {CYAN}Address:{RESET}  {GREEN}{_display_relay_url(config.host, config.port)}{RESET}")
+    click.echo(f"  {CYAN}Store:{RESET}    {config.store}")
+    click.echo(f"  {CYAN}Config:{RESET}   {resolved_path}")
+    click.echo(f"  {CYAN}Pubkey:{RESET}   {GREEN}{keypair.pubkey_hex}{RESET}")
+    if config.trusted_witness_relays:
+        click.echo(f"  {CYAN}Witnesses:{RESET} {len(config.trusted_witness_relays)} trusted relay(s)")
 
     server = RelayServer(
-        host=host,
-        port=port,
-        name=name,
+        host=config.host,
+        port=config.port,
+        name=config.name,
         relay_keypair=keypair,
-        store_path=store,
-        trust_config_path=trust_config,
+        store_path=config.store,
+        config=config,
     )
     asyncio.run(server.start())
+
+
+@command.command()
+@click.option("--name", default="FERN Relay", help="Relay name")
+@click.option("--host", default="0.0.0.0", help="Bind address")
+@click.option("--port", default=8765, help="Port to listen on")
+@click.option("--store", default="relay.db", help="SQLite store path")
+@click.option("--config", "config_path", default=None, help="Path to relay config file.")
+def init(name: str, host: str, port: int, store: str, config_path: str | None) -> None:
+    """Generate a relay keypair and create the default config file."""
+    from fern.relay.config import default_config_file, init_config
+
+    cfg_path = Path(config_path) if config_path else None
+    config, keypair = init_config(
+        name=name, host=host, port=port, store=store,
+        config_path=cfg_path,
+    )
+    resolved = cfg_path or default_config_file()
+    click.echo("Relay initialised.")
+    click.echo(f"  Config:  {resolved}")
+    click.echo(f"  Pubkey:  {keypair.pubkey_hex}")
+    click.echo()
+    click.echo("Edit the config file to add trusted witnesses, then run:")
+    click.echo("  fern relay start")
 
 
 @command.command()

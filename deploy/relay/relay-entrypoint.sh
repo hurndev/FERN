@@ -2,21 +2,20 @@
 set -eu
 
 DATA_DIR="${FERN_DATA_DIR:-/data}"
+CONFIG_FILE="$DATA_DIR/config.json"
 KEY_FILE="$DATA_DIR/relay.key"
-DB_FILE="$DATA_DIR/relay.db"
 
 mkdir -p "$DATA_DIR"
 
-if [ ! -f "$KEY_FILE" ]; then
-    echo "[entrypoint] Generating new relay keypair at $KEY_FILE"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "[entrypoint] No config found. Running 'fern-relay init' to generate keypair and default config."
+    fern-relay init --config "$CONFIG_FILE" --store "$DATA_DIR/relay.db"
+    chmod 600 "$KEY_FILE" 2>/dev/null || true
     PUBKEY=$(python3 -c "
-from fern.crypto.keys import Keypair
-k = Keypair.generate()
-with open('$KEY_FILE', 'w') as f:
-    f.write(k.privkey_hex)
-print(k.pubkey_hex)
-")
-    chmod 600 "$KEY_FILE"
+from fern.relay.config import load_config, load_keypair
+c = load_config()
+print(load_keypair(c).pubkey_hex)
+" 2>/dev/null || echo "(unknown)")
     echo "[entrypoint] ============================================"
     echo "[entrypoint] New relay pubkey: $PUBKEY"
     echo "[entrypoint] BACK UP $KEY_FILE."
@@ -24,13 +23,7 @@ print(k.pubkey_hex)
     echo "[entrypoint] which invalidates client trust pins and event_receipts."
     echo "[entrypoint] ============================================"
 else
-    echo "[entrypoint] Loading existing key from $KEY_FILE"
+    echo "[entrypoint] Loading config from $CONFIG_FILE"
 fi
 
-TRUST_CONFIG_ARGS=""
-if [ -n "${FERN_TRUST_CONFIG:-}" ] && [ -f "$FERN_TRUST_CONFIG" ]; then
-    echo "[entrypoint] Trust config: $FERN_TRUST_CONFIG"
-    TRUST_CONFIG_ARGS="--trust-config $FERN_TRUST_CONFIG"
-fi
-
-exec $TRUST_CONFIG_ARGS "$@"
+exec "$@" --config "$CONFIG_FILE"

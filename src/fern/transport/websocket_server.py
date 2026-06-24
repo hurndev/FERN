@@ -146,6 +146,7 @@ class RelayServer:
         relay_keypair: Keypair | None = None,
         store_path: str = "relay.db",
         trust_config_path: str | None = None,
+        config: object | None = None,
     ):
         self.host = host
         self.port = port
@@ -162,7 +163,15 @@ class RelayServer:
         self._hosted_groups: set[str] = set()
         self._sync_locks: dict[str, SyncLockLease] = {}
         self._started = False
-        self._trust_config = load_trust_config(trust_config_path)
+
+        if config is not None:
+            from fern.relay.config import RelayConfig
+            if isinstance(config, RelayConfig):
+                self._trust_config = config.to_trust_config()
+            else:
+                self._trust_config = load_trust_config(trust_config_path)
+        else:
+            self._trust_config = load_trust_config(trust_config_path)
         self._rate_limiter = RateLimiter()
         self._max_message_bytes = self._trust_config.max_message_bytes
 
