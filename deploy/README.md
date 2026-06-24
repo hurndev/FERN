@@ -10,8 +10,8 @@ deploy/
 ├── relay/                # relay-only stack
 │   ├── Dockerfile
 │   ├── compose.yml
-│   ├── relay-entrypoint.sh
-│   └── data/             # bind mount: relay.db + relay.key
+│   ├── trust-config.example.json
+│   └── data/             # bind mount: config.json + relay.db + relay.key
 └── bracken/              # bracken-only stack
     ├── Dockerfile
     ├── compose.yml
@@ -56,10 +56,10 @@ cd deploy/relay && docker compose up -d --build && cd ../..
 cd deploy/bracken && docker compose up -d --build && cd ../..
 ```
 
-The first start of the relay generates a keyfile at `deploy/relay/data/relay.key`
-and prints the new pubkey. **Back this file up** — losing it means a new
-pubkey on the next restart, which invalidates client trust pins and stored
-event_receipts (see spec §10.6).
+The first start of the relay auto-generates a keypair and config at
+`deploy/relay/data/config.json` and `deploy/relay/data/relay.key`.
+**Back up `relay.key`** — losing it means a new pubkey on the next restart,
+which invalidates client trust pins and stored event_receipts (see spec §10.6).
 
 ## Reverse proxy integration
 
@@ -130,24 +130,31 @@ solely on rate-limited slow heal from clients.
 
 To enable it:
 
-1. Copy `deploy/relay/trust-config.example.json` to your data directory (e.g.
-   `deploy/relay/data/trust-config.json`) and fill in the witness relay URLs
-   and pubkeys.
-2. Set `FERN_TRUST_CONFIG=/data/trust-config.json` in `deploy/.env`.
+1. After first start, edit `deploy/relay/data/config.json`.
+2. Add witness relays to the `trusted_witness_relays` array (see
+   `trust-config.example.json` for the full format).
 3. Restart the relay: `cd deploy/relay && docker compose up -d`.
 
-Without a trust config the relay works normally — only slow heal (client-driven
-re-request with rate limits) is available.
+Alternatively, use the CLI inside the container:
 
-See `trust-config.example.json` for all options (thresholds, rate limits, batch
-limits, quotas).
+```bash
+docker exec fern-relay config add-witness wss://peer-relay.example.com/ <pubkey>
+```
+
+Without any trusted witnesses the relay works normally — only slow heal
+(client-driven re-request with rate limits) is available.
+
+All relay settings (port, host, name, store path, thresholds, rate limits,
+quotas) live in the single `config.json` file. Edit it directly or use
+`fern-relay config` commands.
 
 ## Backup
 
-The relay persists two files in `deploy/relay/data/` (or whatever
+The relay persists three files in `deploy/relay/data/` (or whatever
 `FERN_DATA_DIR` points to):
 
-- `relay.db` — SQLite event store (grow over time, back up periodically)
+- `config.json` — relay configuration (edit once, back up)
+- `relay.db` — SQLite event store (grows over time, back up periodically)
 - `relay.key` — relay identity (64-char hex, back up *once* and keep safe)
 
 Bracken is stateless: all client state lives in the user's browser
