@@ -15,6 +15,7 @@ from fern.relay.trust_config import BatchLimits, RateLimit, RelayTrustConfig
 _DEFAULT_CONFIG_DIR = Path(os.environ.get("FERN_RELAY_HOME") or (Path.home() / ".fern-relay"))
 _DEFAULT_CONFIG_FILE = _DEFAULT_CONFIG_DIR / "config.json"
 _DEFAULT_KEY_FILE = _DEFAULT_CONFIG_DIR / "relay.key"
+_DEFAULT_STORE = str(_DEFAULT_CONFIG_DIR / "relay.db")
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ class RelayConfig:
     name: str = "FERN Relay"
     host: str = "0.0.0.0"
     port: int = 8765
-    store: str = "relay.db"
+    store: str = _DEFAULT_STORE
     key_file: str = str(_DEFAULT_KEY_FILE)
 
     trusted_witness_relays: tuple[TrustedWitness, ...] = ()
@@ -93,7 +94,7 @@ def init_config(
     name: str = "FERN Relay",
     host: str = "0.0.0.0",
     port: int = 8765,
-    store: str = "relay.db",
+    store: str = _DEFAULT_STORE,
     config_path: Path | None = None,
     key_path: Path | None = None,
 ) -> tuple[RelayConfig, Keypair]:
@@ -272,7 +273,7 @@ def _parse_config(data: dict[str, Any]) -> RelayConfig:
         name=str(data.get("name", "FERN Relay")),
         host=str(data.get("host", "0.0.0.0")),
         port=int(data.get("port", 8765)),
-        store=str(data.get("store", "relay.db")),
+        store=str(data.get("store", _DEFAULT_STORE)),
         key_file=str(data.get("key_file", str(_DEFAULT_KEY_FILE))),
         trusted_witness_relays=tuple(witnesses),
         threshold=threshold,

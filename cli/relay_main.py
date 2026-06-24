@@ -118,8 +118,7 @@ def run(ctx: click.Context, log_level: str | None, no_color: bool) -> None:
 
     if not resolved_path.exists():
         click.echo("No config found. Initialising...")
-        store_path = str(resolved_path.parent / "relay.db")
-        config, keypair = init_config(config_path=cfg_path, store=store_path)
+        config, keypair = init_config(config_path=cfg_path)
         click.echo(f"  Config: {resolved_path}")
         click.echo(f"  Pubkey: {keypair.pubkey_hex}")
         click.echo()

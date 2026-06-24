@@ -83,15 +83,14 @@ def start(config_path: str | None, log_level: str | None, no_color: bool) -> Non
 @click.option("--name", default="FERN Relay", help="Relay name")
 @click.option("--host", default="0.0.0.0", help="Bind address")
 @click.option("--port", default=8765, help="Port to listen on")
-@click.option("--store", default="relay.db", help="SQLite store path")
 @click.option("--config", "config_path", default=None, help="Path to relay config file.")
-def init(name: str, host: str, port: int, store: str, config_path: str | None) -> None:
+def init(name: str, host: str, port: int, config_path: str | None) -> None:
     """Generate a relay keypair and create the default config file."""
     from fern.relay.config import default_config_file, init_config
 
     cfg_path = Path(config_path) if config_path else None
     config, keypair = init_config(
-        name=name, host=host, port=port, store=store,
+        name=name, host=host, port=port,
         config_path=cfg_path,
     )
     resolved = cfg_path or default_config_file()
