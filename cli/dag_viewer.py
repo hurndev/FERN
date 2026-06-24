@@ -197,6 +197,12 @@ body {
     <select id="group-select" onchange="filterGroup()"></select>
   </div>
   <div class="control-group">
+    <label>Filter</label>
+    <select id="type-filter" onchange="filterByType()">
+      <option value="">All types</option>
+    </select>
+  </div>
+  <div class="control-group">
     <input type="text" id="search-input" placeholder="Search type or author..." oninput="filterSearch()" />
   </div>
 </div>
@@ -230,42 +236,79 @@ let currentGroup = '';
 let searchTerm = '';
 let physicsOn = false;
 
-const typeStyles = {
-  'genesis':        { color: '#e91e63', shape: 'star',     size: 22, label: 'genesis' },
-  'join':           { color: '#4caf50', shape: 'dot',      size: 10, label: 'join' },
-  'leave':          { color: '#9e9e9e', shape: 'dot',      size: 10, label: 'leave' },
-  'invite':         { color: '#ffc107', shape: 'dot',      size: 12, label: 'invite' },
-  'kick':           { color: '#ff5722', shape: 'dot',      size: 12, label: 'kick' },
-  'ban':            { color: '#f44336', shape: 'dot',      size: 12, label: 'ban' },
-  'unban':          { color: '#8bc34a', shape: 'dot',      size: 12, label: 'unban' },
-  'admin_add':      { color: '#9c27b0', shape: 'dot',      size: 12, label: 'admin_add' },
-  'admin_remove':   { color: '#673ab7', shape: 'dot',      size: 12, label: 'admin_remove' },
-  'relay_update':   { color: '#00bcd4', shape: 'dot',      size: 12, label: 'relay_update' },
-  'metadata_update':{ color: '#009688', shape: 'dot',      size: 12, label: 'metadata_update' },
+const typeColors = {
+  'genesis':        '#e91e63',
+  'membership':     '#4caf50',  // join, leave, invite
+  'moderation':     '#ff5722',  // kick, ban, unban
+  'admin':          '#9c27b0',  // admin_add, admin_remove
+  'infrastructure': '#00bcd4',  // relay_update, metadata_update
+  'chat_message':   '#2196f3',  // chat.message
+  'chat_social':    '#03a9f4',  // chat.reaction, chat.nickname_set
+  'chat_channel':   '#3f51b5',  // chat.channel_create, chat.channel_update, chat.channel_delete, chat.settings_update
+  'unknown':        '#ff9800',
 };
-const chatStyle    = { color: '#03a9f4', shape: 'dot', size: 10, label: 'chat' };
-const defaultStyle = { color: '#ff9800', shape: 'dot', size: 10, label: 'unknown' };
 
-function getStyle(t) {
-  if (t.startsWith('chat.')) return chatStyle;
-  return typeStyles[t] || defaultStyle;
+function getTypeGroup(t) {
+  if (t === 'genesis') return 'genesis';
+  if (t === 'join' || t === 'leave' || t === 'invite') return 'membership';
+  if (t === 'kick' || t === 'ban' || t === 'unban') return 'moderation';
+  if (t === 'admin_add' || t === 'admin_remove') return 'admin';
+  if (t === 'relay_update' || t === 'metadata_update') return 'infrastructure';
+  if (t === 'chat.message') return 'chat_message';
+  if (t === 'chat.reaction' || t === 'chat.nickname_set') return 'chat_social';
+  if (t.startsWith('chat.')) return 'chat_channel';
+  return 'unknown';
 }
+
+function getTypeColor(t) {
+  return typeColors[getTypeGroup(t)] || typeColors.unknown;
+}
+
+const groupLabels = {
+  'genesis': 'genesis',
+  'membership': 'membership (join/leave/invite)',
+  'moderation': 'moderation (kick/ban/unban)',
+  'admin': 'admin (add/remove)',
+  'infrastructure': 'infrastructure (relay/metadata)',
+  'chat_message': 'chat messages',
+  'chat_social': 'chat social (reactions/nicknames)',
+  'chat_channel': 'chat channels/settings',
+  'unknown': 'unknown',
+};
+
+let filterType = '';
 
 function typeLabel(t) {
   if (t.length > 22) return t.substring(0, 20) + '..';
   return t;
 }
 
-function buildNodes(events) {
+function getNodeShape(eventType, isRejected) {
+  if (eventType === 'genesis') return 'triangle';
+  if (isRejected) return 'square';
+  return 'dot';
+}
+
+function buildNodes(events, rejectedIds) {
+  const filtered = filterType ? events.filter(e => e.type === filterType) : [];
+  const filteredIds = new Set(filtered.map(e => e.id));
   return events.map(e => {
-    const s = getStyle(e.type);
+    const color = getTypeColor(e.type);
+    const isRejected = rejectedIds.has(e.id);
+    const shape = getNodeShape(e.type, isRejected);
+    const isFiltered = filterType !== '';
+    const isMatch = !isFiltered || filteredIds.has(e.id);
+    const opacity = isFiltered && !isMatch ? 0.15 : 1;
+    const borderWidth = (isFiltered && isMatch) ? 3 : (e.type === 'genesis' ? 2 : 1);
+    const borderColor = (isFiltered && isMatch) ? '#ffc107' : color;
     return {
       id: e.id,
       label: typeLabel(e.type) + '\n' + e.id.substring(0, 8),
-      color: { background: s.color, border: s.color, highlight: { background: s.color, border: '#ffc107' } },
-      font: { color: '#2a2a28', size: 11, face: 'monospace', multi: false, strokeWidth: 3, strokeColor: '#ffffffcc' },
-      shape: s.shape,
-      size: s.size,
+      color: { background: color, border: borderColor, highlight: { background: color, border: '#ffc107' }, opacity: opacity },
+      font: { color: isFiltered && !isMatch ? '#ccc' : '#2a2a28', size: 11, face: 'monospace', multi: false, strokeWidth: 3, strokeColor: '#ffffffcc' },
+      shape: shape,
+      size: e.type === 'genesis' ? 22 : 14,
+      borderWidth: borderWidth,
       title: e.type + '\n' + e.author.substring(0, 16) + '...\n' + new Date(e.ts * 1000).toLocaleString(),
     };
   });
@@ -292,7 +335,12 @@ function render() {
   const eventIds = new Set(events.map(e => e.id));
   const edges = allEdges.filter(ed => eventIds.has(ed.from) && eventIds.has(ed.to));
 
-  const nodes = buildNodes(events);
+  const rejectedIds = new Set();
+  events.forEach(e => {
+    if (e._rejected) rejectedIds.add(e.id);
+  });
+
+  const nodes = buildNodes(events, rejectedIds);
   const edgeData = edges.map(e => ({
     from: e.from, to: e.to, arrows: 'to',
     color: { color: '#ccc', opacity: 0.5, highlight: '#2196f3' },
@@ -335,7 +383,7 @@ function showDetail(id) {
   const e = allEvents.find(ev => ev.id === id);
   if (!e) return;
 
-  const s = getStyle(e.type);
+  const color = getTypeColor(e.type);
   const contentStr = JSON.stringify(e.content, null, 2);
   const tsDate = new Date(e.ts * 1000).toISOString();
 
@@ -355,7 +403,7 @@ function showDetail(id) {
     : e.parents.map(p => '<span style="color:#4a6a8a">' + p.substring(0, 12) + '...</span>').join('<br>');
 
   document.getElementById('event-detail').innerHTML =
-    '<div class="detail-row"><div class="detail-key">Type</div><div class="detail-val"><span class="type-badge" style="background:' + s.color + ';color:#fff">' + e.type + '</span></div></div>' +
+    '<div class="detail-row"><div class="detail-key">Type</div><div class="detail-val"><span class="type-badge" style="background:' + color + ';color:#fff">' + e.type + '</span></div></div>' +
     '<div class="detail-row"><div class="detail-key">ID</div><div class="detail-val mono">' + e.id + '</div></div>' +
     '<div class="detail-row"><div class="detail-key">Author</div><div class="detail-val mono">' + e.author + '</div></div>' +
     '<div class="detail-row"><div class="detail-key">Group</div><div class="detail-val mono">' + e.group + '</div></div>' +
@@ -373,21 +421,28 @@ function showDetail(id) {
 
 function renderLegend() {
   const container = document.getElementById('legend-items');
-  let html = '';
-  for (const [t, s] of Object.entries(typeStyles)) {
-    if (s.shape === 'star') {
-      html += '<div class="legend-row"><span class="legend-star" style="color:' + s.color + '">\u2605</span><span>' + s.label + '</span></div>';
-    } else {
-      html += '<div class="legend-row"><span class="legend-dot" style="background:' + s.color + '"></span><span>' + s.label + '</span></div>';
-    }
+  let html = '<div class="legend-row"><svg width="14" height="14"><polygon points="7,1 13,13 1,13" fill="' + typeColors.genesis + '"/></svg><span>genesis (triangle)</span></div>';
+  for (const [group, label] of Object.entries(groupLabels)) {
+    if (group === 'genesis') continue;
+    const color = typeColors[group];
+    html += '<div class="legend-row"><span class="legend-dot" style="background:' + color + '"></span><span>' + label + '</span></div>';
   }
-  html += '<div class="legend-row"><span class="legend-dot" style="background:' + chatStyle.color + '"></span><span>chat.*</span></div>';
+  html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border-light)">';
+  html += '<div class="legend-row"><svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="#888"/></svg><span>accepted (circle)</span></div>';
+  html += '<div class="legend-row"><svg width="14" height="14"><rect x="1" y="1" width="12" height="12" fill="#888"/></svg><span>rejected (square)</span></div>';
+  html += '<div class="legend-row"><svg width="14" height="14"><polygon points="7,1 13,13 1,13" fill="#888"/></svg><span>genesis (triangle)</span></div>';
+  html += '</div>';
   container.innerHTML = html;
 }
 
 function filterGroup() {
   const sel = document.getElementById('group-select');
   currentGroup = sel.value;
+  render();
+}
+
+function filterByType() {
+  filterType = document.getElementById('type-filter').value;
   render();
 }
 
@@ -425,6 +480,14 @@ function updateFromData(data) {
   if (prevValue && groupKeys.includes(prevValue)) sel.value = prevValue;
   else if (groupKeys.length === 1) sel.value = groupKeys[0];
   currentGroup = sel.value;
+
+  const typeFilter = document.getElementById('type-filter');
+  const types = [...new Set(allEvents.map(e => e.type))].sort();
+  const prevFilter = typeFilter.value;
+  typeFilter.innerHTML = '<option value="">All types</option>' +
+    types.map(t => '<option value="' + t + '">' + t + '</option>').join('');
+  if (prevFilter && types.includes(prevFilter)) typeFilter.value = prevFilter;
+  filterType = typeFilter.value;
 
   document.getElementById('header-info').textContent =
     allEvents.length + ' events, ' + allEdges.length + ' edges, ' + groupKeys.length + ' group(s)';

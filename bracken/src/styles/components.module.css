@@ -1070,6 +1070,22 @@
   padding: 3px 9px;
 }
 
+.dagFilterSelect {
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-primary);
+  outline: none;
+  cursor: pointer;
+}
+
+.dagFilterSelect:focus {
+  border-color: var(--accent);
+}
+
 .dagBody {
   flex: 1;
   min-height: 0;
@@ -1132,6 +1148,12 @@
   flex-shrink: 0;
 }
 
+.dagLegendDivider {
+  height: 1px;
+  background: var(--border);
+  margin: 3px 0;
+}
+
 .dagLegendGenesis {
   background: #dfe9f6;
   border-color: #385f8a;
@@ -1172,7 +1194,15 @@
   margin-bottom: 10px;
   font-size: var(--text-md);
   font-weight: 500;
-  color: var(--accent);
+  color: var(--text-primary);
+}
+
+.dagTypeBadge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: var(--text-xs);
+  font-weight: 600;
 }
 
 .dagInspectorGrid {
