@@ -17,8 +17,7 @@ The main design docs are here:
 - [architecture.md](architecture.md)
 - [python-architecture.md](python-architecture.md)
 - [implementation-notes.md](implementation-notes.md)
-- [relay-storage-spam-problem.md](relay-storage-spam-problem.md)
-- [trusted-relay-heal-proposal.md](trusted-relay-heal-proposal.md)
+- [trusted-heal-plan.md](trusted-heal-plan.md)
 
 ## Current State
 
@@ -55,7 +54,11 @@ export FERN_HOME=/path/to/custom/fern-home
 fern-relay
 ```
 
-The relay prints the address it is listening on. By default it uses the local host and a configurable port.
+On first run, the relay generates a keypair and config at `~/.fern-relay/`. The pubkey is printed on startup. To add trusted witnesses for fast heal:
+
+```bash
+fern-relay config add-witness wss://peer-relay.example.com/ <pubkey>
+```
 
 ### CLI Client
 

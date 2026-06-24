@@ -306,7 +306,7 @@ The hardest problem in the protocol. Solving it perfectly would require consensu
 
 The threat model is explicitly scoped to **1-2 misbehaving relays** in a set of curated, trusted relays. All-relays-collude censorship is acknowledged as undetectable and out of scope.
 
-Five mechanisms, stacked:
+Six mechanisms, stacked:
 
 ### 9.1 Event Receipts
 
@@ -394,6 +394,8 @@ Clients coordinate this repair with an advisory per-group sync lock. If another 
 
 For efficiency, clients use `sync_ids` to fetch only event IDs and compute set differences. If group_status `set_hash` already matches the local known set, no event transfer is needed. The lagging relay either integrates the healed events (its next group_status converges) or refuses (caught as persistently divergent and flagged in the trust ledger).
 
+**Two heal paths:** The basic `heal` action is rate-limited and available to any client — it is the fallback for events without enough trusted witnesses. The `heal_batch` action (Section 9.6) is the fast path, gated by trusted-witness quorum. Clients attempt fast heal first when beneficial (enough events to justify the challenge overhead) and fall back to slow heal for rejects or when the relay doesn't support trusted heal.
+
 ### 9.5 Fraud Proofs
 
 A fraud proof is a standalone object (not an event in the DAG) published when a client catches a relay misbehaving. It contains:
@@ -416,7 +418,26 @@ Fraud proofs are published to relays (for storage and gossip) or shared out-of-b
 
 Uses local trust ledgers for relay reputation. Cross-client reputation propagation (fraud proofs as first-class gossiped objects with network-wide effect) is deferred.
 
-### 9.6 What This Catches — and What It Doesn't
+### 9.6 Trusted Heal
+
+The basic `heal` action is rate-limited and anonymous — any client can use it to push events to a relay, which creates a spam vector. Trusted heal adds a gated fast-heal path (`heal_batch`) where the receiving relay requires evidence from relays it trusts before admitting events.
+
+The receiving relay maintains a local, operator-configured set of **trusted witness relays**. When a client wants to fast-heal events to a relay:
+
+1. Client requests a signed `heal_challenge` from the receiving relay, listing the event IDs and the receiver's trusted witnesses.
+2. Client asks each trusted witness for a signed `group_host_attestation` (does it host the group?) and `inventory_attestation` (does it have the events?).
+3. Client submits the events plus all attestations to the receiving relay via `heal_batch`.
+4. The relay admits each event only if enough trusted witnesses attest to having it (quorum scales with denominator size: default `max(2, ceil(2n/3))`).
+5. Missing host attestations count as `hosts: true` (fail-closed — the client cannot shrink the denominator by omitting inconvenient relays).
+6. Conflicting evidence from the same relay (e.g. `hosts: false` plus an inventory attestation) is ignored entirely.
+
+This closes the heal spam loophole without requiring relay-to-relay communication — the client is the courier for all signed evidence. Groups with only one trusted witness use slow rate-limited heal; fast heal requires at least two.
+
+The trust set is local to each relay, directional, and independent of group state — an attacker-created group cannot choose which relays the receiving relay trusts.
+
+After `heal_batch` admits events, the relay promptly issues a fresh `group_status` so subscribers see the store change. Admission provenance (which witnesses vouched for each event) is recorded for audit and trust revocation cleanup.
+
+### 9.7 What This Catches — and What It Doesn't
 
 **Caught (cryptographically, against 1-2 bad relays):**
 
@@ -508,6 +529,8 @@ When a relay receives an event it must:
 4. Return a signed event_receipt to the publishing client
 
 Relays must store events regardless of whether they hold the parent events. Relays must not apply authorisation rules — that is the client's responsibility. Relays store all events with valid signatures and valid structure, including events that clients would reject (e.g., a non-admin attempting to kick a user).
+
+For `heal_batch` actions, the relay additionally verifies the `heal_challenge` signature and expiry, all attestation signatures, the threshold quorum, and per-event size limits (32 KiB per event). Events admitted via `heal_batch` are stored without broadcasting to subscribers. The relay records admission provenance (which witness pubkeys admitted each event) for audit and trust revocation.
 
 ### 11.4 Relay Garbage Collection
 
@@ -703,6 +726,7 @@ The protocol (FERN) defines:
 - The causal DAG (parents, heads, gaps, healing)
 - Group state machine (membership, root authority, relays, metadata)
 - Completeness layer (event_receipts, group_statuses, monitoring, heal, fraud proofs)
+- Trusted-heal attestation objects (`heal_challenge`, `group_host_attestation`, `inventory_attestation`) and admission logic
 - Relay protocol (WebSocket actions, relay validation, GC)
 - Discovery and migration
 - Protocol-level event types (genesis, join, leave, invite, kick, ban, unban, admin_add, admin_remove, relay_update, metadata_update)
@@ -732,6 +756,7 @@ This separation lets multiple apps share the same infrastructure: identity, rela
 | Split-view attack (relay serves different state to different clients) | Signed group_statuses make divergence provable when clients compare notes. Defeated probabilistically by vantage diversity. |
 | Relay shuts down | Group continues on remaining relays; new relays can stand up anytime |
 | Relay lags behind | Detected via group_status comparison; self-healed via heal from sibling relays |
+| Anonymous client uses `heal` to spam a relay with events | Trusted heal (`heal_batch`) gates fast admission behind witness quorum; slow `heal` remains rate-limited |
 | Founder issues bad bans/admin decisions | Founder trust is accepted at join time. Bans are render filters; underlying log stays complete. |
 | All relays a client uses collude to suppress a message and its descendants | Censorship undetectable. Fundamental; out of scope without consensus. |
 | IP exposure between members | No client-to-client connections; only relays see client IPs |
@@ -769,4 +794,4 @@ These are documented as upgrade paths, not abandoned. The current design's goal 
 
 ## 18. The Whole Picture in One Paragraph
 
-Signed events in a public append-only log, replicated across multiple interchangeable canonical relays that anyone can run. Events reference recent connected heads, forming a causal DAG that propagates existence proofs for free through normal chat activity without letting disconnected events poison future history. Relays sign event_receipts when they accept events, committing to having received them; relays periodically sign group_statuses committing to their full known set. Every client cross-checks relays against each other for free — monitors aren't a separate role, they're a property of clients running the audit pass on every group_status push. Heal self-heals gaps automatically: any reader who notices a gap fetches the missing event and republishes it. Admin actions like bans are themselves events in the log, never deletions, so moderation is a render-time filter rather than a storage-level operation. The protocol is general-purpose: it handles transport, identity, group management, and completeness; applications define their own event types and content schemas on top. The result is a protocol for public group chats that can't be forged, can't be silently censored (provably if attempted by 1-2 bad relays in a curated set), can't be shut down, and hides member IPs by virtue of never connecting members directly.
+Signed events in a public append-only log, replicated across multiple interchangeable canonical relays that anyone can run. Events reference recent connected heads, forming a causal DAG that propagates existence proofs for free through normal chat activity without letting disconnected events poison future history. Relays sign event_receipts when they accept events, committing to having received them; relays periodically sign group_statuses committing to their full known set. Every client cross-checks relays against each other for free — monitors aren't a separate role, they're a property of clients running the audit pass on every group_status push. Heal self-heals gaps automatically: any reader who notices a gap fetches the missing event and republishes it. Trusted heal gates fast admission behind a witness quorum, preventing anonymous clients from using heal as an unlimited spam vector. Admin actions like bans are themselves events in the log, never deletions, so moderation is a render-time filter rather than a storage-level operation. The protocol is general-purpose: it handles transport, identity, group management, and completeness; applications define their own event types and content schemas on top. The result is a protocol for public group chats that can't be forged, can't be silently censored (provably if attempted by 1-2 bad relays in a curated set), can't be shut down, and hides member IPs by virtue of never connecting members directly.
