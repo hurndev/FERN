@@ -432,6 +432,7 @@ export function useBracken() {
   const reconnectRef = useRef<((url: string) => void) | null>(null)
   const healInFlightRef = useRef<Set<string>>(new Set())
   const healRetryGateRef = useRef<Map<string, number>>(new Map())
+  const lastLocalEventRef = useRef<Map<string, string>>(new Map())
 
   // Derive the full relay list from the active group's canonical relays, merged
   // with live connection status. This ensures all canonical relays are always
@@ -693,6 +694,9 @@ export function useBracken() {
 
   const getPublishParents = useCallback(
     async (groupPubkey: string): Promise<string[]> => {
+      const pendingId = lastLocalEventRef.current.get(groupPubkey)
+      if (pendingId) return [pendingId]
+
       const tips = await getTips(groupPubkey, getFailedDeliveryIds())
       if (tips.length > 0) return tips
 
@@ -918,6 +922,7 @@ export function useBracken() {
       }
       const event = await buildEvent(input, identity)
       await putEvent(event)
+      lastLocalEventRef.current.set(activeGroup, event.id)
       log.sessionPublish(activeGroup, 'chat.message', event.id)
       setMessageDeliveries((prev) => ({
         ...prev,
@@ -936,6 +941,7 @@ export function useBracken() {
       void (async () => {
         const result = await publishToGroupRelays(event, group.relays)
         log.sessionPublishResult(activeGroup, event.id, result.ok, result.total)
+        lastLocalEventRef.current.delete(activeGroup)
         setMessageDeliveries((prev) => {
           const next = { ...prev }
           if (result.ok >= 1) {
@@ -1035,6 +1041,7 @@ export function useBracken() {
       }
       const event = await buildEvent(input, identity)
       await putEvent(event)
+      lastLocalEventRef.current.set(activeGroup, event.id)
 
       const updated = await getGroupEvents(activeGroup)
       setEvents(updated)
@@ -1062,6 +1069,7 @@ export function useBracken() {
             }
           }),
         )
+        lastLocalEventRef.current.delete(activeGroup)
       })()
     },
     [identity, activeGroup, groups, getPublishParents],
@@ -1144,6 +1152,7 @@ export function useBracken() {
       }
       const event = await buildEvent(input, identity)
       await putEvent(event)
+      lastLocalEventRef.current.set(activeGroup, event.id)
 
       const updated = await getGroupEvents(activeGroup)
       setEvents(updated)
@@ -1163,6 +1172,7 @@ export function useBracken() {
             }
           }),
         )
+        lastLocalEventRef.current.delete(activeGroup)
       })()
     },
     [identity, activeGroup, groups, getPublishParents, setDefaultNickname],

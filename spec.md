@@ -192,7 +192,9 @@ it. Semantic validation includes:
    event MUST have all of its parents present in the client's accepted DAG.
    If any parent is absent, disconnected, or semantically rejected, the event is
    stored but not accepted.
-3. **Authorisation validation**: the event author MUST be authorised at this
+3. **Timestamp validation**: a non-genesis event's `ts` MUST be greater than or
+   equal to the maximum `ts` among its parents.
+4. **Authorisation validation**: the event author MUST be authorised at this
    point in the accepted DAG (Section 8.5).
 
 Events that fail semantic validation MUST be retained by clients as rejected
@@ -744,6 +746,12 @@ State is initialised from the `genesis` event:
 Accepted events are applied in **(ts, id)** order: ascending `ts`, with ties broken by lexicographic comparison of the `id` field (ascending). This is the **canonical linearisation order**.
 
 The authorisation check for an event is performed against the state *immediately before that event in canonical linearisation order* (i.e., the state resulting from applying all earlier events).
+
+When two events share the same timestamp and one references the other as a
+parent, the `(ts, id)` ordering may place the child before the parent.
+Implementations MUST handle this by re-evaluating rejected events after the
+initial pass: if a rejected event's parents are all now accepted, re-validate
+and accept it. Repeat until no more events are accepted (a fixed point).
 
 Disconnected events and semantically rejected events are stored but excluded
 from canonical linearisation. A disconnected event may later become accepted

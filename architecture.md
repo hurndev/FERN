@@ -265,6 +265,8 @@ For each subsequent connected event in timestamp order:
 | `chat.channel_delete` | Remove a non-`general` channel by stable channel ID |
 | `chat.settings_update` | Update chat-wide settings such as default/system channel |
 
+When two events share the same timestamp and one's ID sorts before its parent's ID, the child will be rejected in the initial pass because its parent hasn't been applied yet. Implementations must re-evaluate rejected events in a convergence loop: after the initial pass, any rejected event whose parents are all now accepted must be re-validated and accepted if it passes. Repeat until no more events are accepted.
+
 ### 8.3 Conflict Resolution
 
 When two events have the same timestamp and affect the same state field, the event with the lexicographically greater `id` wins. This rule is deterministic and produces the same result on all clients regardless of event arrival order.

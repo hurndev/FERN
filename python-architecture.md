@@ -263,7 +263,7 @@ def apply_event(state: GroupState, event: Event) -> GroupState: ...
 def is_authorised(state: GroupState, event: Event) -> bool: ...
 ```
 
-State is folded in `(ts, id)` canonical linearisation order over the genesis-connected event set only. Events with missing parents are retained in storage for gap healing, but they must not be applied to state until their complete parent chain connects to genesis. Conflict resolution: events at same `ts` are ordered by ascending `id`. Last-writer-wins per field.
+State is folded in `(ts, id)` canonical linearisation order over the genesis-connected event set only. Events with missing parents are retained in storage for gap healing, but they must not be applied to state until their complete parent chain connects to genesis. Conflict resolution: events at same `ts` are ordered by ascending `id`. Last-writer-wins per field. When same-timestamp events have parent-child relationships and the child's ID sorts before the parent's, the child is rejected in the initial pass. A convergence loop re-evaluates rejected events after the main pass, accepting any whose parents are now all accepted, until a fixed point is reached.
 
 Ban semantics: a ban persists until `unban` or `until` expiry. A banned user cannot `join`. A `kick` does not ban — user can re-join. A ban or kick removes protocol admin authority from the target.
 

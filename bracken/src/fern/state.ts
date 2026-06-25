@@ -246,7 +246,7 @@ export function deriveGroupState(events: FernEvent[]): {
   acceptedIds: Set<string>
   genesis: FernEvent | null
 } {
-  const rejected: FernEvent[] = []
+  let rejected: FernEvent[] = []
   const genesisEvents = events.filter((e) => e.type === 'genesis' && e.parents.length === 0)
   let genesis: FernEvent | null = null
   for (const event of genesisEvents) {
@@ -272,9 +272,18 @@ export function deriveGroupState(events: FernEvent[]): {
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     })
 
+  const eventTs = new Map<string, number>()
+  for (const e of events) eventTs.set(e.id, e.ts)
+
   for (const event of nonGenesis) {
     if (!event.parents.every((parent) => acceptedIds.has(parent))) {
       log.stateEventRejected(event.type, event.id, 'missing parent(s)')
+      rejected.push(event)
+      continue
+    }
+    const maxParentTs = Math.max(...event.parents.map((p) => eventTs.get(p) ?? 0))
+    if (event.ts < maxParentTs) {
+      log.stateEventRejected(event.type, event.id, `ts ${event.ts} < max parent ts ${maxParentTs}`)
       rejected.push(event)
       continue
     }
@@ -293,6 +302,38 @@ export function deriveGroupState(events: FernEvent[]): {
     }
     state = applyEvent(state, event)
     acceptedIds.add(event.id)
+  }
+
+  let changed = true
+  while (changed) {
+    changed = false
+    const stillRejected: FernEvent[] = []
+    for (const event of rejected) {
+      if (!event.parents.every((parent) => acceptedIds.has(parent))) {
+        stillRejected.push(event)
+        continue
+      }
+      const maxParentTs = Math.max(...event.parents.map((p) => eventTs.get(p) ?? 0))
+      if (event.ts < maxParentTs) {
+        stillRejected.push(event)
+        continue
+      }
+      try {
+        validateEventSemantics(event)
+        validateStateDependentSemantics(state, event)
+      } catch {
+        stillRejected.push(event)
+        continue
+      }
+      if (!isAuthorised(state, event)) {
+        stillRejected.push(event)
+        continue
+      }
+      state = applyEvent(state, event)
+      acceptedIds.add(event.id)
+      changed = true
+    }
+    rejected = stillRejected
   }
 
   return { state, rejected, acceptedIds, genesis }

@@ -197,10 +197,16 @@ def derive_group_state_details(events: Iterable[Event]) -> tuple[GroupState, lis
     non_genesis = [e for e in event_list if e.type != ProtocolTypes.GENESIS]
     non_genesis.sort(key=lambda e: (e.ts, e.id))
 
+    event_ts = {e.id: e.ts for e in event_list if e.id}
+
     rejected: list[Event] = []
 
     for event in non_genesis:
         if any(parent not in accepted_ids for parent in event.parents):
+            rejected.append(event)
+            continue
+        max_parent_ts = max((event_ts.get(p, 0) for p in event.parents), default=0)
+        if event.ts < max_parent_ts:
             rejected.append(event)
             continue
         try:
@@ -215,6 +221,33 @@ def derive_group_state_details(events: Iterable[Event]) -> tuple[GroupState, lis
         state = apply_event(state, event)
         if event.id:
             accepted_ids.add(event.id)
+
+    changed = True
+    while changed:
+        changed = False
+        still_rejected: list[Event] = []
+        for event in rejected:
+            if any(parent not in accepted_ids for parent in event.parents):
+                still_rejected.append(event)
+                continue
+            max_parent_ts = max((event_ts.get(p, 0) for p in event.parents), default=0)
+            if event.ts < max_parent_ts:
+                still_rejected.append(event)
+                continue
+            try:
+                validate_event_semantics(event)
+                _validate_state_dependent_semantics(state, event)
+            except SemanticValidationError:
+                still_rejected.append(event)
+                continue
+            if not is_authorised(state, event):
+                still_rejected.append(event)
+                continue
+            state = apply_event(state, event)
+            if event.id:
+                accepted_ids.add(event.id)
+            changed = True
+        rejected = still_rejected
 
     return state, rejected, frozenset(accepted_ids)
 
