@@ -1,4 +1,5 @@
 import type { FernEvent } from './events'
+import { log } from './logger'
 import type {
   HealChallenge,
   GroupHostAttestation,
@@ -53,6 +54,8 @@ export class RelayClient {
   private group_statusCallbacks: GroupStatusCallback[] = []
   private closeCallbacks: (() => void)[] = []
   private connected = false
+  private pendingResolvers = new Map<string, (msg: Record<string, unknown>) => void>()
+  private requestQueues = new Map<string, { queue: Array<() => void>; processing: boolean }>()
 
   constructor(url: string) {
     this.url = url
@@ -63,18 +66,30 @@ export class RelayClient {
     if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
       wsUrl = `ws://${wsUrl}`
     }
+    log.relayConnect(wsUrl)
     this.ws = new WebSocket(wsUrl)
     return new Promise((resolve, reject) => {
       if (!this.ws) return reject(new Error('WebSocket creation failed'))
       this.ws.onopen = () => {
         this.connected = true
+        log.relayConnected(wsUrl, this.relayPubkey)
         resolve()
       }
       this.ws.onerror = () => {
-        if (!this.connected) reject(new Error(`Failed to connect to ${wsUrl}`))
+        if (!this.connected) {
+          log.relayConnectFailed(wsUrl, 'WebSocket error')
+          reject(new Error(`Failed to connect to ${wsUrl}`))
+        }
       }
       this.ws.onclose = () => {
         this.connected = false
+        this.pendingResolvers.clear()
+        for (const [, entry] of this.requestQueues) {
+          for (const resolve of entry.queue) resolve()
+          entry.queue = []
+          entry.processing = false
+        }
+        log.relayClosed(wsUrl)
         this.closeCallbacks.forEach((cb) => cb())
       }
       this.ws.onmessage = (ev) => this.handleMessage(ev)
@@ -88,7 +103,14 @@ export class RelayClient {
   async close(): Promise<void> {
     this.connected = false
     this.closeCallbacks = []
+    for (const [, entry] of this.requestQueues) {
+      for (const resolve of entry.queue) resolve()
+      entry.queue = []
+      entry.processing = false
+    }
+    this.requestQueues.clear()
     if (this.ws) {
+      log.relayClosed(this.url)
       this.ws.close()
       this.ws = null
     }
@@ -118,17 +140,48 @@ export class RelayClient {
       this.pendingResolvers.get(type) ??
       (type === 'error' ? [...this.pendingResolvers.values()][0] : undefined)
     if (resolver) {
+      log.relayResponse(this.url, type)
       resolver(msg)
     } else if (type === 'event') {
       const event = msg['event'] as FernEvent
+      log.relayPushEvent(this.url, event.type, event.id)
       this.eventCallbacks.forEach((cb) => cb(event))
     } else if (type === 'group_status') {
       const att = msg['group_status'] as GroupStatus
+      log.relayPushGroupStatus(this.url, att.group, att.set_hash, att.count)
       this.group_statusCallbacks.forEach((cb) => cb(att))
     }
   }
 
-  private pendingResolvers = new Map<string, (msg: Record<string, unknown>) => void>()
+  private enqueueRequest(queueKey: string): Promise<void> {
+    let entry = this.requestQueues.get(queueKey)
+    if (!entry) {
+      entry = { queue: [], processing: false }
+      this.requestQueues.set(queueKey, entry)
+    }
+
+    if (!entry.processing) {
+      entry.processing = true
+      return Promise.resolve()
+    }
+
+    return new Promise<void>((resolve) => {
+      entry!.queue.push(resolve)
+      log.relayQueueEnqueue(this.url, queueKey, entry!.queue.length)
+    })
+  }
+
+  private dequeueRequest(queueKey: string): void {
+    const entry = this.requestQueues.get(queueKey)
+    if (!entry) return
+
+    const next = entry.queue.shift()
+    if (next) {
+      next()
+    } else {
+      entry.processing = false
+    }
+  }
 
   private async sendRequest<T>(
     expectedType: string | string[],
@@ -136,51 +189,74 @@ export class RelayClient {
     extra?: Record<string, unknown>,
     timeout = 10000,
   ): Promise<T> {
-    if (!this.ws || !this.isConnected) throw new Error('Not connected')
-    return new Promise<T>((resolve, reject) => {
-      const expectedTypes = Array.isArray(expectedType) ? expectedType : [expectedType]
-      const cleanup = () => {
-        for (const type of expectedTypes) this.pendingResolvers.delete(type)
-      }
-      const timer = setTimeout(() => {
-        cleanup()
-        reject(new Error(`Timeout waiting for ${expectedTypes.join(' or ')}`))
-      }, timeout)
-      const resolver = (msg: Record<string, unknown>) => {
-        clearTimeout(timer)
-        cleanup()
-        if (msg['type'] === 'error') {
-          reject(new Error(msg['message'] as string))
-        } else {
-          resolve(msg as unknown as T)
+    const expectedTypes = Array.isArray(expectedType) ? expectedType : [expectedType]
+    const queueKey = expectedTypes[0]
+
+    const enqueuedAt = Date.now()
+    await this.enqueueRequest(queueKey)
+    const waitMs = Date.now() - enqueuedAt
+    if (waitMs > 0) log.relayQueueDequeue(this.url, queueKey, waitMs)
+
+    if (!this.ws || !this.isConnected) {
+      this.dequeueRequest(queueKey)
+      throw new Error('Not connected')
+    }
+
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        const cleanup = () => {
+          for (const type of expectedTypes) this.pendingResolvers.delete(type)
         }
-      }
-      for (const type of expectedTypes) this.pendingResolvers.set(type, resolver)
-      const payload = { action, ...extra }
-      this.ws!.send(JSON.stringify(payload))
-    })
+        const timer = setTimeout(() => {
+          cleanup()
+          log.relayTimeout(this.url, expectedTypes.join('/'), timeout)
+          reject(new Error(`Timeout waiting for ${expectedTypes.join(' or ')}`))
+        }, timeout)
+        const resolver = (msg: Record<string, unknown>) => {
+          clearTimeout(timer)
+          cleanup()
+          if (msg['type'] === 'error') {
+            log.relayError(this.url, `error response to ${action}: ${msg['message']}`)
+            reject(new Error(msg['message'] as string))
+          } else {
+            resolve(msg as unknown as T)
+          }
+        }
+        for (const type of expectedTypes) this.pendingResolvers.set(type, resolver)
+        const payload = { action, ...extra }
+        log.relaySend(this.url, action)
+        this.ws!.send(JSON.stringify(payload))
+      })
+    } finally {
+      this.dequeueRequest(queueKey)
+    }
   }
 
   async subscribe(group: string): Promise<void> {
     if (!this.ws || !this.isConnected) throw new Error('Not connected')
+    log.relaySend(this.url, 'subscribe', `group=${group.slice(0, 12)}…`)
     this.ws.send(JSON.stringify({ action: 'subscribe', group }))
   }
 
   async unsubscribe(group: string): Promise<void> {
     if (!this.ws || !this.isConnected) throw new Error('Not connected')
+    log.relaySend(this.url, 'unsubscribe', `group=${group.slice(0, 12)}…`)
     this.ws.send(JSON.stringify({ action: 'unsubscribe', group }))
   }
 
   async publish(event: FernEvent): Promise<EventReceipt> {
+    log.relaySend(this.url, 'publish', `${event.type} ${event.id.slice(0, 12)}…`)
     const msg = await this.sendRequest<{ event_receipt: EventReceipt }>(
       'event_receipt',
       'publish',
       { event },
     )
+    log.relayResponse(this.url, 'event_receipt', `for ${event.id.slice(0, 12)}…`)
     return msg.event_receipt
   }
 
   async heal(event: FernEvent): Promise<EventReceipt> {
+    log.relaySend(this.url, 'heal', `${event.type} ${event.id.slice(0, 12)}…`)
     const msg = await this.sendRequest<{ event_receipt: EventReceipt }>(
       'event_receipt',
       'heal',
@@ -190,6 +266,7 @@ export class RelayClient {
   }
 
   async get(eventId: string): Promise<FernEvent | null> {
+    log.relaySend(this.url, 'get', `id=${eventId.slice(0, 12)}…`)
     try {
       const msg = await this.sendRequest<{ event?: FernEvent }>(
         'event',
@@ -203,54 +280,76 @@ export class RelayClient {
   }
 
   async sync(group: string, sinceTs?: number): Promise<FernEvent[]> {
-    if (!this.ws || !this.isConnected) throw new Error('Not connected')
-    return new Promise((resolve, reject) => {
-      const events: FernEvent[] = []
-      const cleanup = () => {
-        this.pendingResolvers.delete('event')
-        this.pendingResolvers.delete('sync_complete')
-      }
-      const timer = setTimeout(() => {
-        cleanup()
-        reject(new Error('Sync timeout'))
-      }, 30000)
-      const resolver = (msg: Record<string, unknown>) => {
-        if (msg['type'] === 'event') {
-          events.push(msg['event'] as FernEvent)
-        } else if (msg['type'] === 'sync_complete') {
-          clearTimeout(timer)
-          cleanup()
-          resolve(events)
-        } else if (msg['type'] === 'error') {
-          clearTimeout(timer)
-          cleanup()
-          reject(new Error(msg['message'] as string))
+    const queueKey = 'event'
+    const enqueuedAt = Date.now()
+    await this.enqueueRequest(queueKey)
+    const waitMs = Date.now() - enqueuedAt
+    if (waitMs > 0) log.relayQueueDequeue(this.url, queueKey, waitMs)
+
+    if (!this.ws || !this.isConnected) {
+      this.dequeueRequest(queueKey)
+      throw new Error('Not connected')
+    }
+
+    log.relaySend(this.url, 'sync', `group=${group.slice(0, 12)}…${sinceTs !== undefined ? ` since=${sinceTs}` : ''}`)
+    try {
+      return await new Promise<FernEvent[]>((resolve, reject) => {
+        const events: FernEvent[] = []
+        const cleanup = () => {
+          this.pendingResolvers.delete('event')
+          this.pendingResolvers.delete('sync_complete')
         }
-      }
-      const ws = this.ws
-      if (!ws) {
-        clearTimeout(timer)
-        reject(new Error('Not connected'))
-        return
-      }
-      this.pendingResolvers.set('event', resolver)
-      this.pendingResolvers.set('sync_complete', resolver)
-      const payload: Record<string, unknown> = { action: 'sync', group }
-      if (sinceTs !== undefined) payload['since'] = sinceTs
-      ws.send(JSON.stringify(payload))
-    })
+        const timer = setTimeout(() => {
+          cleanup()
+          log.relayTimeout(this.url, 'sync_complete', 30000)
+          reject(new Error('Sync timeout'))
+        }, 30000)
+        const resolver = (msg: Record<string, unknown>) => {
+          if (msg['type'] === 'event') {
+            events.push(msg['event'] as FernEvent)
+          } else if (msg['type'] === 'sync_complete') {
+            clearTimeout(timer)
+            cleanup()
+            log.relayResponse(this.url, 'sync_complete', `${events.length} events`)
+            resolve(events)
+          } else if (msg['type'] === 'error') {
+            clearTimeout(timer)
+            cleanup()
+            log.relayError(this.url, `sync error: ${msg['message']}`)
+            reject(new Error(msg['message'] as string))
+          }
+        }
+        const ws = this.ws
+        if (!ws) {
+          clearTimeout(timer)
+          reject(new Error('Not connected'))
+          return
+        }
+        this.pendingResolvers.set('event', resolver)
+        this.pendingResolvers.set('sync_complete', resolver)
+        const payload: Record<string, unknown> = { action: 'sync', group }
+        if (sinceTs !== undefined) payload['since'] = sinceTs
+        ws.send(JSON.stringify(payload))
+      })
+    } finally {
+      this.dequeueRequest(queueKey)
+    }
   }
 
   async syncIds(group: string): Promise<string[]> {
+    log.relaySend(this.url, 'sync_ids', `group=${group.slice(0, 12)}…`)
     const msg = await this.sendRequest<{ ids?: string[] }>(
       'ids',
       'sync_ids',
       { group },
     )
-    return msg.ids ?? []
+    const ids = msg.ids ?? []
+    log.relayResponse(this.url, 'ids', `${ids.length} ids`)
+    return ids
   }
 
   async syncLock(group: string, clientId: string): Promise<SyncLockResult> {
+    log.relaySend(this.url, 'sync_lock', `group=${group.slice(0, 12)}…`)
     const msg = await this.sendRequest<
       { type: string; ttl?: number; expires_in?: number }
     >(['sync_lock_granted', 'sync_lock_denied'], 'sync_lock', {
@@ -258,16 +357,20 @@ export class RelayClient {
       client_id: clientId,
     })
     if (msg.type === 'sync_lock_granted') {
+      log.relayResponse(this.url, 'sync_lock_granted', `ttl=${msg.ttl}`)
       return { granted: true, ttl: msg.ttl }
     }
+    log.relayResponse(this.url, 'sync_lock_denied', `expires_in=${msg.expires_in}`)
     return { granted: false, expiresIn: msg.expires_in }
   }
 
   async syncUnlock(group: string, clientId: string): Promise<void> {
+    log.relaySend(this.url, 'sync_unlock', `group=${group.slice(0, 12)}…`)
     await this.sendRequest('ok', 'sync_unlock', { group, client_id: clientId })
   }
 
   async requestGroupStatus(group: string): Promise<GroupStatus> {
+    log.relaySend(this.url, 'group_status', `group=${group.slice(0, 12)}…`)
     const msg = await this.sendRequest<{ group_status: GroupStatus }>(
       'group_status',
       'group_status',
@@ -280,21 +383,30 @@ export class RelayClient {
     const metaUrl = this.url
       .replace('wss://', 'https://')
       .replace('ws://', 'http://')
-    const resp = await fetch(metaUrl)
-    const data = await resp.json()
-    this.relayPubkey = data.pubkey ?? ''
-    return {
-      name: data.name ?? '',
-      description: data.description ?? '',
-      pubkey: data.pubkey ?? '',
-      software: data.software ?? '',
-      version: data.version ?? '',
-      groups: data.groups ?? [],
-      retention: data.retention?.default ?? 'full',
+    log.relaySend(this.url, 'fetchMetadata', metaUrl)
+    try {
+      const resp = await fetch(metaUrl)
+      const data = await resp.json()
+      this.relayPubkey = data.pubkey ?? ''
+      const meta = {
+        name: data.name ?? '',
+        description: data.description ?? '',
+        pubkey: data.pubkey ?? '',
+        software: data.software ?? '',
+        version: data.version ?? '',
+        groups: data.groups ?? [],
+        retention: data.retention?.default ?? 'full',
+      }
+      log.relayMetadata(this.url, meta)
+      return meta
+    } catch (err) {
+      log.relayMetadataFailed(this.url, err)
+      throw err
     }
   }
 
   async getHealChallenge(group: string, ids: string[]): Promise<HealChallenge> {
+    log.relaySend(this.url, 'get_heal_challenge', `group=${group.slice(0, 12)}… ${ids.length} ids`)
     const msg = await this.sendRequest<{ heal_challenge: HealChallenge }>(
       'heal_challenge',
       'get_heal_challenge',
@@ -304,6 +416,7 @@ export class RelayClient {
   }
 
   async getGroupHostAttestation(challenge: HealChallenge): Promise<GroupHostAttestation> {
+    log.relaySend(this.url, 'get_group_host_attestation', `challenge=${challenge.group.slice(0, 12)}…`)
     const msg = await this.sendRequest<{ group_host_attestation: GroupHostAttestation }>(
       'group_host_attestation',
       'get_group_host_attestation',
@@ -316,6 +429,7 @@ export class RelayClient {
     challenge: HealChallenge,
     ids: string[],
   ): Promise<InventoryAttestationResult> {
+    log.relaySend(this.url, 'get_inventory_attestation', `${ids.length} ids`)
     const msg = await this.sendRequest<{
       type: string
       attestation?: InventoryAttestation
@@ -328,6 +442,7 @@ export class RelayClient {
       15000,
     )
     if (msg.type === 'inventory_missing') {
+      log.relayResponse(this.url, 'inventory_missing', `${(msg.missing as string[])?.length ?? 0} missing`)
       return {
         attestation: null,
         covered: [],
@@ -335,9 +450,11 @@ export class RelayClient {
         inventoryMissing: true,
       }
     }
+    const covered = (msg.ids as string[]) ?? []
+    log.relayResponse(this.url, 'inventory_attestation', `${covered.length} covered`)
     return {
       attestation: (msg.attestation as InventoryAttestation) ?? null,
-      covered: (msg.ids as string[]) ?? [],
+      covered,
       missing: (msg.missing as string[]) ?? [],
       inventoryMissing: false,
     }
@@ -349,6 +466,7 @@ export class RelayClient {
     hostAtts: GroupHostAttestation[],
     invAtts: { attestation: InventoryAttestation; ids: string[] }[],
   ): Promise<HealBatchResult> {
+    log.relaySend(this.url, 'heal_batch', `${events.length} events, ${hostAtts.length} host atts, ${invAtts.length} inv atts`)
     const msg = await this.sendRequest<{ heal_batch_result: HealBatchResult }>(
       'heal_batch_result',
       'heal_batch',
@@ -360,12 +478,15 @@ export class RelayClient {
       },
       30000,
     )
-    return msg.heal_batch_result
+    const result = msg.heal_batch_result
+    log.relayResponse(this.url, 'heal_batch_result', `stored=${result.stored.length} rejected=${result.rejected.length}`)
+    return result
   }
 }
 
 export async function fetchRelayMetadata(url: string): Promise<RelayMetadata> {
   const metaUrl = url.replace('wss://', 'https://').replace('ws://', 'http://')
+  log.relaySend(url, 'fetchMetadata', metaUrl)
   const resp = await fetch(metaUrl)
   const data = await resp.json()
   return {

@@ -1,4 +1,5 @@
 import type { FernEvent } from './events'
+import { log } from './logger'
 import { validateEventSemantics } from './semantic'
 
 export interface BanEntry {
@@ -253,7 +254,8 @@ export function deriveGroupState(events: FernEvent[]): {
       validateEventSemantics(event)
       genesis = event
       break
-    } catch {
+    } catch (err) {
+      log.stateEventRejected(event.type, event.id, `genesis semantic: ${err}`)
       rejected.push(event)
     }
   }
@@ -272,17 +274,20 @@ export function deriveGroupState(events: FernEvent[]): {
 
   for (const event of nonGenesis) {
     if (!event.parents.every((parent) => acceptedIds.has(parent))) {
+      log.stateEventRejected(event.type, event.id, 'missing parent(s)')
       rejected.push(event)
       continue
     }
     try {
       validateEventSemantics(event)
       validateStateDependentSemantics(state, event)
-    } catch {
+    } catch (err) {
+      log.stateEventRejected(event.type, event.id, `semantic: ${err}`)
       rejected.push(event)
       continue
     }
     if (!isAuthorised(state, event)) {
+      log.stateEventRejected(event.type, event.id, 'unauthorized author')
       rejected.push(event)
       continue
     }

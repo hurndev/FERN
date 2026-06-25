@@ -14,6 +14,7 @@ import { RelayClient, parseGroupAddress } from '../fern/relay'
 import type { GroupStatus, EventReceipt } from '../fern/relay'
 import { randomHexId } from '../fern/utils'
 import { computeSetHash, verifyGroupStatus } from '../fern/completeness'
+import { log } from '../fern/logger'
 import type {
   HealChallenge,
   GroupHostAttestation,
@@ -61,7 +62,8 @@ async function publishToRelaysWith(
       sig: event_receipt.sig,
     })
     return true
-  } catch {
+  } catch (err) {
+    log.sessionPublishFailed(event.group, event.type, err)
     return false
   }
 }
@@ -74,7 +76,8 @@ async function publishToRelaysEphemeral(
   try {
     await client.connect()
     return await publishToRelaysWith(event, client)
-  } catch {
+  } catch (err) {
+    log.sessionPublishFailed(event.group, event.type, `ephemeral ${url}: ${err}`)
     return false
   } finally {
     await client.close()
@@ -85,6 +88,7 @@ async function fallbackFullSync(
   client: RelayClient,
   groupPubkey: string,
 ): Promise<{ fetched: number; healed: number }> {
+  log.syncFallbackFullSync(client.url)
   const syncEvents = await client.sync(groupPubkey)
   let fetched = 0
   for (const event of syncEvents) {
@@ -93,9 +97,10 @@ async function fallbackFullSync(
       await putEvent(event)
       fetched += 1
     } catch (e) {
-      console.error('fallback sync verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
+      log.eventVerifyFailed(event.type, event.id, String(e))
     }
   }
+  log.syncFallbackResult(client.url, fetched)
   return { fetched, healed: 0 }
 }
 
@@ -104,6 +109,8 @@ async function batchHeal(
   client: RelayClient,
   batchSize = 10,
 ): Promise<number> {
+  if (events.length === 0) return 0
+  log.healBatch(client.url, events.length)
   let healed = 0
   for (let i = 0; i < events.length; i += batchSize) {
     const batch = events.slice(i, i + batchSize)
@@ -122,6 +129,7 @@ async function batchHeal(
     }))
     healed += results.filter(Boolean).length
   }
+  log.healBatchResult(client.url, healed, events.length)
   return healed
 }
 
@@ -142,17 +150,20 @@ async function attemptTrustedHeal(
   if (events.length === 0) return { healed: 0, failedIds: [] }
 
   const BATCH_LIMIT = 500
+  log.healTrustedStart(laggingClient.url, events.length)
   let challenge: HealChallenge
   try {
     const ids = events.map((e) => e.id)
     challenge = await laggingClient.getHealChallenge(groupPubkey, ids)
     const now = Math.floor(Date.now() / 1000)
     if (!(await verifyHealChallenge(challenge, undefined, now))) {
-      console.warn('trusted-heal: challenge verification failed')
+      log.healTrustedChallengeVerifyFailed()
       return null
     }
+    const threshold = challenge.threshold
+    log.healTrustedChallenge(laggingClient.url, challenge.trusted_witnesses.length, `${threshold.num}/${threshold.den} min=${threshold.min}`)
   } catch (e) {
-    console.warn('trusted-heal: getHealChallenge failed, falling back to slow heal', e)
+    log.healTrustedChallengeFailed(laggingClient.url, e)
     return null
   }
 
@@ -180,13 +191,14 @@ async function attemptTrustedHeal(
           await witnessClient.connect()
           const meta = await witnessClient.fetchMetadata()
           if (meta.pubkey !== witness.relay) {
-            console.warn(`trusted-heal: witness ${witness.relay.slice(0, 12)}… pubkey mismatch`)
+            log.healTrustedWitnessPubkeyMismatch(witness.url, witness.relay, meta.pubkey)
             await witnessClient.close()
             continue
           }
           tempClients.push(witnessClient)
+          log.healTrustedWitnessConnected(witness.url, witness.relay)
         } catch {
-          console.warn(`trusted-heal: failed to connect to witness ${witness.url}`)
+          log.healTrustedWitnessConnectFailed(witness.url)
           if (witnessClient) await witnessClient.close()
           continue
         }
@@ -196,16 +208,17 @@ async function attemptTrustedHeal(
         const hostAtt = await witnessClient.getGroupHostAttestation(challenge)
         const now = Math.floor(Date.now() / 1000)
         if (!(await verifyGroupHostAttestation(hostAtt, challengeId, witness.relay, now))) {
-          console.warn('trusted-heal: host attestation verification failed for', witness.relay.slice(0, 12))
+          log.healTrustedHostAttestationVerifyFailed(witness.relay)
           continue
         }
         if (!hostAtt.hosts) {
-          console.warn('trusted-heal: witness does not host group', witness.relay.slice(0, 12))
+          log.healTrustedHostAttestation(witness.relay, false)
           continue
         }
+        log.healTrustedHostAttestation(witness.relay, true)
         hostAtts.push(hostAtt)
       } catch (e) {
-        console.warn('trusted-heal: getGroupHostAttestation failed for', witness.relay.slice(0, 12), e)
+        log.healTrustedHostAttestationFailed(witness.relay, e)
         continue
       }
 
@@ -213,24 +226,25 @@ async function attemptTrustedHeal(
         const ids = events.map((ev) => ev.id)
         const invResult = await witnessClient.getInventoryAttestation(challenge, ids)
         if (invResult.inventoryMissing) {
-          console.warn('trusted-heal: witness missing all events', witness.relay.slice(0, 12))
+          log.healTrustedInventoryMissing(witness.relay)
           continue
         }
         const att = invResult.attestation
         if (!att) continue
         const now = Math.floor(Date.now() / 1000)
         if (!(await verifyInventoryAttestation(att, challengeId, witness.relay, now, invResult.covered))) {
-          console.warn('trusted-heal: inventory attestation verification failed for', witness.relay.slice(0, 12))
+          log.healTrustedInventoryVerifyFailed(witness.relay)
           continue
         }
+        log.healTrustedInventoryAttestation(witness.relay, invResult.covered.length)
         invAtts.push({ attestation: att, ids: invResult.covered })
       } catch (e) {
-        console.warn('trusted-heal: getInventoryAttestation failed for', witness.relay.slice(0, 12), e)
+        log.healTrustedHostAttestationFailed(witness.relay, e)
       }
     }
 
     if (hostAtts.length === 0 || invAtts.length === 0) {
-      console.warn('trusted-heal: no valid attestations collected')
+      log.healTrustedNoAttestations()
       return null
     }
 
@@ -257,12 +271,13 @@ async function attemptTrustedHeal(
       try {
         result = await laggingClient.healBatch(challenge, batch, hostAtts, relevantInvAtts)
       } catch (e) {
-        console.warn('trusted-heal: healBatch failed', e)
+        log.healTrustedBatchFailed(laggingClient.url, e)
         allFailedIds.push(...batchIds)
         continue
       }
 
       totalHealed += result.stored.length
+      log.healTrustedBatchResult(laggingClient.url, result.stored.length, result.rejected.length)
       for (const rej of result.rejected) {
         if (rej.reason === 'insufficient_trusted_witnesses') {
           allFailedIds.push(rej.id)
@@ -270,9 +285,10 @@ async function attemptTrustedHeal(
       }
     }
 
+    log.healTrustedComplete(laggingClient.url, totalHealed, allFailedIds.length)
     return { healed: totalHealed, failedIds: allFailedIds }
   } catch (e) {
-    console.warn('trusted-heal: unexpected error, falling back to slow heal', e)
+    log.healTrustedFailed(laggingClient.url, e)
     return null
   } finally {
     for (const tc of tempClients) {
@@ -292,10 +308,12 @@ async function syncDiff(
   onLockDenied?: (expiresIn: number) => void,
   relays?: Map<string, RelayClient>,
 ): Promise<{ fetched: number; healed: number }> {
+  log.syncStart(client.url, groupPubkey)
   let att: GroupStatus
   try {
     att = await client.requestGroupStatus(groupPubkey)
   } catch (e) {
+    log.syncGroupStatusFailed(client.url, e)
     if (String(e).toLowerCase().includes('group not hosted')) {
       const localEvents = sortForHeal(await getGroupEvents(groupPubkey))
       return { fetched: 0, healed: await batchHeal(localEvents, client) }
@@ -304,20 +322,26 @@ async function syncDiff(
   }
 
   if (!verifyGroupStatus(att)) {
-    console.error('group_status verification failed for', client.url)
+    log.syncGroupStatusVerificationFailed(client.url)
     return fallbackFullSync(client, groupPubkey)
   }
 
   const localIds = await getGroupEventIds(groupPubkey)
   const localHash = await computeSetHash(localIds)
-  if (att.set_hash === localHash) return { fetched: 0, healed: 0 }
+  if (att.set_hash === localHash) {
+    log.syncSetHashMatch(client.url)
+    return { fetched: 0, healed: 0 }
+  }
+  log.syncSetHashMismatch(client.url, localHash, att.set_hash)
 
   try {
     const lock = await client.syncLock(groupPubkey, identityPubkey)
     if (!lock.granted) {
+      log.syncLockDenied(client.url, lock.expiresIn)
       onLockDenied?.(lock.expiresIn ?? 30)
       return { fetched: 0, healed: 0 }
     }
+    log.syncLockGranted(client.url, lock.ttl)
   } catch {
     // Older relays may not support advisory locks. Relay-side dedup keeps
     // uncoordinated heal safe, though less efficient.
@@ -328,6 +352,7 @@ async function syncDiff(
     try {
       relayIds = new Set(await client.syncIds(groupPubkey))
     } catch (e) {
+      log.syncGroupStatusFailed(client.url, e)
       if (String(e).toLowerCase().includes('group not hosted')) {
         const localEvents = sortForHeal(await getGroupEvents(groupPubkey))
         return { fetched: 0, healed: await batchHeal(localEvents, client) }
@@ -339,6 +364,9 @@ async function syncDiff(
     const missingLocally = [...relayIds].filter((id) => !latestLocalIds.has(id))
     const missingOnRelay = [...latestLocalIds].filter((id) => !relayIds.has(id))
 
+    if (missingLocally.length > 0) log.syncMissingLocally(client.url, missingLocally.length)
+    if (missingOnRelay.length > 0) log.syncMissingOnRelay(client.url, missingOnRelay.length)
+
     let fetched = 0
     for (const id of missingLocally) {
       try {
@@ -349,9 +377,10 @@ async function syncDiff(
           fetched += 1
         }
       } catch (e) {
-        console.error('syncDiff get failed for', id.slice(0, 16), e)
+        log.syncGetFailed(client.url, id, e)
       }
     }
+    if (fetched > 0) log.syncFetched(client.url, fetched)
 
     const missingSet = new Set(missingOnRelay)
     const localEvents = sortForHeal(
@@ -378,6 +407,7 @@ async function syncDiff(
       healed += await batchHeal(localEvents, client, BATCH_LIMIT)
     }
 
+    log.syncComplete(client.url, fetched, healed)
     return { fetched, healed }
   } finally {
     try {
@@ -446,8 +476,16 @@ export function useBracken() {
         return
       }
 
+      log.sessionSetActiveGroup(activeGroup)
       const groupEvents = await getGroupEvents(activeGroup)
-      const { state: derived } = deriveGroupState(groupEvents)
+      log.stateDeriveStart(activeGroup, groupEvents.length)
+      const { state: derived, rejected } = deriveGroupState(groupEvents)
+      if (rejected.length > 0) {
+        for (const rej of rejected) {
+          log.stateEventRejected(rej.type, rej.id, 'semantic/authorization failure')
+        }
+      }
+      log.stateDeriveComplete(activeGroup, groupEvents.length - rejected.length, rejected.length)
       if (!cancelled) {
         setEvents(groupEvents)
         setState(derived)
@@ -488,6 +526,7 @@ export function useBracken() {
       const existing = reconnectTimers.get(url)
       if (existing) clearTimeout(existing)
       const delay = Math.min(2000 * 2 ** attempt, 30000)
+      log.relayReconnect(url, attempt, delay)
       const timer = setTimeout(() => {
         reconnectTimers.delete(url)
         void setupRelay(url, attempt)
@@ -564,23 +603,27 @@ export function useBracken() {
           try {
             await verifyEvent(event)
             await putEvent(event)
+            log.sessionReceive(url, event.type, event.id)
             if (event.group === groupPubkey) {
               await refreshGroup()
             }
           } catch (e) {
-            console.error('verifyEvent failed for', event.type, event.id?.slice(0, 16), e)
+            log.sessionVerifyFailed(event.type, event.id, e)
           }
         })
         client.onGroupStatus(async (att) => {
           if (att.group !== groupPubkey) return
+          log.groupStatusPush(url, att.group, att.set_hash, att.count, att.tips.length)
           if (!verifyGroupStatus(att)) {
-            console.error('group_status push verification failed for', client.url)
+            log.groupStatusVerifyFailed(url)
             return
           }
           const localHash = await computeSetHash(await getGroupEventIds(groupPubkey))
           if (att.set_hash !== localHash) {
+            log.groupStatusDivergence(url, localHash, att.set_hash)
             void runHeal()
           } else {
+            log.groupStatusInSync(url)
             healRetryGateRef.current.delete(healKey(url))
           }
         })
@@ -695,6 +738,7 @@ export function useBracken() {
   )
 
   const logout = useCallback(async () => {
+    log.sessionLogout()
     for (const client of clientsRef.current.values()) {
       await client.close()
     }
@@ -740,6 +784,8 @@ export function useBracken() {
       const group = groups.find((g) => g.pubkey === groupPubkey)
       if (!group) return
 
+      log.sessionLeave(groupPubkey)
+
       const groupEvents = await getGroupEvents(groupPubkey)
       const { state: derived } = deriveGroupState(groupEvents)
       const isMember = derived?.joined.has(identity.publicKey) ?? false
@@ -773,6 +819,8 @@ export function useBracken() {
       const { groupPubkey, relays } = parseGroupAddress(address)
       if (relays.length === 0) throw new Error('No relay URLs in address')
 
+      log.sessionJoin(groupPubkey, relays)
+
       // Connect and sync
       for (const url of relays) {
         try {
@@ -792,6 +840,7 @@ export function useBracken() {
       if (!genesis) throw new Error('Could not fetch genesis')
 
       const groupName = (genesis.content['name'] as string) ?? 'Unnamed'
+      log.sessionJoined(groupPubkey, groupName)
       const groupEntry: GroupEntry = {
         pubkey: groupPubkey,
         name: groupName,
@@ -869,6 +918,7 @@ export function useBracken() {
       }
       const event = await buildEvent(input, identity)
       await putEvent(event)
+      log.sessionPublish(activeGroup, 'chat.message', event.id)
       setMessageDeliveries((prev) => ({
         ...prev,
         [event.id]: {
@@ -885,6 +935,7 @@ export function useBracken() {
 
       void (async () => {
         const result = await publishToGroupRelays(event, group.relays)
+        log.sessionPublishResult(activeGroup, event.id, result.ok, result.total)
         setMessageDeliveries((prev) => {
           const next = { ...prev }
           if (result.ok >= 1) {
@@ -913,6 +964,7 @@ export function useBracken() {
       const group = groups.find((g) => g.pubkey === event.group)
       if (!group) return
 
+      log.sessionPublish(event.group, `retry:${event.type}`, event.id)
       setMessageDeliveries((prev) => ({
         ...prev,
         [event.id]: {
@@ -923,6 +975,7 @@ export function useBracken() {
       }))
 
       const result = await publishToGroupRelays(event, group.relays)
+      log.sessionPublishResult(event.group, event.id, result.ok, result.total)
       setMessageDeliveries((prev) => {
         const next = { ...prev }
         if (result.ok >= 1) {
@@ -947,6 +1000,7 @@ export function useBracken() {
       const group = groups.find((g) => g.pubkey === activeGroup)
       if (!group) return
 
+      log.sessionAdminAction(type, targetPubkey)
       const parents = await getPublishParents(activeGroup)
       if (parents.length === 0) return
 
@@ -1021,6 +1075,7 @@ export function useBracken() {
     ): Promise<{ ok: number; total: number; error?: string }> => {
       if (!identity) throw new Error('No identity')
       const groupKeypair = generateKeypair()
+      log.sessionCreateGroup(name, groupKeypair.publicKey, relayUrls)
       const defaultChannelId = randomHexId()
       const input: EventInput = {
         type: 'genesis',
@@ -1050,6 +1105,7 @@ export function useBracken() {
       await putEvent(genesis)
 
       const result = await publishToGroupRelays(genesis, relayUrls)
+      log.sessionCreateGroupResult(name, result.ok, result.total)
 
       const groupEntry: GroupEntry = {
         pubkey: groupKeypair.publicKey,
@@ -1069,6 +1125,7 @@ export function useBracken() {
   const setNickname = useCallback(
     async (name: string): Promise<void> => {
       if (!identity || !activeGroup) return
+      log.sessionSetNickname(name)
       await setDefaultNickname(name)
       const group = groups.find((g) => g.pubkey === activeGroup)
       if (!group) return

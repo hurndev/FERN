@@ -49,17 +49,23 @@ let db: IDBPDatabase<BrackenDB> | null = null
 
 export async function getDB(): Promise<IDBPDatabase<BrackenDB>> {
   if (db) return db
-  db = await openDB<BrackenDB>('bracken', 1, {
-    upgrade(db) {
-      const events = db.createObjectStore('events', { keyPath: 'id' })
-      events.createIndex('by-group', 'group')
-      events.createIndex('by-ts', 'ts')
-      const event_receipts = db.createObjectStore('event_receipts', { keyPath: 'event_id' })
-      event_receipts.createIndex('by-event', 'event_id')
-      db.createObjectStore('identity', { keyPath: 'pubkey' })
-      db.createObjectStore('relayPins', { keyPath: 'url' })
-      db.createObjectStore('trustLedger', { keyPath: 'relay_pubkey' })
-      db.createObjectStore('meta', { keyPath: 'key' })
+  db = await openDB<BrackenDB>('bracken', 2, {
+    upgrade(db, oldVersion) {
+      if (oldVersion < 1) {
+        const events = db.createObjectStore('events', { keyPath: 'id' })
+        events.createIndex('by-group', 'group')
+        events.createIndex('by-ts', 'ts')
+        db.createObjectStore('identity', { keyPath: 'pubkey' })
+        db.createObjectStore('relayPins', { keyPath: 'url' })
+        db.createObjectStore('trustLedger', { keyPath: 'relay_pubkey' })
+        db.createObjectStore('meta', { keyPath: 'key' })
+      }
+      if (oldVersion < 2) {
+        if (!db.objectStoreNames.contains('event_receipts')) {
+          const event_receipts = db.createObjectStore('event_receipts', { keyPath: 'event_id' })
+          event_receipts.createIndex('by-event', 'event_id')
+        }
+      }
     },
   })
   return db
