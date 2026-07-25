@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 from fern.events.event import Event
 from fern.events.build import build_event
 from fern.identity.user import UserIdentity
@@ -12,7 +10,7 @@ def build_chat_message(
     *,
     user: UserIdentity,
     group: str,
-    parents: Sequence[str],
+    seq: int,
     text: str,
     channel: str,
     reply_to: str | None = None,
@@ -26,7 +24,7 @@ def build_chat_message(
         type=ChatTypes.MESSAGE,
         group=group,
         author_keypair=user.keypair,
-        parents=parents,
+        seq=seq,
         content=content,
         ts=ts,
     )

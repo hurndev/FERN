@@ -6,21 +6,24 @@ interface Props {
   name: string
   pubkey: string
   description: string
-  relays: string[]
-  onViewDag?: () => void
+  validators: string[]
+  validatorCount: number
+  onViewChain?: () => void
   onLeaveGroup?: () => Promise<void> | void
   onClose: () => void
 }
 
-export function GroupInfoModal({ name, pubkey, description, relays, onViewDag, onLeaveGroup, onClose }: Props) {
+export function GroupInfoModal({
+  name, pubkey, description, validators, validatorCount, onViewChain, onLeaveGroup, onClose,
+}: Props) {
   const [copied, setCopied] = useState<string | null>(null)
   const [leaving, setLeaving] = useState(false)
   const overlayHandlers = useDefiniteOverlayClick(onClose)
 
   const inviteLink = useMemo(() => {
-    const relayQuery = relays.length > 0 ? `&relays=${relays.join(',')}` : ''
-    return `${window.location.origin}/?group=${pubkey}${relayQuery}`
-  }, [pubkey, relays])
+    const validatorQuery = validators.length > 0 ? `&validators=${validators.join(',')}` : ''
+    return `${window.location.origin}/?group=${pubkey}${validatorQuery}`
+  }, [pubkey, validators])
 
   const copy = (label: string, value: string) => {
     navigator.clipboard.writeText(value)
@@ -38,6 +41,13 @@ export function GroupInfoModal({ name, pubkey, description, relays, onViewDag, o
           </div>
           <button className={styles.drawerClose} onClick={onClose}>✕</button>
         </div>
+
+        {validatorCount > 0 && validatorCount < 4 && (
+          <div className={styles.smallSetWarning} role="alert">
+            Warning: this group uses unanimous small-set mode. All {validatorCount}
+            {' '}validators must participate, so any unavailable validator halts consensus.
+          </div>
+        )}
 
         <div className={styles.groupInfoField}>
           <span className={styles.profileLabel}>Description</span>
@@ -67,21 +77,21 @@ export function GroupInfoModal({ name, pubkey, description, relays, onViewDag, o
         </div>
 
         <div className={styles.groupInfoField}>
-          <span className={styles.profileLabel}>Relays</span>
-          {relays.length > 0 ? (
-            <div className={styles.groupInfoRelayList}>
-              {relays.map((relay) => (
-                <span key={relay} className={styles.groupInfoMono}>{relay}</span>
+          <span className={styles.profileLabel}>Validators</span>
+          {validators.length > 0 ? (
+            <div className={styles.groupInfoValidatorList}>
+              {validators.map((validator) => (
+                <span key={validator} className={styles.groupInfoMono}>{validator}</span>
               ))}
             </div>
           ) : (
-            <span className={styles.groupInfoText}>No relay hints are configured.</span>
+            <span className={styles.groupInfoText}>No validator endpoints are configured.</span>
           )}
         </div>
 
-        {onViewDag && (
-          <button className={styles.groupInfoActionBtn} onClick={onViewDag}>
-            View DAG
+        {onViewChain && (
+          <button className={styles.groupInfoActionBtn} onClick={onViewChain}>
+            View finalized chain
           </button>
         )}
 

@@ -1,849 +1,516 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import json
+import logging
+import secrets
+from pathlib import Path
+from typing import Any
 
 import click
 
-from fern.identity.user import UserIdentity
-from fern.identity.group import GroupKeypair
-from fern.events.build import build_event
-from fern.events.types import ProtocolTypes
-from fern.crypto.hashes import random_channel_id
-from fern.state.machine import compute_accepted_heads, derive_group_state
-from fern.storage.sqlite_store import SqliteStore
-from fern.transport.websocket_client import WebSocketRelayClient
-from fern.client.bootstrap import fetch_genesis
-from cli.sync import sync_group_from_transports
-from fern.client.sync import HealMode
+from cli.bft import (
+    build_user_event,
+    open_store,
+    publish_user_event,
+    sync_group,
+    validator_urls,
+    warn_small_validator_set,
+)
 from cli.config import (
-    load_config,
-    save_config,
+    add_group_to_order,
     ensure_config_dir,
     get_cache_path,
+    load_config,
     parse_group_address,
     resolve_group,
-    add_group_to_order,
-    connect_transports,
-    get_client_id,
+    save_config,
 )
-from cli.output import print_success, print_error
+from cli.output import print_success
+from fern.bft.validators import Validator, make_validator_set
+from fern.bft.certificates import SyncReady, verify_sync_ready
+from fern.bft.constants import PROTOCOL_VERSION
+from fern.bft.websocket import BFTWebSocketClient
+from fern.crypto.hashes import random_channel_id
+from fern.events.build import build_event
+from fern.events.types import ChatTypes, ProtocolTypes
+from fern.identity.group import GroupKeypair
+from fern.identity.user import UserIdentity
 
 
-from typing import Any
+DEFAULT_VALIDATOR = "ws://localhost:8765"
+logger = logging.getLogger(__name__)
 
 
-DEFAULT_RELAY = "ws://localhost:8765"
-
-
-async def _accepted_tips(store: SqliteStore, group_pubkey: str) -> list[str]:
-    events = []
-    async for event in store.iter_group_events(group_pubkey):
-        events.append(event)
-    return list(compute_accepted_heads(events)) if events else []
-
-
-def _get_user(config: dict[str, Any]) -> UserIdentity:
-    privkey = config.get("user_privkey_hex")
-    if not privkey:
+def _user(config: dict[str, Any]) -> UserIdentity:
+    private = config.get("user_privkey_hex")
+    if not private:
         raise click.UsageError("No identity found. Run `fern init` first.")
-    return UserIdentity.from_privkey_hex(str(privkey))
+    return UserIdentity.from_privkey_hex(str(private))
 
 
-def _collect_known_relays(config: dict[str, Any]) -> list[str]:
-    seen: set[str] = set()
-    relays: list[str] = []
-    for group_info in config.get("groups", {}).values():
-        for url in group_info.get("relays", []):
-            if url not in seen:
-                seen.add(url)
-                relays.append(url)
-    return relays
+def _normalize_url(url: str) -> str:
+    return url if url.startswith(("ws://", "wss://")) else f"ws://{url}"
 
 
-def _prompt_relays(config: dict[str, Any]) -> list[str]:
-    known = _collect_known_relays(config)
-    if known:
-        click.echo("Known relays:")
-        for i, url in enumerate(known, 1):
-            click.echo(f"  {i}. {url}")
-        click.echo()
-        raw = click.prompt(
-            "Choose relays by number (comma-separated), or type URL(s) space-separated",
-            default=known[0],
-        )
-    else:
-        raw = click.prompt("No known relays. Enter relay URL(s) space-separated")
-
-    chosen: list[str] = []
-    for token in raw.replace(",", " ").split():
-        if token.isdigit():
-            idx = int(token) - 1
-            if 0 <= idx < len(known):
-                chosen.append(known[idx])
-            else:
-                click.echo(f"  ignoring invalid relay number: {token}")
-        else:
-            if not token.startswith(("ws://", "wss://")):
-                token = f"ws://{token}"
-            chosen.append(token)
-
-    if not chosen:
-        raise click.UsageError("No relays selected.")
-    return chosen
-
-
-async def _close_transports(transports: list[WebSocketRelayClient]) -> None:
-    for t in transports:
+async def _discover_validators(
+    urls: list[str], faults: int | None
+) -> tuple[list[str], int, list[Validator]]:
+    normalized = list(dict.fromkeys(_normalize_url(url) for url in urls))
+    if not normalized:
+        normalized = [DEFAULT_VALIDATOR]
+    discovered: list[Validator] = []
+    for url in normalized:
+        logger.debug("discovering validator url=%s", url)
         try:
-            await t.close()
-        except Exception:
-            pass
+            metadata = await BFTWebSocketClient(url).metadata()
+        except Exception as exc:
+            raise click.ClickException(f"cannot reach validator {url}: {exc}") from exc
+        pubkey = str(metadata.get("pubkey", ""))
+        operator = str(metadata.get("name", url))
+        if metadata.get("protocol") != PROTOCOL_VERSION or metadata.get("role") != "validator":
+            raise click.ClickException(f"endpoint is not a {PROTOCOL_VERSION} validator: {url}")
+        try:
+            discovered.append(Validator(pubkey=pubkey, url=url, operator=operator))
+        except ValueError as exc:
+            raise click.ClickException(f"invalid validator metadata from {url}: {exc}") from exc
+        logger.debug(
+            "validator discovered url=%s pubkey=%s operator=%s",
+            url,
+            pubkey[:12],
+            operator,
+        )
+    inferred = 0 if len(discovered) == 1 else (len(discovered) - 1) // 3
+    selected_faults = inferred if faults is None else faults
+    try:
+        validator_set = make_validator_set(discovered, epoch=0, fault_tolerance=selected_faults)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return normalized, selected_faults, list(validator_set.validators)
 
 
 @click.group(name="group")
 def command() -> None:
-    pass
+    """Create, join and administer FERN-BFT groups."""
 
 
 @command.command()
-@click.option("--name", required=True, help="Group name")
-@click.option("--description", default="", help="Group description")
-@click.option("--public/--private", default=True, help="Public or private group")
-@click.option("--relay", "relays", multiple=True, help="Relay URLs (may be repeated)")
-def create(name: str, description: str, public: bool, relays: list[str]) -> None:
-    asyncio.run(_create(name, description, public, relays))
+@click.option("--name", required=True)
+@click.option("--description", default="")
+@click.option("--public/--private", default=True)
+@click.option(
+    "--validator",
+    "validators",
+    multiple=True,
+    help="Validator URL; use 1-3 unanimous test validators or exactly 3f+1 standard validators.",
+)
+@click.option("--faults", type=int, default=None, help="Byzantine validators to tolerate.")
+def create(
+    name: str, description: str, public: bool, validators: tuple[str, ...], faults: int | None
+) -> None:
+    asyncio.run(_create(name, description, public, list(validators), faults))
 
 
-async def _create(name: str, description: str, public: bool, relay_urls: list[str]) -> None:
+async def _create(
+    name: str, description: str, public: bool, urls: list[str], faults: int | None
+) -> None:
     config = load_config()
-    user = _get_user(config)
-
-    if not relay_urls:
-        relay_urls = _prompt_relays(config)
+    user = _user(config)
+    urls, faults, validators = await _discover_validators(urls, faults)
+    group_key = GroupKeypair.generate()
+    channel_id = random_channel_id()
+    genesis = build_event(
+        type=ProtocolTypes.GENESIS,
+        group=group_key.pubkey,
+        author_keypair=user.keypair,
+        seq=0,
+        group_keypair=group_key.keypair,
+        content={
+            "chain_id": secrets.token_hex(32),
+            "name": name,
+            "description": description,
+            "public": public,
+            "founder": user.pubkey,
+            "admins": [user.pubkey],
+            "validators": [validator.to_dict() for validator in validators],
+            "fault_tolerance": faults,
+            "app": "chat",
+            "chat.channels": [
+                {"id": channel_id, "name": "general", "description": "", "position": 0}
+            ],
+            "chat.default_channel": channel_id,
+            "chat.system_channel": channel_id,
+        },
+    )
+    logger.debug(
+        "genesis built group=%s chain=%s validators=%d faults=%d",
+        group_key.pubkey[:12],
+        str(genesis.content["chain_id"])[:12],
+        len(validators),
+        faults,
+    )
+    results = await asyncio.gather(
+        *(BFTWebSocketClient(url).bootstrap(genesis) for url in urls), return_exceptions=True
+    )
+    failures = [
+        f"{url}: {result}"
+        for url, result in zip(urls, results, strict=True)
+        if isinstance(result, BaseException)
+    ]
+    if failures:
+        raise click.ClickException("genesis was not accepted by every validator: " + failures[0])
+    logger.debug(
+        "genesis accepted group=%s validators=%d/%d",
+        group_key.pubkey[:12],
+        len(results),
+        len(urls),
+    )
 
     ensure_config_dir()
-    group_kp = GroupKeypair.generate()
-    general_id = random_channel_id()
-
-    transports = await connect_transports(list(relay_urls))
-    genesis: Any = None
+    cache_path = str(get_cache_path(group_key.pubkey))
+    store = open_store(cache_path)
     try:
-        genesis = build_event(
-            type=ProtocolTypes.GENESIS,
-            group=group_kp.pubkey,
-            author_keypair=user.keypair,
-            parents=(),
-            content={
-                "name": name,
-                "description": description,
-                "public": public,
-                "founder": user.pubkey,
-                "admins": [user.pubkey],
-                "relays": list(relay_urls),
-                "app": "chat",
-                "chat.channels": [{"id": general_id, "name": "general", "position": 0}],
-                "chat.default_channel": general_id,
-                "chat.system_channel": general_id,
-            },
-            group_keypair=group_kp.keypair,
-        )
-
-        event_receipts = 0
-        first_error: str | None = None
-        for t in transports:
-            try:
-                await t.publish(genesis)
-                event_receipts += 1
-            except Exception as e:
-                if first_error is None:
-                    first_error = str(e)
-
-        if event_receipts == 0:
-            msg = first_error or "unknown error"
-            print_error(f"Failed to publish genesis to any relay: {msg}")
-            return
+        local_head = store.bootstrap_genesis(genesis)
+        warn_small_validator_set(local_head.state.validator_set)
     finally:
-        await _close_transports(transports)
-
-    cache_path = str(get_cache_path(group_kp.pubkey))
-    store = SqliteStore(cache_path)
-    await store.open()
-    try:
-        if genesis is not None:
-            await store.put_event(genesis)
-    finally:
-        await store.close()
-
-    config.setdefault("groups", {})
-    config["groups"][group_kp.pubkey] = {
-        "relays": list(relay_urls),
+        store.close()
+    config.setdefault("groups", {})[group_key.pubkey] = {
+        "validators": urls,
         "cache_path": cache_path,
         "joined": True,
     }
-    num = add_group_to_order(group_kp.pubkey, config)
+    number = add_group_to_order(group_key.pubkey, config)
     save_config(config)
-
-    print_success(f"Group {num} created.")
+    print_success(f"Group {number} created with {len(validators)} validator(s).")
     click.echo(f"  Name: {name}")
-    click.echo(f"  Public: {public}")
-    click.echo(f"  Address: fern:{group_kp.pubkey}@" + ",".join(relay_urls))
-    click.echo(f"  Pubkey: {group_kp.pubkey}")
+    click.echo(f"  Address: fern:{group_key.pubkey}@{','.join(urls)}")
+    click.echo(f"  Pubkey: {group_key.pubkey}")
 
 
 @command.command()
 @click.argument("address")
-@click.pass_context
-def join(ctx: click.Context, address: str) -> None:
-    asyncio.run(_join(ctx, address))
+def join(address: str) -> None:
+    asyncio.run(_join(address))
 
 
-async def _join(ctx: click.Context, address: str) -> None:
+async def _join(address: str) -> None:
     config = load_config()
-    user = _get_user(config)
-    group_pubkey, relay_urls = parse_group_address(address)
-
-    if not relay_urls:
-        raise click.UsageError("No relay URLs in address.")
-
-    transports = await connect_transports(relay_urls)
-    genesis: Any = None
-    sync_error: str | None = None
+    user = _user(config)
+    group, urls = parse_group_address(address)
+    if not urls:
+        raise click.UsageError("The group address must contain validator URLs.")
+    cache_path = str(get_cache_path(group))
+    group_info: dict[str, object] = {"validators": urls, "cache_path": cache_path}
+    ensure_config_dir()
+    store = open_store(cache_path)
     try:
-        try:
-            genesis = await fetch_genesis(group_pubkey, transports)
-        except Exception as e:
-            sync_error = str(e)
-
-        if genesis is None:
-            hint = f": {sync_error}" if sync_error else ""
-            print_error(f"Could not fetch genesis for group {group_pubkey[:16]}...{hint}")
-            return
-
-        from fern.events.validation import verify_event
-
-        verify_event(genesis)
-
-        ensure_config_dir()
-        cache_path = str(get_cache_path(group_pubkey))
-        store = SqliteStore(cache_path)
-        await store.open()
-        try:
-            await store.put_event(genesis)
-            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-            await sync_group_from_transports(
-                group_pubkey=group_pubkey,
-                transports=transports,
-                store=store,
-                client_id=user.pubkey,
-                heal_mode=heal_mode,
-            )
-            tips = await _accepted_tips(store, group_pubkey)
-        finally:
-            await store.close()
-
-        parents = tuple(tips) if tips else (genesis.id,) if genesis.id else ()
-        join_event = build_event(
-            type=ProtocolTypes.JOIN,
-            group=group_pubkey,
-            author_keypair=user.keypair,
-            parents=parents,
-            content={},
+        await sync_group(group, group_info, store)
+        head = store.get_chain_head(group)
+        event = build_user_event(
+            store=store, group=group, user=user, event_type=ProtocolTypes.JOIN, content={}
         )
-
-        for t in transports:
-            try:
-                await t.publish(join_event)
-            except Exception as e:
-                click.echo(f"Warning: could not publish join event to {t.url}: {e}")
-
-        try:
-            store = SqliteStore(cache_path)
-            await store.open()
-            try:
-                await store.put_event(join_event)
-            finally:
-                await store.close()
-        except Exception as e:
-            click.echo(f"Warning: could not cache join event: {e}")
-
-        config.setdefault("groups", {})
-        config["groups"][group_pubkey] = {
-            "relays": list(relay_urls),
-            "cache_path": cache_path,
-            "joined": True,
-        }
-        num = add_group_to_order(group_pubkey, config)
-        save_config(config)
-
-        group_name = genesis.content.get("name", "Unnamed")
-        print_success(f"Joined group {num}: {group_name}")
-        click.echo(f"  Pubkey: {group_pubkey}")
-        click.echo(f"  Relays: {', '.join(relay_urls)}")
+        result = await publish_user_event(
+            store=store, group=group, group_info=group_info, event=event
+        )
+        if not result.receipts:
+            raise click.ClickException("no validator accepted the join event")
+        authoritative_urls = [validator.url for validator in head.state.validator_set.validators]
     finally:
-        await _close_transports(transports)
+        store.close()
+    config.setdefault("groups", {})[group] = {
+        "validators": authoritative_urls,
+        "cache_path": cache_path,
+        "joined": True,
+    }
+    number = add_group_to_order(group, config)
+    save_config(config)
+    print_success(
+        f"Join submitted for group {number}: {head.state.metadata.get('name', 'Unnamed')}"
+    )
+    click.echo(f"  Status: pending ({len(result.receipts)} ingress receipt(s))")
+    click.echo(f"  Pubkey: {group}")
 
 
 @command.command(name="list")
 def list_groups() -> None:
     config = load_config()
-    group_order: list[str] = config.get("group_order", [])
+    order = config.get("group_order", [])
     groups = config.get("groups", {})
-
-    if not group_order:
-        click.echo("No groups configured. Create one with 'fern group create' or join with 'fern group join'.")
+    if not order:
+        click.echo("No groups configured.")
         return
-
-    for i, pubkey in enumerate(group_order, 1):
-        info = groups.get(pubkey, {})
-        relays = info.get("relays", [])
-        relay_str = relays[0] if relays else "(no relays)"
-        click.echo(f"  {i}: {pubkey[:16]}...  {relay_str}")
-
-
-@command.command()
-@click.argument("group_id")
-@click.pass_context
-def info(ctx: click.Context, group_id: str) -> None:
-    asyncio.run(_info(ctx, group_id))
-
-
-async def _info(ctx: click.Context, group_id: str) -> None:
-    config = load_config()
-    group_pubkey, group_info = resolve_group(group_id, config)
-
-    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
-    store = SqliteStore(cache_path)
-    await store.open()
-    try:
-        relay_urls = group_info.get("relays", [])
-        if relay_urls:
-            transports = await connect_transports(relay_urls)
-            try:
-                heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-                await sync_group_from_transports(
-                    group_pubkey=group_pubkey,
-                    transports=transports,
-                    store=store,
-                    client_id=get_client_id(config),
-                    heal_mode=heal_mode,
-                )
-            finally:
-                await _close_transports(transports)
-
-        events = []
-        async for e in store.iter_group_events(group_pubkey):
-            events.append(e)
-
-        if not events:
-            click.echo("No events cached. Try joining the group first.")
-            return
-
-        state, _ = derive_group_state(events)
-        genesis = next((e for e in events if e.type == ProtocolTypes.GENESIS), None)
-
-        if genesis:
-            click.echo(f"Group: {genesis.content.get('name', 'Unnamed')}")
-            click.echo(f"  Description: {genesis.content.get('description', '')}")
-        else:
-            click.echo("Group: (no genesis found)")
-        click.echo(f"  Public: {state.public}")
-        click.echo(f"  Pubkey: {group_pubkey}")
-        click.echo(f"  Admins: {len(state.admins)}")
-        click.echo(f"  Members: {len(state.joined)}")
-        click.echo(f"  Banned: {len(state.banned)}")
-        click.echo(f"  Relays: {', '.join(state.relays)}")
-        invite_relays = ", ".join(state.relays if state.relays else group_info.get("relays", []))
-        if invite_relays:
-            click.echo(f"  Invite: fern:{group_pubkey}@{invite_relays}")
-    finally:
-        await store.close()
-
-
-@command.command()
-@click.argument("group_id")
-@click.pass_context
-def members(ctx: click.Context, group_id: str) -> None:
-    asyncio.run(_members(ctx, group_id))
-
-
-async def _members(ctx: click.Context, group_id: str) -> None:
-    config = load_config()
-    group_pubkey, group_info = resolve_group(group_id, config)
-
-    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
-    store = SqliteStore(cache_path)
-    await store.open()
-    try:
-        relay_urls = group_info.get("relays", [])
-        if relay_urls:
-            transports = await connect_transports(relay_urls)
-            try:
-                heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-                await sync_group_from_transports(
-                    group_pubkey=group_pubkey,
-                    transports=transports,
-                    store=store,
-                    client_id=get_client_id(config),
-                    heal_mode=heal_mode,
-                )
-            finally:
-                await _close_transports(transports)
-
-        events = []
-        async for e in store.iter_group_events(group_pubkey):
-            events.append(e)
-
-        if not events:
-            click.echo("No events cached.")
-            return
-
-        state, _ = derive_group_state(events)
-        nicknames: dict[str, str] = {}
-        claimed_by: dict[str, str] = {}
-        for e in sorted(
-            [e for e in events if e.type == "chat.nickname_set"],
-            key=lambda e: (e.ts, e.id),
-        ):
-            nick = e.content.get("nickname", "")
-            if not nick:
-                continue
-            existing_owner = claimed_by.get(nick)
-            if existing_owner is not None and existing_owner != e.author:
-                continue
-            old_nick = nicknames.get(e.author)
-            if old_nick and old_nick != nick:
-                claimed_by.pop(old_nick, None)
-            nicknames[e.author] = nick
-            claimed_by[nick] = e.author
-
-        click.echo(f"Members ({len(state.joined)}):")
-        for pubkey in sorted(state.joined):
-            role = "admin" if pubkey in state.admins else "member"
-            banned_info = state.banned.get(pubkey)
-            status = " [banned]" if banned_info and (banned_info.until is None or banned_info.until > int(time.time())) else ""
-            nick = nicknames.get(pubkey) or ""
-            name_str = f"  ({nick})" if nick else ""
-            click.echo(f"  {pubkey}{name_str}  {role}{status}")
-    finally:
-        await store.close()
-
-
-@command.command()
-@click.argument("group_id")
-@click.pass_context
-def leave(ctx: click.Context, group_id: str) -> None:
-    asyncio.run(_leave(ctx, group_id))
-
-
-async def _leave(ctx: click.Context, group_id: str) -> None:
-    config = load_config()
-    user = _get_user(config)
-    group_pubkey, group_info = resolve_group(group_id, config)
-
-    relay_urls = group_info.get("relays", [])
-    if not relay_urls:
-        print_error("No relays configured for this group.")
-        return
-
-    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
-    transports = await connect_transports(relay_urls)
-    try:
-        store = SqliteStore(cache_path)
-        await store.open()
-        try:
-            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-            await sync_group_from_transports(
-                group_pubkey=group_pubkey,
-                transports=transports,
-                store=store,
-                client_id=user.pubkey,
-                heal_mode=heal_mode,
-            )
-            tips = await _accepted_tips(store, group_pubkey)
-        finally:
-            await store.close()
-
-        parents = tuple(tips) if tips else ()
-        if not parents:
-            print_error("No tips in local cache. Run `fern read <group>` to sync first.")
-            return
-
-        leave_event = build_event(
-            type=ProtocolTypes.LEAVE,
-            group=group_pubkey,
-            author_keypair=user.keypair,
-            parents=parents,
-            content={},
+    has_small_set = False
+    for index, group in enumerate(order, 1):
+        info = groups.get(group, {})
+        urls = validator_urls(info)
+        small_label = "  [UNANIMOUS SMALL SET]" if 0 < len(urls) < 4 else ""
+        has_small_set = has_small_set or bool(small_label)
+        click.echo(
+            f"  {index}: {group[:16]}...  {urls[0] if urls else '(no validators)'}{small_label}"
         )
-        sent = 0
-        first_error: str | None = None
-        for t in transports:
-            try:
-                await t.publish(leave_event)
-                sent += 1
-            except Exception as e:
-                if first_error is None:
-                    first_error = str(e)
+    if has_small_set:
+        click.secho(
+            "WARNING: Small-set groups require every validator to participate; "
+            "any unavailable validator halts consensus.",
+            fg="yellow",
+            bold=True,
+            err=True,
+        )
 
-        if sent == 0:
-            msg = first_error or "unknown error"
-            print_error(f"Failed to publish leave event to any relay: {msg}")
-            return
-    finally:
-        await _close_transports(transports)
 
-    if group_pubkey in config["groups"]:
-        config["groups"][group_pubkey]["joined"] = False
+async def _synced(group_id: str) -> tuple[dict[str, Any], str, dict[str, Any], Any]:
+    config = load_config()
+    group, info = resolve_group(group_id, config)
+    path = str(info.get("cache_path") or get_cache_path(group))
+    store = open_store(path)
+    await sync_group(group, info, store)
+    current_urls = [
+        validator.url for validator in store.get_chain_head(group).state.validator_set.validators
+    ]
+    if info.get("validators") != current_urls:
+        info["validators"] = current_urls
         save_config(config)
+    return config, group, info, store
 
-    print_success(f"Left group {group_id}.")
 
-
-@command.command(name="relay-update")
+@command.command()
 @click.argument("group_id")
-@click.argument("urls", nargs=-1, required=True)
-@click.pass_context
-def relay_update(ctx: click.Context, group_id: str, urls: tuple[str, ...]) -> None:
-    asyncio.run(_relay_update(ctx, group_id, list(urls)))
+def info(group_id: str) -> None:
+    asyncio.run(_info(group_id))
 
 
-async def _relay_update(ctx: click.Context, group_id: str, urls: list[str]) -> None:
-    config = load_config()
-    user = _get_user(config)
-    group_pubkey, group_info = resolve_group(group_id, config)
-
-    relay_urls: list[str] = []
-    for u in urls:
-        if not u.startswith(("ws://", "wss://")):
-            u = f"ws://{u}"
-        relay_urls.append(u)
-
-    if not relay_urls:
-        raise click.UsageError("At least one relay URL is required.")
-
-    old_relays = list(group_info.get("relays", []))
-    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
-
-    transports = await connect_transports(old_relays)
+async def _info(group_id: str) -> None:
+    _config, group, info, store = await _synced(group_id)
     try:
-        store = SqliteStore(cache_path)
-        await store.open()
-        try:
-            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-            await sync_group_from_transports(
-                group_pubkey=group_pubkey,
-                transports=transports,
-                store=store,
-                client_id=user.pubkey,
-                heal_mode=heal_mode,
-            )
-            tips = await _accepted_tips(store, group_pubkey)
-        finally:
-            await store.close()
-    except Exception as e:
-        click.echo(f"Warning: could not read tips from cache: {e}")
-        tips = []
-
-    parents = tuple(tips) if tips else ()
-    if not parents:
-        print_error("No tips in local cache. Run `fern read <group>` to sync first.")
-        return
-
-    try:
-        event = build_event(
-            type=ProtocolTypes.RELAY_UPDATE,
-            group=group_pubkey,
-            author_keypair=user.keypair,
-            parents=parents,
-            content={"relays": relay_urls},
-        )
-
-        event_receipts = 0
-        first_error: str | None = None
-        for t in transports:
-            try:
-                await t.publish(event)
-                event_receipts += 1
-            except Exception as e:
-                if first_error is None:
-                    first_error = str(e)
-
-        if event_receipts == 0:
-            msg = first_error or "unknown error"
-            print_error(f"Failed to publish relay_update to any relay: {msg}")
-            return
-
-        try:
-            store = SqliteStore(cache_path)
-            await store.open()
-            try:
-                await store.put_event(event)
-            finally:
-                await store.close()
-        except Exception as e:
-            click.echo(f"Warning: could not cache event: {e}")
+        head = store.get_chain_head(group)
+        state = head.state
+        click.echo(f"Group: {state.metadata.get('name', 'Unnamed')}")
+        click.echo(f"  Description: {state.metadata.get('description', '')}")
+        click.echo(f"  Public: {state.public}")
+        click.echo(f"  Height: {head.height}")
+        click.echo(f"  Epoch: {state.validator_set.epoch}")
+        click.echo(f"  Fault tolerance: {state.validator_set.fault_tolerance}")
+        click.echo(f"  Validators: {len(state.validator_set.validators)}")
+        click.echo(f"  Joined members: {len(state.joined)}")
+        click.echo(f"  Invite: fern:{group}@{','.join(validator_urls(info))}")
     finally:
-        await _close_transports(transports)
-
-    config["groups"][group_pubkey]["relays"] = relay_urls
-    save_config(config)
-
-    print_success(f"Relay list updated for group {group_id}.")
-    click.echo(f"  Old relays: {', '.join(old_relays) if old_relays else '(none)'}")
-    click.echo(f"  New relays: {', '.join(relay_urls)}")
-    click.echo(f"  Event ID: {event.id[:16] if event.id else '?'}...")
-    click.echo("  New relays will be seeded with history on next sync.")
+        store.close()
 
 
-async def _publish_admin_event(
-    ctx: click.Context,
-    group_id: str,
-    event_type: str,
-    content: dict[str, object],
-    success_msg: str,
+@command.command()
+@click.argument("group_id")
+def members(group_id: str) -> None:
+    asyncio.run(_members(group_id))
+
+
+async def _members(group_id: str) -> None:
+    _config, group, _info, store = await _synced(group_id)
+    try:
+        head = store.get_chain_head(group)
+        nicknames: dict[str, str] = {}
+        for event, _height, _position, _time in store.finalized_events(group):
+            if event.type == ChatTypes.NICKNAME_SET:
+                nicknames[event.author] = str(event.content["nickname"])
+        click.echo(f"Members ({len(head.state.joined)}):")
+        for pubkey in sorted(head.state.joined):
+            role = "admin" if pubkey in head.state.admins else "member"
+            nickname = f" ({nicknames[pubkey]})" if pubkey in nicknames else ""
+            click.echo(f"  {pubkey}{nickname}  {role}")
+    finally:
+        store.close()
+
+
+async def _publish(
+    group_id: str, event_type: str, content: dict[str, object], success: str
 ) -> None:
-    config = load_config()
-    user = _get_user(config)
-    group_pubkey, group_info = resolve_group(group_id, config)
-
-    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
-    relay_urls = list(group_info.get("relays", []))
-    if not relay_urls:
-        relay_urls = [DEFAULT_RELAY]
-
-    transports = await connect_transports(relay_urls)
+    config, group, info, store = await _synced(group_id)
+    user = _user(config)
     try:
-        store = SqliteStore(cache_path)
-        await store.open()
-        try:
-            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-            await sync_group_from_transports(
-                group_pubkey=group_pubkey,
-                transports=transports,
-                store=store,
-                client_id=user.pubkey,
-                heal_mode=heal_mode,
-            )
-            tips = await _accepted_tips(store, group_pubkey)
-        finally:
-            await store.close()
-    except Exception as e:
-        click.echo(f"Warning: could not read tips from cache: {e}")
-        tips = []
-
-    parents = tuple(tips) if tips else ()
-    if not parents:
-        print_error("No tips in local cache. Run `fern read <group>` to sync first.")
-        return
-
-    try:
-        event = build_event(
-            type=event_type,
-            group=group_pubkey,
-            author_keypair=user.keypair,
-            parents=parents,
+        event = build_user_event(
+            store=store,
+            group=group,
+            user=user,
+            event_type=event_type,
             content=content,
         )
-
-        event_receipts = 0
-        first_error: str | None = None
-        for t in transports:
-            try:
-                await t.publish(event)
-                event_receipts += 1
-            except Exception as e:
-                if first_error is None:
-                    first_error = str(e)
-
-        if event_receipts == 0:
-            msg = first_error or "unknown error"
-            print_error(f"Failed to publish {event_type}: {msg}")
-            return
-
-        try:
-            store = SqliteStore(cache_path)
-            await store.open()
-            try:
-                await store.put_event(event)
-            finally:
-                await store.close()
-        except Exception as e:
-            click.echo(f"Warning: could not cache event: {e}")
+        result = await publish_user_event(store=store, group=group, group_info=info, event=event)
     finally:
-        await _close_transports(transports)
+        store.close()
+    if not result.receipts:
+        raise click.ClickException(
+            result.errors[0] if result.errors else "no validator accepted event"
+        )
+    print_success(success)
+    click.echo(f"  Status: pending ({len(result.receipts)} ingress receipt(s))")
+    click.echo(f"  Event ID: {event.id}")
 
-    print_success(success_msg)
-    if event.id:
-        click.echo(f"  Event ID: {event.id[:16]}...")
+
+@command.command()
+@click.argument("group_id")
+def leave(group_id: str) -> None:
+    asyncio.run(_publish(group_id, ProtocolTypes.LEAVE, {}, f"Leave submitted for {group_id}."))
 
 
-@command.command(name="kick")
+@command.command()
 @click.argument("group_id")
 @click.argument("target_pubkey")
-@click.pass_context
-def kick(ctx: click.Context, group_id: str, target_pubkey: str) -> None:
-    asyncio.run(_publish_admin_event(
-        ctx,
-        group_id,
-        ProtocolTypes.KICK,
-        {"target": target_pubkey},
-        f"Kicked {target_pubkey[:16]}... from group {group_id}.",
-    ))
+def kick(group_id: str, target_pubkey: str) -> None:
+    asyncio.run(
+        _publish(group_id, ProtocolTypes.KICK, {"target": target_pubkey}, "Kick submitted.")
+    )
 
 
-@command.command(name="ban")
+@command.command()
 @click.argument("group_id")
 @click.argument("target_pubkey")
-@click.option("--until", type=int, default=None, help="Unix timestamp when ban expires")
-@click.option("--reason", default="", help="Reason for ban")
-@click.pass_context
-def ban(ctx: click.Context, group_id: str, target_pubkey: str, until: int | None, reason: str) -> None:
-    content: dict[str, object] = {"target": target_pubkey, "until": until, "reason": reason}
-    asyncio.run(_publish_admin_event(
-        ctx,
-        group_id,
-        ProtocolTypes.BAN,
-        content,
-        f"Banned {target_pubkey[:16]}... from group {group_id}.",
-    ))
+@click.option("--until", type=int, default=None)
+@click.option("--reason", default="")
+def ban(group_id: str, target_pubkey: str, until: int | None, reason: str) -> None:
+    asyncio.run(
+        _publish(
+            group_id,
+            ProtocolTypes.BAN,
+            {"target": target_pubkey, "until": until, "reason": reason},
+            "Ban submitted.",
+        )
+    )
 
 
-@command.command(name="unban")
+@command.command()
 @click.argument("group_id")
 @click.argument("target_pubkey")
-@click.pass_context
-def unban(ctx: click.Context, group_id: str, target_pubkey: str) -> None:
-    asyncio.run(_publish_admin_event(
-        ctx,
-        group_id,
-        ProtocolTypes.UNBAN,
-        {"target": target_pubkey},
-        f"Unbanned {target_pubkey[:16]}... from group {group_id}.",
-    ))
+def unban(group_id: str, target_pubkey: str) -> None:
+    asyncio.run(
+        _publish(group_id, ProtocolTypes.UNBAN, {"target": target_pubkey}, "Unban submitted.")
+    )
 
 
-@command.command(name="invite")
+@command.command()
 @click.argument("group_id")
 @click.argument("invitee_pubkey")
-@click.pass_context
-def invite(ctx: click.Context, group_id: str, invitee_pubkey: str) -> None:
-    asyncio.run(_publish_admin_event(
-        ctx,
-        group_id,
-        ProtocolTypes.INVITE,
-        {"invitee": invitee_pubkey, "role": "member"},
-        f"Invited {invitee_pubkey[:16]}... to group {group_id}.",
-    ))
+def invite(group_id: str, invitee_pubkey: str) -> None:
+    asyncio.run(
+        _publish(
+            group_id,
+            ProtocolTypes.INVITE,
+            {"invitee": invitee_pubkey, "role": "member"},
+            "Invite submitted.",
+        )
+    )
 
 
 @command.command(name="admin-add")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-@click.pass_context
-def admin_add_cmd(ctx: click.Context, group_id: str, target_pubkey: str) -> None:
-    asyncio.run(_publish_admin_event(
-        ctx,
-        group_id,
-        ProtocolTypes.ADMIN_ADD,
-        {"target": target_pubkey},
-        f"Promoted {target_pubkey[:16]}... to admin in group {group_id}.",
-    ))
+def admin_add_cmd(group_id: str, target_pubkey: str) -> None:
+    asyncio.run(
+        _publish(
+            group_id, ProtocolTypes.ADMIN_ADD, {"target": target_pubkey}, "Promotion submitted."
+        )
+    )
 
 
 @command.command(name="admin-remove")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-@click.pass_context
-def admin_remove_cmd(ctx: click.Context, group_id: str, target_pubkey: str) -> None:
-    asyncio.run(_publish_admin_event(
-        ctx,
-        group_id,
-        ProtocolTypes.ADMIN_REMOVE,
-        {"target": target_pubkey},
-        f"Demoted {target_pubkey[:16]}... from admin in group {group_id}.",
-    ))
-
-
-@command.command(name="nickname")
-@click.argument("group_id")
-@click.argument("name")
-@click.pass_context
-def nickname(ctx: click.Context, group_id: str, name: str) -> None:
-    asyncio.run(_nickname(ctx, group_id, name))
-
-
-async def _nickname(ctx: click.Context, group_id: str, name: str) -> None:
-    config = load_config()
-    user = _get_user(config)
-    group_pubkey, group_info = resolve_group(group_id, config)
-
-    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
-    relay_urls = list(group_info.get("relays", []))
-    if not relay_urls:
-        relay_urls = [DEFAULT_RELAY]
-
-    transports = await connect_transports(relay_urls)
-    try:
-        store = SqliteStore(cache_path)
-        await store.open()
-        try:
-            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-            await sync_group_from_transports(
-                group_pubkey=group_pubkey,
-                transports=transports,
-                store=store,
-                client_id=user.pubkey,
-                heal_mode=heal_mode,
-            )
-            tips = await _accepted_tips(store, group_pubkey)
-        finally:
-            await store.close()
-    except Exception as e:
-        click.echo(f"Warning: could not read tips from cache: {e}")
-        tips = []
-
-    parents = tuple(tips) if tips else ()
-    if not parents:
-        print_error("No tips in local cache. Run `fern read <group>` to sync first.")
-        return
-
-    event = build_event(
-        type="chat.nickname_set",
-        group=group_pubkey,
-        author_keypair=user.keypair,
-        parents=parents,
-        content={"nickname": name},
+def admin_remove_cmd(group_id: str, target_pubkey: str) -> None:
+    asyncio.run(
+        _publish(
+            group_id, ProtocolTypes.ADMIN_REMOVE, {"target": target_pubkey}, "Demotion submitted."
+        )
     )
 
+
+@command.command()
+@click.argument("group_id")
+@click.argument("name")
+def nickname(group_id: str, name: str) -> None:
+    asyncio.run(
+        _publish(group_id, ChatTypes.NICKNAME_SET, {"nickname": name}, "Nickname submitted.")
+    )
+
+
+@command.command(name="validator-update")
+@click.argument("group_id")
+@click.argument("urls", nargs=-1, required=True)
+@click.option("--faults", type=int, default=None)
+@click.option(
+    "--readiness",
+    "readiness_paths",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="SyncReady JSON from each newly added validator.",
+)
+def validator_update(
+    group_id: str,
+    urls: tuple[str, ...],
+    faults: int | None,
+    readiness_paths: tuple[Path, ...],
+) -> None:
+    """Replace the validator set after any new validators prepare history."""
+
+    asyncio.run(_validator_update(group_id, list(urls), faults, list(readiness_paths)))
+
+
+async def _validator_update(
+    group_id: str, urls: list[str], faults: int | None, readiness_paths: list[Path]
+) -> None:
+    config, group, info, store = await _synced(group_id)
+    user = _user(config)
     try:
-        event_receipts = 0
-        first_error: str | None = None
-        for t in transports:
-            try:
-                await t.publish(event)
-                event_receipts += 1
-            except Exception as e:
-                if first_error is None:
-                    first_error = str(e)
-
-        if event_receipts == 0:
-            msg = first_error or "unknown error"
-            print_error(f"Failed to publish nickname: {msg}")
-            return
-
-        try:
-            store = SqliteStore(cache_path)
-            await store.open()
-            try:
-                await store.put_event(event)
-            finally:
-                await store.close()
-        except Exception as e:
-            click.echo(f"Warning: could not cache event: {e}")
+        head = store.get_chain_head(group)
+        normalized, selected_faults, validators = await _discover_validators(urls, faults)
+        next_set = make_validator_set(
+            validators,
+            epoch=head.state.validator_set.epoch + 1,
+            fault_tolerance=selected_faults,
+        )
+        warn_small_validator_set(next_set)
+        added = next_set.pubkeys - head.state.validator_set.pubkeys
+        readiness: list[SyncReady] = []
+        for path in readiness_paths:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise click.ClickException(f"readiness file is not an object: {path}")
+            readiness.append(SyncReady.from_dict(raw))
+        if {ready.validator for ready in readiness} != added:
+            raise click.ClickException(
+                "readiness files must cover exactly the newly added validators"
+            )
+        for ready in readiness:
+            if not (
+                verify_sync_ready(ready)
+                and ready.group == group
+                and ready.chain_id == head.state.chain_id
+                and ready.from_epoch == head.state.validator_set.epoch
+                and ready.to_epoch == next_set.epoch
+                and ready.checkpoint_height == head.height
+                and ready.checkpoint_block_hash == head.block_hash
+                and ready.history_root == head.history_root
+                and ready.byte_count == head.logical_bytes
+            ):
+                raise click.ClickException(
+                    f"SyncReady from {ready.validator[:16]}... does not match the current checkpoint"
+                )
+        event = build_user_event(
+            store=store,
+            group=group,
+            user=user,
+            event_type=ProtocolTypes.VALIDATOR_UPDATE,
+            content={
+                "validators": [validator.to_dict() for validator in next_set.validators],
+                "fault_tolerance": selected_faults,
+                "readiness": [ready.to_dict() for ready in readiness],
+            },
+        )
+        result = await publish_user_event(store=store, group=group, group_info=info, event=event)
     finally:
-        await _close_transports(transports)
-
-    print_success(f"Nickname set to '{name}' in group {group_id}.")
-    if event.id:
-        click.echo(f"  Event ID: {event.id[:16]}...")
+        store.close()
+    if not result.receipts:
+        raise click.ClickException(
+            result.errors[0] if result.errors else "no validator accepted the update"
+        )
+    print_success("Validator-set update submitted.")
+    click.echo(f"  Status: pending ({len(result.receipts)} ingress receipt(s))")
+    click.echo(f"  Event ID: {event.id}")
+    click.echo(f"  Proposed endpoints: {', '.join(normalized)}")

@@ -9,7 +9,6 @@ interface Props {
   events: FernEvent[]
   rejectedIds: Set<string>
   connectedEventIds: Set<string>
-  localEventIds: Set<string>
   admins: Set<string>
   joined: Set<string>
   nicknames: Map<string, string>
@@ -23,9 +22,8 @@ interface Props {
 }
 
 interface DisplayRow {
-  type: 'message' | 'gap' | 'system'
+  type: 'message' | 'system'
   event?: FernEvent
-  gapId?: string
   ts: number
 }
 
@@ -36,7 +34,13 @@ interface MessageDelivery {
   error?: string
 }
 
-const ADMIN_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'admin_add', 'admin_remove', 'join', 'leave', 'genesis', 'metadata_update', 'relay_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'])
+const ADMIN_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'admin_add', 'admin_remove', 'join', 'leave', 'genesis', 'metadata_update', 'validator_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'])
+
+function displaySeconds(event: FernEvent): number {
+  return event.bft?.certifiedTimeMs
+    ? Math.floor(event.bft.certifiedTimeMs / 1000)
+    : event.ts
+}
 
 function formatAdminAction(
   event: FernEvent,
@@ -69,10 +73,10 @@ function formatAdminAction(
     else if (desc !== undefined) a.push({ text: 'group description' })
     else a.push({ text: 'group info' })
   }
-  else if (t === 'relay_update') {
-    const relays = (event.content['relays'] as unknown[]) || []
-    const count = relays.filter((r): r is string => typeof r === 'string').length
-    a.push(author, { text: ` updated relays (${count} relay${count !== 1 ? 's' : ''})` })
+  else if (t === 'validator_update') {
+    const validators = (event.content['validators'] as { url: string }[]) || []
+    const urls = validators.map((v) => v.url).join(', ')
+    a.push(author, { text: ` updated validator set (${validators.length}): ${urls}` })
   }
   else if (t === 'chat.channel_create') {
     const name = (event.content['name'] as string) || '?'
@@ -98,7 +102,6 @@ export function MessageList({
   events,
   rejectedIds,
   connectedEventIds,
-  localEventIds,
   admins,
   joined,
   nicknames,
@@ -129,33 +132,29 @@ export function MessageList({
         return true
       })
       .sort((a, b) => {
+        if (a.type === 'genesis') return -1
+        if (b.type === 'genesis') return 1
+        if (a.bft?.status !== b.bft?.status) return a.bft?.status === 'finalized' ? -1 : 1
+        const byHeight = (a.bft?.height ?? Number.MAX_SAFE_INTEGER) - (b.bft?.height ?? Number.MAX_SAFE_INTEGER)
+        if (byHeight) return byHeight
+        const byPosition = (a.bft?.position ?? Number.MAX_SAFE_INTEGER) - (b.bft?.position ?? Number.MAX_SAFE_INTEGER)
+        if (byPosition) return byPosition
         if (a.ts !== b.ts) return a.ts - b.ts
         return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
       })
 
     const displayRows: DisplayRow[] = []
-    const seenGapIds = new Set<string>()
 
     for (const event of relevantEvents) {
-      for (const parentId of event.parents) {
-        if (!localEventIds.has(parentId) && !seenGapIds.has(parentId)) {
-          seenGapIds.add(parentId)
-          displayRows.push({
-            type: 'gap',
-            gapId: parentId,
-            ts: event.ts - 1,
-          })
-        }
-      }
       if (ADMIN_TYPES.has(event.type)) {
-        displayRows.push({ type: 'system', event, ts: event.ts })
+        displayRows.push({ type: 'system', event, ts: displaySeconds(event) })
       } else {
-        displayRows.push({ type: 'message', event, ts: event.ts })
+        displayRows.push({ type: 'message', event, ts: displaySeconds(event) })
       }
     }
 
     return displayRows
-  }, [events, connectedEventIds, localEventIds, selectedChannel])
+  }, [events, connectedEventIds, selectedChannel])
 
   useEffect(() => {
     if (atBottom && scrollRef.current) {
@@ -192,30 +191,14 @@ export function MessageList({
         </div>
       )}
       {rows.map((row) => {
-        if (row.type === 'gap') {
-          lastAuthor = null
-          return (
-            <div key={`gap-${row.gapId}`} className={styles.gapIndicator}>
-              <div className={styles.gapLine} />
-              <div
-                className={styles.gapPill}
-                onClick={() => navigator.clipboard.writeText(row.gapId!)}
-                title="Click to copy full event ID"
-              >
-                <span>⋯</span>
-                <span>missing event</span>
-                <span className="mono">{truncateId(row.gapId!)}</span>
-              </div>
-              <div className={styles.gapLine} />
-            </div>
-          )
-        }
-
         if (row.type === 'system') {
           lastAuthor = null
-          const parts = formatAdminAction(row.event!, channelNames)
+          const systemEvent = row.event!
+          const parts = formatAdminAction(systemEvent, channelNames)
+          const systemUnconfirmed =
+            systemEvent.type !== 'genesis' && systemEvent.bft?.status !== 'finalized'
           return (
-            <div key={`sys-${row.event!.id}`} className={styles.systemRow}>
+            <div key={`sys-${systemEvent.id}`} className={styles.systemRow}>
               <span className={styles.systemText}>
                 {parts.map((part, i) =>
                   part.clickable && part.pubkey ? (
@@ -232,6 +215,9 @@ export function MessageList({
                     <span key={i}>{part.text}</span>
                   ),
                 )}
+                {systemUnconfirmed && (
+                  <span className={styles.unconfirmedTag}>(unconfirmed)</span>
+                )}
               </span>
             </div>
           )
@@ -239,13 +225,15 @@ export function MessageList({
 
         const event = row.event!
         const isRejected = rejectedIds.has(event.id)
-        const collapsed = lastAuthor === event.author && event.ts - lastTs < 300
+        const eventTime = displaySeconds(event)
+        const collapsed = lastAuthor === event.author && eventTime - lastTs < 300
         lastAuthor = event.author
-        lastTs = event.ts
+        lastTs = eventTime
 
         const isAdmin = admins.has(event.author)
         const nick = nicknames.get(event.author)
         const delivery = deliveries[event.id]
+        const isUnconfirmed = event.bft?.status !== 'finalized'
 
         return (
           <div
@@ -271,8 +259,11 @@ export function MessageList({
                   {nick ?? truncateId(event.author)}
                   {event.author === viewerPubkey && ' (You)'}
                 </span>
-                <span className={styles.timestamp} title={absoluteTime(event.ts)}>
-                  {relativeTime(event.ts)}
+                <span className={styles.timestamp} title={absoluteTime(eventTime)}>
+                  {relativeTime(eventTime)}
+                  {isUnconfirmed && (
+                    <span className={styles.unconfirmedTag}>(unconfirmed)</span>
+                  )}
                 </span>
               </div>
             )}
@@ -285,30 +276,23 @@ export function MessageList({
               {isRejected && (
                 <span className={styles.rejectedTag}>[not authorized]</span>
               )}
+              {collapsed && isUnconfirmed && (
+                <span className={styles.unconfirmedTag}>(unconfirmed)</span>
+              )}
             </div>
-            {delivery && (
-              <div
-                className={`${styles.deliveryStatus} ${
-                  delivery.state === 'failed' ? styles.deliveryStatusFailed : ''
-                }`}
-              >
-                {delivery.state === 'sending' ? (
-                  <span>Sending...</span>
-                ) : (
-                  <>
-                    <span>
-                      Failed to send
-                      {delivery.total > 0 ? ` (${delivery.ok}/${delivery.total} relays)` : ''}
-                    </span>
-                    {onRetryMessage && (
-                      <button
-                        className={styles.deliveryRetryBtn}
-                        onClick={() => onRetryMessage(event.id)}
-                      >
-                        Retry
-                      </button>
-                    )}
-                  </>
+            {delivery && delivery.state === 'failed' && (
+              <div className={`${styles.deliveryStatus} ${styles.deliveryStatusFailed}`}>
+                <span>
+                  Failed to send
+                  {delivery.total > 0 ? ` (${delivery.ok}/${delivery.total} validators)` : ''}
+                </span>
+                {onRetryMessage && (
+                  <button
+                    className={styles.deliveryRetryBtn}
+                    onClick={() => onRetryMessage(event.id)}
+                  >
+                    Retry
+                  </button>
                 )}
               </div>
             )}

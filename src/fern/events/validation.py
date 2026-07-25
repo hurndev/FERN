@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from fern.events.event import Event
 from fern.events.limits import (
-    MAX_PARENTS,
     MAX_TAG_ITEMS,
     MAX_TAG_STRING_BYTES,
     MAX_TAGS,
     MAX_TYPE_BYTES,
 )
+from fern.bft.canonical import canonical_json
+from fern.bft.constants import MAX_EVENT_BYTES, PROTOCOL_VERSION
 from fern.events.serialization import canonical_serialization, compute_id
 from fern.crypto.encoding import (
     is_valid_event_id_hex,
@@ -19,6 +20,8 @@ from fern.errors import MalformedEventError, InvalidHashError, InvalidSignatureE
 
 
 def _validate_structural(event: Event) -> None:
+    if event.protocol != PROTOCOL_VERSION:
+        raise MalformedEventError(f"unsupported protocol: {event.protocol}")
     if not event.type or not isinstance(event.type, str):
         raise MalformedEventError("Event type must be a non-empty string")
     if len(event.type.encode("utf-8")) > MAX_TYPE_BYTES:
@@ -30,37 +33,25 @@ def _validate_structural(event: Event) -> None:
     if not is_valid_pubkey_hex(event.author):
         raise MalformedEventError("author must be 64-char lowercase hex")
 
-    if event.id is not None and not is_valid_event_id_hex(event.id):
+    if event.id is None or not is_valid_event_id_hex(event.id):
         raise MalformedEventError("id must be 64-char lowercase hex")
 
-    if event.sig is not None and not is_valid_sig_hex(event.sig):
+    if event.sig is None or not is_valid_sig_hex(event.sig):
         raise MalformedEventError("sig must be 128-char lowercase hex")
+
+    if not isinstance(event.seq, int) or isinstance(event.seq, bool):
+        raise MalformedEventError("seq must be an integer")
+    if event.type == "genesis":
+        if event.seq != 0:
+            raise MalformedEventError("genesis seq must be zero")
+    elif event.seq < 1:
+        raise MalformedEventError("non-genesis seq must be positive")
 
     if not isinstance(event.ts, int) or event.ts <= 0:
         raise MalformedEventError("ts must be a positive integer")
 
     if not isinstance(event.content, dict):
         raise MalformedEventError("content must be a JSON object (dict)")
-
-    if not isinstance(event.parents, tuple):
-        raise MalformedEventError("parents must be a tuple")
-
-    if event.type == "genesis":
-        if len(event.parents) != 0:
-            raise MalformedEventError("genesis event must have empty parents")
-    else:
-        if len(event.parents) == 0:
-            raise MalformedEventError("non-genesis event must have at least one parent")
-        if len(event.parents) > MAX_PARENTS:
-            raise MalformedEventError("too many parents")
-
-    unique_parents = set(event.parents)
-    if len(unique_parents) != len(event.parents):
-        raise MalformedEventError("parents must be unique")
-
-    for p in event.parents:
-        if not is_valid_event_id_hex(p):
-            raise MalformedEventError(f"parent '{p[:20]}...' must be 64-char lowercase hex")
 
     if len(event.tags) > MAX_TAGS:
         raise MalformedEventError("too many tags")
@@ -75,6 +66,9 @@ def _validate_structural(event: Event) -> None:
                 raise MalformedEventError("each tag element must be a string")
             if len(elem.encode("utf-8")) > MAX_TAG_STRING_BYTES:
                 raise MalformedEventError("tag string exceeds maximum length")
+
+    if len(canonical_json(event.to_dict())) > MAX_EVENT_BYTES:
+        raise MalformedEventError("event exceeds maximum encoded size")
 
 
 def verify_event(event: Event) -> None:

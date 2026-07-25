@@ -1,20 +1,36 @@
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 import click
 
+from cli.commands.chain import inspect_database
 
-@click.command()
-@click.option("--db", "db_path", required=True, help="Path to SQLite database (client cache or relay store)")
-@click.option("--host", default="127.0.0.1", help="Bind address")
-@click.option("--port", default=8760, help="Port to listen on")
-def command(db_path: str, host: str, port: int) -> None:
-    from cli.dag_viewer import launch_viewer
 
-    expanded = os.path.expanduser(db_path)
-    if not os.path.exists(expanded):
-        click.echo(f"Database not found: {expanded}")
-        return
+@click.command(hidden=True)
+@click.option(
+    "--db",
+    "db_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="FERN-BFT SQLite cache or validator DB.",
+)
+@click.option("--host", default="127.0.0.1", hidden=True)
+@click.option("--port", default=8760, hidden=True)
+def command(db_path: Path, host: str, port: int) -> None:
+    """Compatibility alias for ``fern chain --db``."""
 
-    launch_viewer(expanded, host, port)
+    del host, port
+    click.secho(
+        "WARNING: `fern dag` has been renamed to `fern chain`; use `fern chain --db <path>`.",
+        fg="yellow",
+        err=True,
+    )
+    inspect_database(
+        db_path,
+        None,
+        limit=10,
+        show_events=True,
+        show_pending=True,
+        full_ids=False,
+    )

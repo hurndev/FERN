@@ -3,16 +3,16 @@
 #
 # Usage:
 #   ./fern-wipe.sh            # wipe CLI only (~/.fern or $FERN_HOME)
-#   ./fern-wipe.sh relay      # wipe relay db only (relay.db or $RELAY_DB)
+#   ./fern-wipe.sh validator  # wipe validator db only (validator.db or $VALIDATOR_DB)
 #   ./fern-wipe.sh all        # wipe both
 #
-# Relay db path defaults to ./relay.db; override with $RELAY_DB or pass as 2nd arg:
-#   ./fern-wipe.sh relay /path/to/custom.db
+# Validator db path defaults to ./validator.db; override with $VALIDATOR_DB or pass as 2nd arg:
+#   ./fern-wipe.sh validator /path/to/custom.db
 
 set -euo pipefail
 
 CLI_DIR="${FERN_HOME:-$HOME/.fern}"
-RELAY_DB="${2:-${RELAY_DB:-relay.db}}"
+VALIDATOR_DB="${2:-${VALIDATOR_DB:-validator.db}}"
 
 wipe_cli() {
     if [ -d "$CLI_DIR" ]; then
@@ -23,18 +23,18 @@ wipe_cli() {
     fi
 }
 
-wipe_relay() {
-    if [ -f "$RELAY_DB" ]; then
-        rm -f "$RELAY_DB" "$RELAY_DB-wal" "$RELAY_DB-shm"
-        echo "wiped relay db: $RELAY_DB"
+wipe_validator() {
+    if [ -f "$VALIDATOR_DB" ]; then
+        rm -f "$VALIDATOR_DB" "$VALIDATOR_DB-wal" "$VALIDATOR_DB-shm"
+        echo "wiped validator db: $VALIDATOR_DB"
     else
-        echo "relay db not present: $RELAY_DB"
+        echo "validator db not present: $VALIDATOR_DB"
     fi
 }
 
 case "${1:-cli}" in
     cli)   wipe_cli ;;
-    relay) wipe_relay ;;
-    all)   wipe_cli; wipe_relay ;;
-    *) echo "usage: $0 [cli|relay|all] [relay_db_path]"; exit 1 ;;
+    validator) wipe_validator ;;
+    all)       wipe_cli; wipe_validator ;;
+    *) echo "usage: $0 [cli|validator|all] [validator_db_path]"; exit 1 ;;
 esac

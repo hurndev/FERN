@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 from fern.events.event import Event
 from fern.events.build import build_event
@@ -12,7 +12,7 @@ def build_nickname_set(
     *,
     user: UserIdentity,
     group: str,
-    parents: Sequence[str],
+    seq: int,
     nickname: str,
     ts: int | None = None,
 ) -> Event:
@@ -20,7 +20,7 @@ def build_nickname_set(
         type=ChatTypes.NICKNAME_SET,
         group=group,
         author_keypair=user.keypair,
-        parents=parents,
+        seq=seq,
         content={"nickname": nickname},
         ts=ts,
     )

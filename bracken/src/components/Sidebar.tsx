@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { FernLogo } from './FernLogo'
 import { truncateId } from '../fern/utils'
-import type { GroupEntry, RelayConnection } from '../hooks/useBracken'
+import type { GroupEntry, ValidatorConnection } from '../hooks/useBracken'
 import type { Channel } from '../fern/state'
 import styles from '../styles/components.module.css'
 
@@ -9,7 +9,7 @@ interface Props {
   groups: GroupEntry[]
   activeGroup: string | null
   identityPubkey: string
-  relayConns: RelayConnection[]
+  validatorConns: ValidatorConnection[]
   channels: Channel[]
   selectedChannel: string
   onSelectGroup: (pubkey: string) => void
@@ -24,7 +24,7 @@ export function Sidebar({
   groups,
   activeGroup,
   identityPubkey,
-  relayConns,
+  validatorConns,
   channels,
   selectedChannel,
   onSelectGroup,
@@ -47,10 +47,10 @@ export function Sidebar({
     })
   }
 
-  const connectedCount = relayConns.filter((r) => r.connected).length
-  const totalRelays = relayConns.length
+  const connectedCount = validatorConns.filter((connection) => connection.connected).length
+  const totalValidators = validatorConns.length
   const dotClass =
-    connectedCount === totalRelays && totalRelays > 0
+    connectedCount === totalValidators && totalValidators > 0
       ? styles.connDotGreen
       : connectedCount > 0
         ? styles.connDotAmber

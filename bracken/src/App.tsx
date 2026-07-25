@@ -7,29 +7,36 @@ import { MessageList } from './components/MessageList'
 import type { SlashCommand } from './components/Composer'
 import { Composer } from './components/Composer'
 import { AddGroupModal } from './components/AddGroupModal'
-import { MemberDrawer, RelayDrawer } from './components/Drawers'
+import { MemberDrawer, ValidatorDrawer } from './components/Drawers'
 import { FernLogo } from './components/FernLogo'
 import { SettingsModal } from './components/SettingsModal'
 import { GroupInfoModal } from './components/GroupInfoModal'
-import { getEventIds } from './fern/db'
 import { deriveGroupState } from './fern/state'
+import { validatorQuorum as quorumFor } from './fern/bft'
 import type { FernEvent } from './fern/events'
 import { isValidPubkey } from './fern/utils'
 import { randomHexId } from './fern/utils'
 import { useDefiniteOverlayClick } from './hooks/useDefiniteOverlayClick'
 import styles from './styles/components.module.css'
 
-const DagViewer = lazy(() =>
-  import('./components/DagViewer').then((module) => ({ default: module.DagViewer })),
+const ChainViewer = lazy(() =>
+  import('./components/ChainViewer').then((module) => ({ default: module.ChainViewer })),
 )
+
+function compareEventOrder(a: FernEvent, b: FernEvent): number {
+  if (a.type === 'genesis') return -1
+  if (b.type === 'genesis') return 1
+  if (a.bft?.status !== b.bft?.status) return a.bft?.status === 'finalized' ? -1 : 1
+  return (a.bft?.height ?? Number.MAX_SAFE_INTEGER) - (b.bft?.height ?? Number.MAX_SAFE_INTEGER)
+    || (a.bft?.position ?? Number.MAX_SAFE_INTEGER) - (b.bft?.position ?? Number.MAX_SAFE_INTEGER)
+    || a.ts - b.ts
+    || a.id.localeCompare(b.id)
+}
 
 function computeNicknames(events: FernEvent[]): Map<string, string> {
   const sorted = [...events]
     .filter((e) => e.type === 'chat.nickname_set')
-    .sort((a, b) => {
-      if (a.ts !== b.ts) return a.ts - b.ts
-      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
-    })
+    .sort(compareEventOrder)
   const nicknames = new Map<string, string>()
   for (const e of sorted) {
     const nick = e.content['nickname'] as string
@@ -42,12 +49,7 @@ function computeNicknames(events: FernEvent[]): Map<string, string> {
 function computeChannelNames(events: FernEvent[]): Map<string, string> {
   const sorted = [...events]
     .filter((e) => e.type === 'genesis' || e.type === 'chat.channel_create' || e.type === 'chat.channel_update')
-    .sort((a, b) => {
-      if (a.type === 'genesis' && b.type !== 'genesis') return -1
-      if (a.type !== 'genesis' && b.type === 'genesis') return 1
-      if (a.ts !== b.ts) return a.ts - b.ts
-      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
-    })
+    .sort(compareEventOrder)
   const names = new Map<string, string>()
   for (const event of sorted) {
     if (event.type === 'genesis') {
@@ -85,61 +87,49 @@ const ADMIN_COMMANDS: SlashCommand[] = [
   { cmd: '/invite', desc: 'Invite a pubkey' },
   { cmd: '/promote', desc: 'Promote a member to admin' },
   { cmd: '/demote', desc: 'Demote an admin' },
-  { cmd: '/relay-add', desc: 'Add canonical relays' },
-  { cmd: '/relay-remove', desc: 'Remove canonical relays' },
   { cmd: '/name', desc: 'Set group name' },
   { cmd: '/description', desc: 'Set group description' },
   { cmd: '/channel-create', desc: 'Create a new channel' },
   { cmd: '/channel-delete', desc: 'Delete a channel' },
+  { cmd: '/validator-add', desc: 'Add a validator: /validator-add <url> <SyncReady JSON>' },
+  { cmd: '/validator-remove', desc: 'Remove a validator by URL' },
 ]
 
 function firstArg(args: string): string {
   return args.trim().split(/\s+/, 1)[0] ?? ''
 }
 
-function parseRelayArgs(args: string): string[] {
-  return args
-    .split(/[\s,]+/)
-    .map((relay) => relay.trim())
-    .filter(Boolean)
-}
-
-function uniqueRelays(relays: string[]): string[] {
-  return [...new Set(relays)]
-}
-
 function pendingJoinFromLocation(): PendingJoin | null {
   const params = new URLSearchParams(window.location.search)
   const group = params.get('group')?.trim()
   if (!group || !isValidPubkey(group)) return null
-  const relaysParam = params.get('relays') ?? ''
-  const relays = relaysParam
+  const validatorsParam = params.get('validators') ?? params.get('relays') ?? ''
+  const validators = validatorsParam
     .split(/[\s,]+/)
     .map((r) => r.trim())
     .filter(Boolean)
-  return { pubkey: group, relays }
+  return { pubkey: group, validators }
 }
 
-function dagGroupFromLocation(): string | null {
-  const match = window.location.pathname.match(/^\/dag\/([0-9a-f]{64})$/)
+function chainGroupFromLocation(): string | null {
+  const match = window.location.pathname.match(/^\/chain\/([0-9a-f]{64})$/)
   return match && isValidPubkey(match[1]) ? match[1] : null
 }
 
-function dagPath(groupPubkey: string): string {
-  return `/dag/${groupPubkey}`
+function chainPath(groupPubkey: string): string {
+  return `/chain/${groupPubkey}`
 }
 
 export default function App() {
   const bracken = useBracken()
   const [showAddGroup, setShowAddGroup] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
-  const [showRelays, setShowRelays] = useState(false)
+  const [showValidators, setShowValidators] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showGroupInfo, setShowGroupInfo] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
-  const [dagGroupPubkey, setDagGroupPubkey] = useState<string | null>(() => dagGroupFromLocation())
+  const [chainGroupPubkey, setChainGroupPubkey] = useState<string | null>(() => chainGroupFromLocation())
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [localEventIds, setLocalEventIds] = useState<Set<string>>(new Set())
   const [pendingJoin, setPendingJoin] = useState<PendingJoin | null>(() => pendingJoinFromLocation())
   const [modalInitial, setModalInitial] = useState<{ address?: string; error?: string | null } | null>(null)
   const helpOverlayHandlers = useDefiniteOverlayClick(() => setShowHelp(false))
@@ -158,24 +148,20 @@ export default function App() {
     setPendingJoin(null)
   }, [])
 
-  const openDag = useCallback((groupPubkey: string) => {
-    window.history.pushState(null, '', dagPath(groupPubkey))
-    setDagGroupPubkey(groupPubkey)
+  const openChain = useCallback((groupPubkey: string) => {
+    window.history.pushState(null, '', chainPath(groupPubkey))
+    setChainGroupPubkey(groupPubkey)
   }, [])
 
-  const closeDag = useCallback(() => {
+  const closeChain = useCallback(() => {
     window.history.pushState(null, '', '/')
-    setDagGroupPubkey(null)
+    setChainGroupPubkey(null)
   }, [])
 
   useEffect(() => {
-    getEventIds().then(setLocalEventIds)
-  }, [bracken.events])
-
-  useEffect(() => {
-    const syncDagRoute = () => setDagGroupPubkey(dagGroupFromLocation())
-    window.addEventListener('popstate', syncDagRoute)
-    return () => window.removeEventListener('popstate', syncDagRoute)
+    const syncChainRoute = () => setChainGroupPubkey(chainGroupFromLocation())
+    window.addEventListener('popstate', syncChainRoute)
+    return () => window.removeEventListener('popstate', syncChainRoute)
   }, [])
 
   useEffect(() => {
@@ -186,14 +172,14 @@ export default function App() {
   const isAlreadyMember =
     pendingJoin !== null &&
     bracken.groups.some((g) => g.pubkey === pendingJoin.pubkey)
-  const dagGroupEntry = dagGroupPubkey
-    ? bracken.groups.find((g) => g.pubkey === dagGroupPubkey) ?? null
+  const chainGroupEntry = chainGroupPubkey
+    ? bracken.groups.find((g) => g.pubkey === chainGroupPubkey) ?? null
     : null
 
   useEffect(() => {
-    if (!dagGroupPubkey || !dagGroupEntry || bracken.activeGroup === dagGroupPubkey) return
-    bracken.setActiveGroup(dagGroupPubkey)
-  }, [bracken, dagGroupEntry, dagGroupPubkey])
+    if (!chainGroupPubkey || !chainGroupEntry || bracken.activeGroup === chainGroupPubkey) return
+    bracken.setActiveGroup(chainGroupPubkey)
+  }, [bracken, chainGroupEntry, chainGroupPubkey])
 
   const rejectedIds = useMemo(() => {
     if (!bracken.events || bracken.events.length === 0) return new Set<string>()
@@ -228,10 +214,11 @@ export default function App() {
     if (!bracken.state) return [] as { id: string; name: string; description: string; number: number }[]
     return [...bracken.state.channels.values()].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
   }, [bracken.state])
+  const defaultChannel = bracken.state?.chatSettings.default_channel ?? ''
   const selectedChannel = bracken.state?.channels.has(storedSelectedChannel)
     ? storedSelectedChannel
-    : bracken.state?.channels.has(bracken.state.chatSettings.default_channel)
-      ? bracken.state.chatSettings.default_channel
+    : bracken.state?.channels.has(defaultChannel)
+      ? defaultChannel
       : channels[0]?.id ?? ''
 
   const isViewerAdmin = bracken.identity ? admins.has(bracken.identity.publicKey) : false
@@ -247,11 +234,11 @@ export default function App() {
     )
   }
 
-  if (dagGroupPubkey && !dagGroupEntry) {
+  if (chainGroupPubkey && !chainGroupEntry) {
     return (
       <div className={styles.emptyState}>
         <p className={styles.emptyStateTitle}>You're not in that group</p>
-        <button className={styles.secondaryBtn} onClick={closeDag}>Back to chat</button>
+        <button className={styles.secondaryBtn} onClick={closeChain}>Back to chat</button>
       </div>
     )
   }
@@ -285,8 +272,11 @@ export default function App() {
   const activeGroupEntry = bracken.groups.find(
     (g) => g.pubkey === bracken.activeGroup,
   )
+  const activeValidatorCount = bracken.state?.validatorSet.validators.length
+    ?? activeGroupEntry?.validators.length
+    ?? 0
 
-  if (dagGroupPubkey && dagGroupEntry && activeGroupEntry?.pubkey !== dagGroupPubkey) {
+  if (chainGroupPubkey && chainGroupEntry && activeGroupEntry?.pubkey !== chainGroupPubkey) {
     return (
       <div className={styles.emptyState}>
         <FernLogo size={28} />
@@ -294,28 +284,33 @@ export default function App() {
     )
   }
 
-  if (dagGroupPubkey && dagGroupEntry && activeGroupEntry?.pubkey === dagGroupPubkey) {
+  if (chainGroupPubkey && chainGroupEntry && activeGroupEntry?.pubkey === chainGroupPubkey) {
     return (
       <Suspense fallback={<div className={styles.emptyState}><FernLogo size={28} /></div>}>
-        <DagViewer
-          groupName={bracken.state?.metadata.name || dagGroupEntry.name}
-          groupPubkey={dagGroupEntry.pubkey}
+        <ChainViewer
+          groupName={bracken.state?.metadata.name || chainGroupEntry.name}
+          groupPubkey={chainGroupEntry.pubkey}
           events={bracken.events}
-          onClose={closeDag}
+          validatorCount={activeValidatorCount}
+          onClose={closeChain}
         />
       </Suspense>
     )
   }
 
-  const totalRelays = bracken.relayConns.length
-    || (bracken.state?.relays.length ?? activeGroupEntry?.relays.length ?? 0)
-  const connectedRelays = bracken.relayConns.filter((c) => c.connected).length
-  const relayCountClass =
-    connectedRelays >= 3
-      ? styles.relayCountGreen
-      : connectedRelays === 2
-        ? styles.relayCountAmber
-        : styles.relayCountRed
+  const totalValidators = bracken.validatorConns.length
+    || activeGroupEntry?.validators.length
+    || 0
+  const connectedValidators = bracken.validatorConns.filter((connection) => connection.connected).length
+  const validatorQuorum = bracken.state
+    ? quorumFor(bracken.state.validatorSet)
+    : totalValidators
+  const validatorCountClass =
+    validatorQuorum > 0 && connectedValidators > validatorQuorum
+      ? styles.validatorCountGreen
+      : validatorQuorum > 0 && connectedValidators === validatorQuorum
+        ? styles.validatorCountAmber
+        : styles.validatorCountRed
   const canPost =
     bracken.state?.joined.has(bracken.identity.publicKey) ?? false
   const isBanned = bracken.state
@@ -332,7 +327,7 @@ export default function App() {
           groups={bracken.groups}
           activeGroup={bracken.activeGroup}
           identityPubkey={bracken.identity.publicKey}
-          relayConns={bracken.relayConns}
+          validatorConns={bracken.validatorConns}
           channels={channels}
           selectedChannel={selectedChannel}
           onSelectGroup={(pk) => {
@@ -388,20 +383,26 @@ export default function App() {
                   {bracken.state?.joined.size ?? 0} members
                 </button>
                 <button
-                  className={`${styles.relayCountBadge} ${relayCountClass}`}
-                  onClick={() => setShowRelays(true)}
-                  title={`${connectedRelays} of ${totalRelays} canonical relay${totalRelays === 1 ? '' : 's'} connected`}
+                  className={`${styles.validatorCountBadge} ${validatorCountClass}`}
+                  onClick={() => setShowValidators(true)}
+                  title={`${connectedValidators} of ${totalValidators} validator${totalValidators === 1 ? '' : 's'} connected`}
                 >
-                  {connectedRelays}/{totalRelays}
+                  {connectedValidators}/{totalValidators}
                 </button>
               </div>
             </div>
+
+            {activeValidatorCount > 0 && activeValidatorCount < 4 && (
+              <div className={styles.smallSetWarning} role="alert">
+                Warning: this group uses {activeValidatorCount}-validator unanimous small-set
+                mode. Every validator must participate; any unavailable validator halts consensus.
+              </div>
+            )}
 
             <MessageList
               events={bracken.events}
               rejectedIds={rejectedIds}
               connectedEventIds={acceptedEventIds}
-              localEventIds={localEventIds}
               admins={admins}
               joined={joinedSet}
               nicknames={nicknames}
@@ -443,23 +444,6 @@ export default function App() {
                   await bracken.adminAction('admin_add', firstArg(args))
                 } else if (isViewerAdmin && cmd === '/demote') {
                   await bracken.adminAction('admin_remove', firstArg(args))
-                } else if (isViewerAdmin && cmd === '/relay-add') {
-                  const relaysToAdd = parseRelayArgs(args)
-                  if (relaysToAdd.length > 0) {
-                    const currentRelays = bracken.state?.relays ?? activeGroupEntry.relays
-                    await bracken.adminAction('relay_update', '', {
-                      relays: uniqueRelays([...currentRelays, ...relaysToAdd]),
-                    })
-                  }
-                } else if (isViewerAdmin && cmd === '/relay-remove') {
-                  const relaysToRemove = new Set(parseRelayArgs(args))
-                  if (relaysToRemove.size > 0) {
-                    const currentRelays = bracken.state?.relays ?? activeGroupEntry.relays
-                    const relays = currentRelays.filter((relay) => !relaysToRemove.has(relay))
-                    if (relays.length > 0) {
-                      await bracken.adminAction('relay_update', '', { relays })
-                    }
-                  }
                 } else if (isViewerAdmin && cmd === '/name' && args.trim()) {
                   await bracken.adminAction('metadata_update', '', { name: args.trim() })
                 } else if (isViewerAdmin && cmd === '/description') {
@@ -469,6 +453,15 @@ export default function App() {
                 } else if (isViewerAdmin && cmd === '/channel-delete' && args.trim()) {
                   const channel = [...(bracken.state?.channels.values() ?? [])].find((ch) => ch.name === args.trim() || ch.id === args.trim())
                   if (channel) await bracken.adminAction('chat.channel_delete', '', { id: channel.id, name: channel.name })
+                } else if (isViewerAdmin && cmd === '/validator-add') {
+                  const url = firstArg(args)
+                  const readinessJson = args.trim().slice(url.length).trim()
+                  if (!url || !readinessJson) return
+                  await bracken.addValidatorByUrl(url, readinessJson)
+                } else if (isViewerAdmin && cmd === '/validator-remove') {
+                  const url = firstArg(args)
+                  if (!url) return
+                  await bracken.removeValidatorByUrl(url)
                 }
               }}
               commands={slashCommands}
@@ -506,10 +499,12 @@ export default function App() {
           onAdminAction={bracken.adminAction}
         />
       )}
-      {showRelays && (
-        <RelayDrawer
-          relayConns={bracken.relayConns}
-          onClose={() => setShowRelays(false)}
+      {showValidators && (
+        <ValidatorDrawer
+          validatorConns={bracken.validatorConns}
+          validatorSet={bracken.state?.validatorSet ?? null}
+          onFetchStatus={bracken.fetchValidatorStatus}
+          onClose={() => setShowValidators(false)}
         />
       )}
       {showGroupInfo && activeGroupEntry && (
@@ -517,10 +512,11 @@ export default function App() {
           name={bracken.state?.metadata.name || activeGroupEntry.name}
           pubkey={activeGroupEntry.pubkey}
           description={bracken.state?.metadata.description ?? ''}
-          relays={bracken.state?.relays ?? activeGroupEntry.relays}
-          onViewDag={() => {
+          validators={activeGroupEntry.validators}
+          validatorCount={activeValidatorCount}
+          onViewChain={() => {
             setShowGroupInfo(false)
-            openDag(activeGroupEntry.pubkey)
+            openChain(activeGroupEntry.pubkey)
           }}
           onLeaveGroup={async () => {
             await bracken.leaveGroup(activeGroupEntry.pubkey)
@@ -551,12 +547,12 @@ export default function App() {
             </div>
             <p>
               Bracken is a group messaging app built on the FERN protocol. It
-              supports decentralized, censorship-resistant communication by
-              syncing signed group events across many relay servers.
+              supports decentralized, censorship-resistant communication with
+              per-group Byzantine-fault-tolerant validator consensus.
             </p>
             <p>
               Everything runs client-side: identity keys, message verification,
-              group state, and event validation happen in your browser.
+              commit certificates, group state, and event validation happen in your browser.
             </p>
             <a
               className={styles.helpLink}

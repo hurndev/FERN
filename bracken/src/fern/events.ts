@@ -1,60 +1,112 @@
 import type { Keypair } from './crypto'
 import { sign, verifySignature } from './crypto'
-import { MAX_EVENT_BYTES, MAX_PARENTS, MAX_TAG_ITEMS, MAX_TAG_STRING_BYTES, MAX_TAGS, MAX_TYPE_BYTES } from './limits'
+import {
+  MAX_EVENT_BYTES,
+  MAX_TAG_ITEMS,
+  MAX_TAG_STRING_BYTES,
+  MAX_TAGS,
+  MAX_TYPE_BYTES,
+} from './limits'
 import { sha256Hex, isValidPubkey, isValidEventId, isValidSig } from './utils'
 
+export const PROTOCOL_VERSION = 'fern-bft-1'
+
+export interface ConsensusPosition {
+  status: 'pending' | 'finalized'
+  height?: number
+  position?: number
+  certifiedTimeMs?: number
+}
+
 export interface FernEvent {
+  protocol: typeof PROTOCOL_VERSION
   id: string
   type: string
   group: string
   author: string
-  parents: string[]
+  seq: number
   content: Record<string, unknown>
   ts: number
   tags: string[][]
   sig: string
+  bft?: ConsensusPosition
 }
 
-export type EventInput = Omit<FernEvent, 'id' | 'sig'>
+export type EventInput = Omit<FernEvent, 'protocol' | 'id' | 'sig' | 'bft'> & {
+  protocol?: typeof PROTOCOL_VERSION
+}
+
+export type WireEvent = Omit<FernEvent, 'bft'>
+
+function compareCodePoints(a: string, b: string): number {
+  const left = Array.from(a, (value) => value.codePointAt(0)!)
+  const right = Array.from(b, (value) => value.codePointAt(0)!)
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    if (left[index] === undefined) return -1
+    if (right[index] === undefined) return 1
+    if (left[index] !== right[index]) return left[index] - right[index]
+  }
+  return 0
+}
 
 export function sortKeysDeep(obj: unknown): unknown {
-  if (obj === null || typeof obj !== 'object') return obj
+  if (obj === null || typeof obj === 'boolean' || typeof obj === 'string') return obj
+  if (typeof obj === 'number') {
+    if (!Number.isSafeInteger(obj)) throw new TypeError('canonical JSON permits only safe integers')
+    return obj
+  }
   if (Array.isArray(obj)) return obj.map(sortKeysDeep)
+  if (typeof obj !== 'object') throw new TypeError(`value is not canonical JSON: ${typeof obj}`)
   const sorted: Record<string, unknown> = {}
-  for (const key of Object.keys(obj as Record<string, unknown>).sort()) {
+  for (const key of Object.keys(obj as Record<string, unknown>).sort(compareCodePoints)) {
     sorted[key] = sortKeysDeep((obj as Record<string, unknown>)[key])
   }
   return sorted
 }
 
+export function canonicalJson(value: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(sortKeysDeep(value)))
+}
+
+export function toWireEvent(event: FernEvent): WireEvent {
+  return {
+    protocol: event.protocol,
+    id: event.id,
+    type: event.type,
+    group: event.group,
+    author: event.author,
+    seq: event.seq,
+    content: event.content,
+    ts: event.ts,
+    tags: event.tags,
+    sig: event.sig,
+  }
+}
+
 export function canonicalSerialization(event: EventInput | FernEvent): Uint8Array {
-  const parents = [...event.parents].sort()
-  const content = sortKeysDeep(event.content)
   const tags = [...event.tags].sort((a, b) => {
     for (let i = 0; i < Math.max(a.length, b.length); i++) {
-      const av = a[i] ?? ''
-      const bv = b[i] ?? ''
-      if (av < bv) return -1
-      if (av > bv) return 1
+      if (i >= a.length) return -1
+      if (i >= b.length) return 1
+      const compared = compareCodePoints(a[i], b[i])
+      if (compared) return compared
     }
     return 0
   })
-  const arr = [
+  return canonicalJson([
+    event.protocol ?? PROTOCOL_VERSION,
     event.type,
     event.group,
     event.author,
-    parents,
-    content,
+    event.seq,
+    event.content,
     event.ts,
     tags,
-  ]
-  const json = JSON.stringify(arr)
-  return new TextEncoder().encode(json)
+  ])
 }
 
 export async function computeId(event: EventInput | FernEvent): Promise<string> {
-  const bytes = canonicalSerialization(event)
-  return sha256Hex(bytes)
+  return sha256Hex(canonicalSerialization(event))
 }
 
 export async function buildEvent(
@@ -62,14 +114,15 @@ export async function buildEvent(
   keypair: Keypair,
   groupKeypair?: Keypair,
 ): Promise<FernEvent> {
-  const isGenesis = input.type === 'genesis'
-  const signingKey = isGenesis ? (groupKeypair ?? keypair) : keypair
-
-  const bytes = canonicalSerialization(input)
-  const sig = sign(signingKey.secretKey, bytes)
-  const id = await sha256Hex(bytes)
-
-  return { ...input, id, sig }
+  const normalized = { ...input, protocol: PROTOCOL_VERSION } as EventInput
+  const signingKey = input.type === 'genesis' ? (groupKeypair ?? keypair) : keypair
+  const bytes = canonicalSerialization(normalized)
+  return {
+    ...normalized,
+    protocol: PROTOCOL_VERSION,
+    id: await sha256Hex(bytes),
+    sig: sign(signingKey.secretKey, bytes),
+  }
 }
 
 export class VerificationError extends Error {
@@ -79,7 +132,9 @@ export class VerificationError extends Error {
   }
 }
 
-const EVENT_FIELDS = new Set(['id', 'type', 'group', 'author', 'parents', 'content', 'ts', 'tags', 'sig'])
+const EVENT_FIELDS = new Set([
+  'protocol', 'id', 'type', 'group', 'author', 'seq', 'content', 'ts', 'tags', 'sig',
+])
 const textEncoder = new TextEncoder()
 
 export async function verifyEvent(event: FernEvent): Promise<void> {
@@ -92,62 +147,35 @@ export async function verifyEvent(event: FernEvent): Promise<void> {
   for (const key of keys) {
     if (!EVENT_FIELDS.has(key)) throw new VerificationError(`unsigned extra field: ${key}`)
   }
-  if (textEncoder.encode(JSON.stringify(event)).length > MAX_EVENT_BYTES)
+  if (event.protocol !== PROTOCOL_VERSION)
+    throw new VerificationError(`unsupported protocol: ${event.protocol}`)
+  if (textEncoder.encode(JSON.stringify(toWireEvent(event))).length > MAX_EVENT_BYTES)
     throw new VerificationError('event exceeds 32 KiB')
-  if (!event.type || typeof event.type !== 'string')
-    throw new VerificationError('type must be a non-empty string')
-  if (textEncoder.encode(event.type).length > MAX_TYPE_BYTES)
-    throw new VerificationError('type exceeds maximum length')
-  if (!isValidPubkey(event.group))
-    throw new VerificationError('group must be 64-char lowercase hex')
-  if (!isValidPubkey(event.author))
-    throw new VerificationError('author must be 64-char lowercase hex')
-  if (event.id && !isValidEventId(event.id))
-    throw new VerificationError('id must be 64-char lowercase hex')
-  if (event.sig && !isValidSig(event.sig))
-    throw new VerificationError('sig must be 128-char lowercase hex')
+  if (!event.type || textEncoder.encode(event.type).length > MAX_TYPE_BYTES)
+    throw new VerificationError('invalid event type')
+  if (!isValidPubkey(event.group) || !isValidPubkey(event.author))
+    throw new VerificationError('invalid group or author key')
+  if (!isValidEventId(event.id) || !isValidSig(event.sig))
+    throw new VerificationError('invalid event id or signature')
+  if (!Number.isInteger(event.seq) || (event.type === 'genesis' ? event.seq !== 0 : event.seq < 1))
+    throw new VerificationError('invalid author sequence')
   if (!Number.isInteger(event.ts) || event.ts <= 0)
     throw new VerificationError('ts must be a positive integer')
   if (typeof event.content !== 'object' || event.content === null || Array.isArray(event.content))
     throw new VerificationError('content must be a JSON object')
-  if (!Array.isArray(event.parents))
-    throw new VerificationError('parents must be an array')
-  if (event.type === 'genesis' && event.parents.length !== 0)
-    throw new VerificationError('genesis must have empty parents')
-  if (event.type !== 'genesis' && event.parents.length === 0)
-    throw new VerificationError('non-genesis event must have at least one parent')
-  if (event.type !== 'genesis' && event.parents.length > MAX_PARENTS)
-    throw new VerificationError('too many parents')
-  const uniqueParents = new Set(event.parents)
-  if (uniqueParents.size !== event.parents.length)
-    throw new VerificationError('parents must be unique')
-  for (const p of event.parents) {
-    if (!isValidEventId(p))
-      throw new VerificationError(`parent '${p.slice(0, 20)}...' must be 64-char lowercase hex`)
-  }
-  if (!Array.isArray(event.tags))
-    throw new VerificationError('tags must be an array')
-  if (event.tags.length > MAX_TAGS)
-    throw new VerificationError('too many tags')
+  if (!Array.isArray(event.tags) || event.tags.length > MAX_TAGS)
+    throw new VerificationError('invalid tags')
   for (const tag of event.tags) {
-    if (!Array.isArray(tag))
-      throw new VerificationError('each tag must be an array')
-    if (tag.length > MAX_TAG_ITEMS)
-      throw new VerificationError('tag has too many elements')
-    for (const elem of tag) {
-      if (typeof elem !== 'string')
-        throw new VerificationError('each tag element must be a string')
-      if (textEncoder.encode(elem).length > MAX_TAG_STRING_BYTES)
-        throw new VerificationError('tag string exceeds maximum length')
+    if (!Array.isArray(tag) || tag.length > MAX_TAG_ITEMS)
+      throw new VerificationError('invalid tag')
+    for (const item of tag) {
+      if (typeof item !== 'string' || textEncoder.encode(item).length > MAX_TAG_STRING_BYTES)
+        throw new VerificationError('invalid tag item')
     }
   }
-
-  const computedId = await computeId(event)
-  if (computedId !== event.id)
-    throw new VerificationError(`Event ID mismatch: expected ${computedId}, got ${event.id}`)
-
-  const pubkey = event.type === 'genesis' ? event.group : event.author
-  const bytes = canonicalSerialization(event)
-  if (!verifySignature(pubkey, bytes, event.sig))
-    throw new VerificationError('Invalid signature')
+  const id = await computeId(event)
+  if (id !== event.id) throw new VerificationError('event id mismatch')
+  const signingKey = event.type === 'genesis' ? event.group : event.author
+  if (!verifySignature(signingKey, canonicalSerialization(event), event.sig))
+    throw new VerificationError('invalid event signature')
 }

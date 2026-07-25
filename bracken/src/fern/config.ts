@@ -13,6 +13,6 @@ function parseHints(value: string | undefined): string[] {
   return parsed.length > 0 ? parsed : FALLBACK_HINTS
 }
 
-export const DEFAULT_RELAY_HINTS: string[] = parseHints(
-  import.meta.env.VITE_RELAY_URL as string | undefined,
+export const DEFAULT_VALIDATOR_HINTS: string[] = parseHints(
+  (import.meta.env.VITE_VALIDATOR_URL ?? import.meta.env.VITE_RELAY_URL) as string | undefined,
 )

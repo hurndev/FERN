@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { DEFAULT_RELAY_HINTS } from '../fern/config'
+import { DEFAULT_VALIDATOR_HINTS } from '../fern/config'
 import { useDefiniteOverlayClick } from '../hooks/useDefiniteOverlayClick'
 import styles from '../styles/components.module.css'
 
@@ -7,7 +7,7 @@ interface Props {
   onJoin: (address: string) => Promise<void>
   onCreate: (
     name: string,
-    relays: string[],
+    validators: string[],
     options?: { description?: string; public?: boolean },
   ) => Promise<{ ok: number; total: number; error?: string }>
   onClose: () => void
@@ -15,7 +15,7 @@ interface Props {
   initialError?: string | null
 }
 
-function normalizeRelay(url: string): string {
+function normalizeValidator(url: string): string {
   const u = url.trim()
   if (!u) return ''
   if (!u.startsWith('ws://') && !u.startsWith('wss://')) {
@@ -24,12 +24,12 @@ function normalizeRelay(url: string): string {
   return u
 }
 
-function parseRelays(input: string): string[] {
+function parseValidators(input: string): string[] {
   return [
     ...new Set(
       input
         .split(/[\s,]+/)
-        .map(normalizeRelay)
+        .map(normalizeValidator)
         .filter(Boolean),
     ),
   ]
@@ -46,7 +46,7 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [relays, setRelays] = useState(DEFAULT_RELAY_HINTS.join(', '))
+  const [validators, setValidators] = useState(DEFAULT_VALIDATOR_HINTS.join(', '))
   const [isPublic, setIsPublic] = useState(true)
   const [createBusy, setCreateBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
@@ -77,7 +77,7 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
     setJoinError(null)
     setJoinProgress([])
     try {
-      setJoinProgress((p) => [...p, 'Connecting to relay…'])
+      setJoinProgress((p) => [...p, 'Connecting to validator…'])
       await onJoin(address.trim())
       setJoinProgress((p) => [...p, 'Fetching history…', 'Ready.'])
       setTimeout(onClose, 500)
@@ -87,8 +87,11 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
     setJoinBusy(false)
   }
 
-  const parsedRelays = parseRelays(relays)
-  const canCreate = name.trim().length > 0 && parsedRelays.length > 0 && !createBusy
+  const parsedValidators = parseValidators(validators)
+  const validValidatorCount = parsedValidators.length > 0 && (
+    parsedValidators.length < 4 || (parsedValidators.length - 1) % 3 === 0
+  )
+  const canCreate = name.trim().length > 0 && validValidatorCount && !createBusy
   const canJoin = address.trim().length > 0 && !joinBusy
 
   const handleCreate = async () => {
@@ -98,22 +101,22 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
     setCreateProgress([])
     try {
       setCreateProgress((p) => [...p, 'Generating group keypair…'])
-      setCreateProgress((p) => [...p, 'Publishing genesis to relays…'])
+      setCreateProgress((p) => [...p, 'Publishing genesis to validators…'])
       const result = await onCreate(
         name.trim(),
-        parsedRelays,
+        parsedValidators,
         { description: description.trim(), public: isPublic },
       )
       if (result.total === 0) {
-        throw new Error('No relays configured.')
+        throw new Error('No validators configured.')
       }
       if (result.ok === 0) {
-        throw new Error(result.error ?? 'No relay accepted the genesis event.')
+        throw new Error(result.error ?? 'No validator accepted the genesis event.')
       }
       const line =
         result.ok === result.total
-          ? `Published to ${result.ok}/${result.total} relays.`
-          : `Published to ${result.ok}/${result.total} relays. ${result.error ?? ''}`
+          ? `Published to ${result.ok}/${result.total} validators.`
+          : `Published to ${result.ok}/${result.total} validators. ${result.error ?? ''}`
       setCreateProgress((p) => [...p, line, 'Ready.'])
       setTimeout(onClose, 800)
     } catch (e) {
@@ -153,7 +156,7 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
               className={styles.modalInput}
               value={address}
               onChange={(e) => setAddress(e.target.value)}
-              placeholder="fern:<pubkey>@<relay>,<relay>  or  https://bracken.example.com/?group=<pubkey>&relays="
+              placeholder="fern:<pubkey>@<validator>,<validator>  or  https://bracken.example.com/?group=<pubkey>&validators="
               disabled={joinBusy}
               autoFocus
               onKeyDown={(e) => {
@@ -205,18 +208,25 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
             </div>
 
             <div className={styles.modalField}>
-              <span className={styles.profileLabel}>Relay hints</span>
+              <span className={styles.profileLabel}>Validator endpoints</span>
               <input
                 className={styles.modalInput}
-                value={relays}
-                onChange={(e) => setRelays(e.target.value)}
-                placeholder={`${DEFAULT_RELAY_HINTS[0]}, wss://relay.example.com`}
+                value={validators}
+                onChange={(e) => setValidators(e.target.value)}
+                placeholder={`${DEFAULT_VALIDATOR_HINTS[0]}, wss://validator.example.com`}
                 disabled={createBusy}
                 spellCheck={false}
               />
               <span className={styles.modalHint}>
-                Comma or space separated. At least one canonical relay.
+                Use 1–3 unanimous test validators, or exactly 3f+1 standard validators.
+                Four validators tolerate one Byzantine fault without sacrificing liveness.
               </span>
+              {parsedValidators.length > 0 && parsedValidators.length < 4 && (
+                <div className={styles.smallSetWarning} role="alert">
+                  Warning: this group will require all {parsedValidators.length} validator{parsedValidators.length === 1 ? '' : 's'}
+                  {' '}to agree. Any unavailable validator will halt consensus.
+                </div>
+              )}
             </div>
 
             <label className={styles.checkboxRow}>

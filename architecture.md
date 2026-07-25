@@ -1,799 +1,420 @@
-# FERN — Fault-tolerant Event Relay Network
-## Architecture Overview
+# FERN-BFT Architecture
 
----
+## Status and scope
 
-## 1. Overview
+This document describes the implementation on the `FERN-BFT` branch. FERN is
+now a signed-event application replicated by one Tendermint-style consensus
+chain per group. It is not a causal DAG, and validators are active consensus
+participants rather than passive event forwarders.
 
-FERN is a decentralised, censorship-resistant protocol for public group chats. Identity and groups are cryptographic keypairs, not server accounts. All content is expressed as signed, immutable events arranged in a hash-linked Directed Acyclic Graph (DAG). Relays are interchangeable infrastructure with no authority over group state, membership, or identity.
+The normative wire and validation rules are in [bft-spec.md](bft-spec.md).
+[tendermint-design.md](tendermint-design.md) records the design that led to the
+rewrite, while [BFT-NOTES.md](BFT-NOTES.md) records deliberate deviations and
+unfinished work. The old DAG protocol remains in [spec.md](spec.md) only as
+historical reference.
 
-FERN is designed as a **general-purpose protocol** for applications that are fundamentally "public group chat" at their core. The protocol itself defines transport, identity, group management, and completeness verification. Individual applications (chat clients, polling tools, collaborative boards, etc.) define their own event types and content schemas on top of the protocol.
+## 1. System overview
 
----
+A FERN group is an independent replicated state machine. Users sign events,
+send them to the group's validators, and may show them locally as pending after
+receiving a validator's signed ingress receipt. A deterministic proposer orders
+a batch, validators certify when they first observed every event in that batch,
+and a Tendermint-style propose/prevote/precommit round finalizes a block.
 
-## 2. Design Goals
+Only a commit containing a quorum of precommits makes an event final. Final
+order is `(height, position)`. There is no parent relation, head set, gap
+healing, validator reconciliation, or client-selected conflict winner.
 
-- **User identity is portable** — not tied to any server or relay
-- **Group identity is not owned** by any relay; groups are cryptographic entities
-- **No relay can forge, rewrite, or silently censor messages**
-- **Groups survive relay failures and migrations**
-- **History is self-healing** through normal client behaviour
-- **Suitable for large public group chats** (Discord-server-like)
-- **IP hiding between members** — clients never connect to each other directly
-- **General-purpose foundation** — apps define their own event types on top
+```text
+                         one consensus domain per group
 
-## 2.1 Non-Goals
+   fern CLI / Bracken
+          |
+          | signed event
+          v
+   +------------------ active validator set ------------------+
+   | Validator A <---- signed peer messages ----> Validator B |
+   |      ^                         ^                         ^ |
+   |      +-------------------------+-------------------------+ |
+   |              candidate -> proposal -> votes -> commit     |
+   +-----------------------------------------------------------+
+          |                         |
+          +---- receipts/status ----+
+          +---- commits/pending ----> independently verifying client
 
-- **End-to-end encryption** — designed for public groups
-- **Cryptographic impossibility of censorship** — without consensus this is unattainable; the target is *detection and self-healing*
-- **Guaranteed message delivery** — best-effort with strong evidence trails
-- **Serverless or peer-to-peer transport** — clients only talk to relays
-- **Perfect split-view attack prevention** — defeated probabilistically by vantage diversity, not cryptographically (same trust model as Certificate Transparency)
-- **Multi-key threshold governance** — deferred; founder single-key for now, threshold signing is a future extension
+   Each validator: WebSocket server + multi-group node + SQLite store
+```
 
----
+The same validator process can host many groups, but each group has its own
+genesis, application state, validator epoch, height, mempool, safety journal,
+and consensus engine. A failure or validator-set change in one group does not
+alter another group's consensus state.
 
-## 3. Core Insight
+## 2. Goals and non-goals
 
-Split the responsibilities a traditional chat server holds into independent roles:
+The current architecture aims to provide:
 
-| Responsibility | Held by |
-|---|---|
-| Storing and transporting messages | **Relays** — interchangeable servers anyone can run |
-| Making admin decisions (bans, etc.) | **Founder + admins** — their decisions are public, signed events |
-| Catching misbehavior | **Every client does this for free** just by reading the chat |
+- permanent, independently verifiable final order;
+- safety with at most `f` Byzantine validators in a `3f+1` set;
+- deterministic authorization and state transitions;
+- crash-safe vote and lock behavior;
+- signed evidence for ingress, checkpoints, history hosting, and validator
+  admission;
+- roughly the same group-chat workflows in the CLI and Bracken as before the
+  rewrite.
 
-And the resolution of the moderation-vs-censorship paradox:
+The implementation prioritizes safety over availability. It intentionally
+does not provide an administrator override, owner recovery key, or automatic
+fork choice if quorum is lost. It also does not yet solve deterministic fair
+inclusion, authenticated peer channels, archival discovery, encrypted group
+content, or validator compensation.
 
-> **Admin actions (like bans) never delete anything from the log. They are state events that clients fold into a current state machine, then choose what to render. Moderation happens at the display layer, not the storage layer.**
+## 3. Identities and trust boundaries
 
-The log is permanently faithful and complete. Each client decides what to actually show. A "show banned messages" mode is trivial — the data is always there. The protocol guarantees the data; the client decides the rendering.
+FERN uses three distinct Ed25519 identities:
 
----
+- A **user key** signs ordinary and governance events. A user public key is the
+  durable application identity.
+- A **group key** signs only genesis. Its public key is the permanent group ID;
+  it is not a validator key and does not override consensus after genesis.
+- A **validator key** signs ingress receipts, candidates, timestamp
+  observations, proposals, votes, statuses, manifests, hosting attestations,
+  and readiness certificates.
 
-## 4. Cryptographic Primitives
+Validator endpoints are committed in application state. Transport is currently
+WebSocket over `ws://` or `wss://`; the peer connection itself is not mutually
+authenticated. Safety therefore rests on validation of the signed, domain-
+separated objects carried over it, not on connection identity. Operators
+should use `wss://` on untrusted networks even though object signatures remain
+mandatory.
 
-- **Keypairs**: Ed25519 throughout. Private keys are 32 bytes, public keys are 32 bytes, signatures are 64 bytes. All encoded as lowercase hex.
-- **Hashing**: SHA-256, encoded as lowercase hex.
-- **Event ID**: The SHA-256 hash of the event's canonical serialisation (see Section 6.3).
+The `operator` string attached to a validator is a display and local-policy
+label. It is self-asserted and is not cryptographic proof that two validators
+are independently controlled.
 
----
+## 4. Canonical objects and events
 
-## 5. Identity
+All identifiers and signatures use compact UTF-8 canonical JSON. Object
+signing payloads are domain-separated arrays; nested objects are recursively
+key-sorted. Floats, non-finite values, and integers outside the JavaScript safe
+integer range are rejected so Python and browser clients hash the same bytes.
 
-### 5.1 User Identity
-
-A user identity is an Ed25519 keypair generated locally on the user's device. There is no registration process. A user exists as soon as they generate a keypair. Identity is not tied to any relay or server.
-
-### 5.2 Group Identity
-
-A group has its own Ed25519 keypair, separate from the founder's user keypair. The group's public key **is** the group's identifier — there is no separate `group_id` hash. The group private key is the root of trust for the group's genesis event.
-
-- Used **only** to sign the genesis event
-- Should be treated as a high-value secret, stored offline, used once
-- The group pubkey is the permanent, shareable group identifier
-- A group address is shared as: `<group_pubkey>@<relay1>,<relay2>,<relay3>`
-
-This cleanly separates group identity from founder identity, enabling future key rotation or transfer of ownership.
-
-### 5.3 Relay Identity
-
-Each relay has its own Ed25519 keypair, used for signing event_receipts and group_statuses. Clients learn a relay's public key via a relay metadata endpoint (over TLS) on first connection and store it for subsequent verification. The relay's pubkey is its identity for all completeness-layer operations.
-
-### 5.4 Actor Roles
-
-- **Founder** — creates the group, holds the group private key (used once for genesis), and their user key for ongoing admin actions. The founder is the initial admin; subsequent admins can promote/demote other admins (the founder has no special authority beyond being the initial admin).
-- **Admins** — pubkeys with root group authority. Can sign protocol admin actions (invite, kick, ban, unban, admin promotion/demotion, relay updates, metadata updates). Apps may treat admins as app superusers, but richer apps can define app-level roles beneath this root authority.
-- **Members** — users who have an active `join` event (and no subsequent `leave` or `kick`). Can post events.
-- **Relays** — servers that store and serve events. Multiple per group; clients connect to several.
-- **Clients** — what users run. Connect to multiple relays, post, verify, monitor. Every client is automatically also a monitor — there is no separate monitor role.
-
-No peer-to-peer connections between clients. Clients only talk to relays. IPs are seen by relays, never by other group members. (Clients may use Tor/VPN at their option; the protocol does not mandate it.)
-
----
-
-## 6. Events
-
-Everything in FERN is an event. Messages, group creation, invites, joins, membership changes, relay list updates — all are expressed as events in the same format.
-
-### 6.1 Event Structure
+An event has exactly these fields:
 
 ```json
 {
-  "id":       "<sha256 of canonical serialisation>",
-  "type":     "<event type string>",
-  "group":    "<group pubkey hex>",
-  "author":   "<author pubkey hex>",
-  "parents":  ["<event id hex>", ...],
-  "content":  <JSON object, schema defined by type>,
-  "ts":       1711234567,
-  "tags":     [],
-  "sig":      "<ed25519 signature hex>"
+  "protocol": "fern-bft-1",
+  "id": "<sha256 hex>",
+  "type": "chat.message",
+  "group": "<group public key>",
+  "author": "<user public key>",
+  "seq": 1,
+  "content": {},
+  "ts": 1711234567,
+  "tags": [],
+  "sig": "<Ed25519 signature>"
 }
 ```
 
-### 6.2 Field Definitions
+The event ID is SHA-256 over:
 
-| Field | Type | Description |
-|---|---|---|
-| `id` | hex string | SHA-256 of the canonical serialisation |
-| `type` | string | Event type identifier (see Section 6.4) |
-| `group` | hex string | Public key of the group this event belongs to |
-| `author` | hex string | Public key of the event author |
-| `parents` | array of hex | IDs of parent events in the DAG (completeness propagation) |
-| `content` | JSON object | Type-specific payload, schema defined by `type` |
-| `ts` | integer | Unix timestamp in seconds |
-| `tags` | array | Reserved for protocol-level extensions. Empty by default. App-specific data goes in `content`, not `tags`. |
-| `sig` | hex string | Ed25519 signature over the canonical serialisation |
-
-### 6.3 Canonical Serialisation
-
-The canonical serialisation used for hashing and signing is a JSON array with fields in a fixed order, with no whitespace:
-
-```
-[type, group, author, parents, content, ts, tags]
+```text
+[protocol, type, group, author, seq, content, ts, tags]
 ```
 
-- `parents` is sorted lexicographically before serialising
-- `content` is serialised as a JSON object (always an object, never a bare string)
-- `tags` is sorted: by first element, then subsequent elements lexicographically
-- No trailing whitespace or newlines
-- `id = SHA256(canonical_serialisation)`
-- `sig = Ed25519Sign(privkey, canonical_serialisation)`
+The same payload is signed by `author`, except genesis is signed by the group
+key. There are no DAG parents. Every non-genesis author has a strictly
+increasing per-group sequence, and execution accepts only the next sequence.
+Conflicting pending events at the same author sequence are rejected locally;
+once one is finalized, every alternative is invalid.
 
-### 6.4 Type Namespacing
+The user-supplied `ts` field is provenance for display. It does not define
+consensus order, authorization, ban expiration, or validator transitions.
 
-Event types follow a namespacing convention:
+## 5. Genesis and chain commitments
 
-- **Protocol types** are bare strings without a dot: `genesis`, `join`, `ban`, `relay_update`, etc. These are reserved and defined by the protocol specification.
-- **App types** use the `appname.local_type` convention: `chat.message`, `chat.reaction`, `poll.vote`, `schedule.event`, etc. The first segment (before the dot) is the application name. Collisions are resolved socially, like package names in npm.
-- **`chat` is the official default app namespace**, maintained as part of FERN itself. It covers basic group chat features (messages, reactions, nicknames). Other namespaces (e.g., `poll`, `schedule`, `whiteboard`) can be built on top of FERN by anyone.
+Genesis commits the chain ID, group metadata, founder and initial admins,
+public/private join policy, application namespace, chat channels, and epoch-zero
+validator set. The group public key remains the addressable group identity.
 
-Rule: a type containing a `.` is app-namespaced; a type without a `.` is a protocol-reserved type. Apps MUST NOT use bare (no-dot) type names.
+Height zero is derived from genesis. Every later block commits to:
 
-The protocol treats all events uniformly for transport, validation, and completeness — it does not interpret `content`. Client-side apps validate content per their known types and ignore unknown types (forward compatibility — new event types don't break old clients).
+- group, chain ID, epoch, height, and round;
+- previous block hash, previous state root, and previous history root;
+- the full signed candidate and its timestamp evidence;
+- certified times for the ordered events;
+- the resulting application state root and cumulative history root.
 
-### 6.5 Verification
+The history root is a hash chain over finalized event IDs. `logical_bytes` is
+the exact cumulative size of canonical genesis and commit bytes. Both values
+appear in signed status, manifest, and readiness objects so a checkpoint
+describes not just a height but the exact retained history.
 
-To verify an event, a client must confirm:
+Blocks contain at least one event: a bounded list of ordinary events and at
+most one governance event. Ordinary events execute in listed order; governance
+executes last. This keeps a membership, channel, ban, or validator-set change
+from retroactively altering the validity of ordinary events earlier in the
+same block.
 
-1. The `id` matches the SHA-256 of the canonical serialisation
-2. The `sig` is a valid Ed25519 signature over the canonical serialisation, verifiable with the `author` pubkey
-3. The `author` is authorised to publish this event type at this point in the DAG (see Section 8.4)
-4. Exception: `genesis` is verified against the group pubkey (the `group` field)
+## 6. Validator sets and epochs
 
----
+Validators are equal-weight, unique by key and URL, and sorted by public key.
+There are two permitted validator-set modes, both with at most 100 validators:
 
-## 7. The Causal DAG
+- Standard BFT mode has `n=3f+1`, `n>=4`, and quorum `q=2f+1`.
+- Unanimous small-set mode has `1<=n<4`, declares `f=0`, and uses `q=n`.
 
-### 7.1 Structure
+Both modes use:
 
-Events form a Directed Acyclic Graph where edges are parent references. Every event except `genesis` must have at least one parent. The genesis event has an empty `parents` array and is the root of the DAG.
-
-When composing an event, the author references the **connected heads** — the most recent event IDs in the local store that are connected all the way back to the group's genesis event, and that no other connected event extends. Multiple parents are valid and represent concurrent branches being merged. This is similar to Git's commit DAG, with one extra safety rule: an event with a missing parent is stored as pending evidence, but is not a valid parent for future events until the missing chain is healed.
-
-**The DAG is for completeness propagation, not replies.** Reply threading is an app-level concern expressed in event `content` (e.g., `{"reply_to": "<event_id>"}` inside a `chat.message` content). The protocol DAG knows nothing about replies.
-
-### 7.2 Why the DAG Exists
-
-The DAG is not for integrity (signatures already defeat forgery) and not for ordering (display order is timestamp-based). It exists for **completeness propagation**:
-
-- If a client receives an event that references an unknown parent, it knows to fetch that parent. The parent's existence is attested by a signed event from a real author.
-- A relay that wants to censor message M must also censor every descendant of M, transitively, forever. The censor's surface area grows over time. Each suppressed descendant is itself a new fault.
-
-This raises the bar from "drop a message, hope nobody notices" to "drop an entire conversation tree forever." In active chats (the Discord-like scenario FERN targets), most messages quickly get descendants, so existence propagates naturally through normal chat activity.
-
-### 7.3 Gaps
-
-If a client has an event whose parent hash is unknown, that parent is considered a gap. The child event is disconnected until every missing parent chain has been healed back to genesis. Gaps are:
-
-- **Visible** — the missing hash is known from the child event's `parents` field
-- **Specifically addressable** — a client can request the missing event by its exact hash
-- **Not fatal to storage** — disconnected events are stored and used as evidence that a missing parent exists
-- **Not normal history** — disconnected events are not applied to group state, rendered as ordinary messages, or selected as parents for new events
-
-Clients must never discard events solely because their parents are absent.
-
-### 7.4 Gap Healing
-
-When a client detects a missing parent hash it should:
-
-1. Request the event by ID from every relay on the current canonical relay list
-2. If found, verify and store it
-3. If found on some relays but not others, publish it to the relays that were missing it (heal)
-4. Recompute the connected set. The child event enters normal state derivation and rendering only after its complete parent chain is connected to genesis.
-
-### 7.5 Honest Limits of the DAG
-
-The DAG is a **force multiplier**, not a completeness proof:
-
-- **Leaf messages with no descendants** get zero propagation benefit. If the last message in a quiet chat is censored, no descendant will ever reference it.
-- **All-relays-collude-and-suppress-the-whole-tree** censorship remains undetectable. The censor must win an ever-growing race forever, but if they do, the client has no signal.
-- **The DAG doesn't prove which relay received a message.** That's the job of event_receipts (Section 9.1).
-- **The DAG doesn't catch split-view attacks.** That's the job of signed group_statuses and vantage diversity (Section 9.2).
-
-The DAG is cheap (multiple parent IDs in an array; small client bookkeeping to track heads). It's included because it provides strong value in active chats at minimal cost.
-
----
-
-## 8. Group State
-
-Group state is derived entirely by replaying the genesis-connected subset of the DAG in timestamp order. There is no separate state database. Any relay or client with the same connected event history will derive identical state. Disconnected events remain in storage for gap healing and evidence, but do not affect group state.
-
-### 8.1 State Model
-
-```
-members:   set of pubkeys invited to the group
-joined:    set of pubkeys who have joined (have an active join)
-banned:    map of pubkey → {until, reason}
-admins:      set of pubkeys with admin privileges
-relays:    [url, url, ...]
-metadata:  { name, description }
-public:    boolean (from genesis)
-app:       primary app profile (e.g. chat)
-channels: app-owned chat channel map, when app == chat
+```text
+propagation threshold   = f + 1
+round catch-up threshold = f + 1
+proposer index           = (height + round - 1) mod n
 ```
 
-### 8.2 Derivation Rules
-
-Starting from genesis:
-
-- `members` is initialised with the founder pubkey
-- `joined` is initialised with the founder pubkey (the founder is automatically joined)
-- `admins` is initialised with the founder pubkey
-- `relays` is initialised from the genesis content
-- `metadata` is initialised from the genesis content
-- `public` is initialised from the genesis content
-- `banned` is initialised empty
-
-For each subsequent connected event in timestamp order:
-
-| Event type | State change |
-|---|---|
-| `invite` | Add `invitee` to `members` |
-| `join` | Add `author` to `joined` (if authorised — see 8.5) |
-| `leave` | Remove `author` from `joined` |
-| `kick` | Remove `target` from `joined` and `admins` (keep in `members`) |
-| `ban` | Add `target` to `banned` with `until` and `reason`. Ban persists until explicitly lifted. |
-| `unban` | Remove `target` from `banned` |
-| `admin_add` | Add `target` to `admins` |
-| `admin_remove` | Remove `target` from `admins` |
-| `relay_update` | Replace `relays` with new value |
-| `metadata_update` | Replace `metadata` fields present in content |
-| `chat.channel_create` | Add a chat channel object with ID equal to the create event ID |
-| `chat.channel_update` | Update channel metadata by stable channel ID |
-| `chat.channel_delete` | Remove a non-`general` channel by stable channel ID |
-| `chat.settings_update` | Update chat-wide settings such as default/system channel |
-
-When two events share the same timestamp and one's ID sorts before its parent's ID, the child will be rejected in the initial pass because its parent hasn't been applied yet. Implementations must re-evaluate rejected events in a convergence loop: after the initial pass, any rejected event whose parents are all now accepted must be re-validated and accepted if it passes. Repeat until no more events are accepted.
-
-### 8.3 Conflict Resolution
-
-When two events have the same timestamp and affect the same state field, the event with the lexicographically greater `id` wins. This rule is deterministic and produces the same result on all clients regardless of event arrival order.
-
-### 8.4 Authorisation
-
-Before applying a state change event, clients verify:
-
-- The `author` pubkey is in `admins` at the point in the DAG immediately before this event
-- Exception: `genesis` is verified against the group pubkey
-- Exception: `join` and `leave` are verified against the `author` pubkey directly (users can always join or leave for themselves)
-
-Events failing authorisation are discarded silently by clients. Their IDs remain valid as parent references in the DAG if they are connected to genesis. Relays store them regardless (relays do not enforce authorisation).
-
-### 8.5 Ban Semantics
-
-Bans work as follows:
-
-- A `ban` event adds the target to the `banned` map with an optional `until` timestamp and a `reason` string.
-- A banned user is removed from `joined` (they cannot post messages).
-- A ban **persists** until explicitly lifted by an `unban` event, or until the `until` timestamp passes (if set).
-- A `join` event from a banned user is discarded by clients.
-- A `kick` does **not** add to the banned map — the user can re-join. A `ban` prevents re-joining.
-- Promoting a banned user to admin does **not** automatically lift the ban. The ban must be explicitly lifted via `unban` first.
-
-This makes concurrent admin actions (one bans, another promotes in the same epoch without seeing the ban) predictable: a ban always persists until explicitly lifted.
-
-### 8.6 Posting Authorisation
-
-Only users in the `joined` set (and not in the `banned` set) may publish app-level events (e.g., `chat.message`). Messages from banned or non-joined users are stored by relays but rejected by clients. Relays do not enforce this — it is the client's responsibility.
-
-Users can view group history and state without joining. Joining is required only to post.
-
----
-
-## 9. Completeness Layer
-
-The hardest problem in the protocol. Solving it perfectly would require consensus (out of scope). The goal is to make censorship **detectable and provable** when attempted, and **self-healing** when relays lag.
-
-The threat model is explicitly scoped to **1-2 misbehaving relays** in a set of curated, trusted relays. All-relays-collude censorship is acknowledged as undetectable and out of scope.
-
-Six mechanisms, stacked:
-
-### 9.1 Event Receipts
-
-When a relay accepts an event from a client, it returns a signed event_receipt:
-
-```json
-{
-  "event_id": "<event id hex>",
-  "group":    "<group pubkey hex>",
-  "relay":    "<relay pubkey hex>",
-  "ts":       1711234567,
-  "sig":      "<ed25519 signature by relay key>"
-}
-```
-
-This means **a relay cannot deny having received an event it accepted**. The author keeps the event_receipt locally.
-
-Event receipts are **author-local and shared on-demand only**. They are NOT events in the DAG. They are NOT routinely gossiped or propagated. They stay on the author's device until needed.
-
-When the author (or any client) detects that a relay's group_status or responses contradict an event_receipt the author holds, the author publishes a **fraud proof** (Section 9.5) containing the event_receipt. That is the only time event_receipts are shared.
-
-This approach adds zero ongoing traffic overhead, keeps event_receipts cleanly out of the DAG, and avoids fragile propagation mechanisms. The author is the natural prosecutor — they have the strongest motive (their message was censored) and the evidence (their event_receipts).
-
-### 9.2 GroupStatuses
-
-Each relay periodically publishes a signed group_status committing to everything it knows for a group:
-
-```json
-{
-  "group":    "<group pubkey hex>",
-  "relay":    "<relay pubkey hex>",
-  "set_hash": "<sha256 of sorted, newline-concatenated event IDs>",
-  "tips":     ["<event id hex>", ...],
-  "count":    1452,
-  "prev":     "<previous group_status hash hex, or null>",
-  "ts":       1711234567,
-  "sig":      "<ed25519 signature by relay key>"
-}
-```
-
-The group_status is a signed commitment: "Here's the hash of everything I have for this group, as of this time."
-
-- **`set_hash`**: SHA-256 of all known event IDs, sorted lexicographically and joined with newlines. If two relays' `set_hash` values match, they have the same set. If they differ, investigation is needed.
-- **`tips`**: The current DAG frontier (events with no children). Quick structural comparison.
-- **`count`**: Total number of stored events. Quick sanity check.
-- **`prev`**: Hash of the relay's previous group_status, forming a per-relay group_status chain. Proves ordering: "Your group_status at T2 is a successor to your group_status at T1."
-
-GroupStatus issuance rate is configurable per relay (suggested default: every 5 seconds or every 100 new events, whichever comes first). Relays push group_statuses to subscribed clients automatically. Clients can also request the latest group_status on demand.
-
-Uses a simple sorted-set hash, not a Merkle tree with exclusion proofs. Monitors hold the full known-set and compare directly. Merkle exclusion proofs (allowing third parties to verify non-inclusion without holding the full set) are deferred.
-
-### 9.3 Monitor Pass (Every Client Is a Monitor)
-
-There is no separate monitor role. **Every client that reads a group is automatically a monitor**, because it:
-
-1. Is already required to connect to multiple relays (default K=3).
-2. Receives each relay's group_statuses as part of normal subscription.
-3. Holds the full set of events it has seen.
-4. Compares relay group_statuses against its local known-set and against each other.
-
-The audit pass runs on every group_status push:
-
-**For every client (cross-relay comparison):**
-
-- Compare each relay's group_status (`set_hash`, `tips`, `count`) to the client's local known-set and to other relays' group_statuses.
-- If they match: in sync.
-- If they differ: investigate. Request specific events the client has that the relay might be missing, and vice versa.
-- For events the client has that a relay's group_status doesn't include:
-  - If the event's parents are in the relay's set (parent IDs appear in events the relay has): the relay should have this event. Trigger heal (Section 9.4).
-  - If heal doesn't resolve the discrepancy (relay refuses to integrate): flag in local trust ledger.
-
-**For the author specifically (event_receipt-based proof):**
-
-- If the author holds an event_receipt from relay R for event E, but R's group_status (or response to a `get` request) doesn't include E: **provable censorship**. The event_receipt is signed by R proving it received E; the group_status/response proves E is absent. Publish a fraud proof (Section 9.5). Record in local trust ledger. De-list R locally.
-
-**Split-view defense:**
-
-Because group_statuses are signed, two clients comparing the group_statuses they received from the same relay can detect if the relay served them divergent views. Without signatures, a relay could serve different summaries to different clients and neither could prove it. Signed group_statuses make this provable when caught.
-
-### 9.4 Heal — The Network Self-Heals
-
-When a client notices a relay is missing events (detected via group_status divergence or via a gap in the DAG), it doesn't just flag the fault — it fetches the missing events from a sibling relay and republishes them to the lagging relay via the `heal` action. `heal` stores and event_receipts events without broadcasting them to subscribers, because these are historical events being repaired rather than newly-created events.
-
-Clients coordinate this repair with an advisory per-group sync lock. If another client already holds the lock, short-lived clients (like CLI commands) skip that relay for the current pass, while long-lived clients (like Bracken) retry on future group_status or sync triggers after the lease window. Relay-side deduplication means uncoordinated fallback remains safe, just less efficient.
-
-For efficiency, clients use `sync_ids` to fetch only event IDs and compute set differences. If group_status `set_hash` already matches the local known set, no event transfer is needed. The lagging relay either integrates the healed events (its next group_status converges) or refuses (caught as persistently divergent and flagged in the trust ledger).
-
-**Two heal paths:** The basic `heal` action is rate-limited and available to any client — it is the fallback for events without enough trusted witnesses. The `heal_batch` action (Section 9.6) is the fast path, gated by trusted-witness quorum. Clients attempt fast heal first when beneficial (enough events to justify the challenge overhead) and fall back to slow heal for rejects or when the relay doesn't support trusted heal.
-
-### 9.5 Fraud Proofs
-
-A fraud proof is a standalone object (not an event in the DAG) published when a client catches a relay misbehaving. It contains:
-
-```json
-{
-  "type":      "fraud_proof",
-  "group":     "<group pubkey hex>",
-  "relay":     "<relay pubkey hex>",
-  "event_id":  "<event id hex>",
-  "event":     { ... },
-  "event_receipt":   { ... },
-  "evidence":  "<description of the contradiction: e.g. group_status hash, not_found response, etc.>"
-}
-```
-
-The proof is self-contained: the event is signed by its author (proving it's real), the event_receipt is signed by the relay (proving the relay received it), and the evidence shows the relay doesn't serve it. Any third party can verify all of this independently without trusting the publisher of the fraud proof.
-
-Fraud proofs are published to relays (for storage and gossip) or shared out-of-band. They are not part of the DAG — they are evidence about relay behavior, not about group history.
-
-Uses local trust ledgers for relay reputation. Cross-client reputation propagation (fraud proofs as first-class gossiped objects with network-wide effect) is deferred.
-
-### 9.6 Trusted Heal
-
-The basic `heal` action is rate-limited and anonymous — any client can use it to push events to a relay, which creates a spam vector. Trusted heal adds a gated fast-heal path (`heal_batch`) where the receiving relay requires evidence from relays it trusts before admitting events.
-
-The receiving relay maintains a local, operator-configured set of **trusted witness relays**. When a client wants to fast-heal events to a relay:
-
-1. Client requests a signed `heal_challenge` from the receiving relay, listing the event IDs and the receiver's trusted witnesses.
-2. Client asks each trusted witness for a signed `group_host_attestation` (does it host the group?) and `inventory_attestation` (does it have the events?).
-3. Client submits the events plus all attestations to the receiving relay via `heal_batch`.
-4. The relay admits each event only if enough trusted witnesses attest to having it (quorum scales with denominator size: default `max(2, ceil(2n/3))`).
-5. Missing host attestations count as `hosts: true` (fail-closed — the client cannot shrink the denominator by omitting inconvenient relays).
-6. Conflicting evidence from the same relay (e.g. `hosts: false` plus an inventory attestation) is ignored entirely.
-
-This closes the heal spam loophole without requiring relay-to-relay communication — the client is the courier for all signed evidence. Groups with only one trusted witness use slow rate-limited heal; fast heal requires at least two.
-
-The trust set is local to each relay, directional, and independent of group state — an attacker-created group cannot choose which relays the receiving relay trusts.
-
-After `heal_batch` admits events, the relay promptly issues a fresh `group_status` so subscribers see the store change. Admission provenance (which witnesses vouched for each event) is recorded for audit and trust revocation cleanup.
-
-### 9.7 What This Catches — and What It Doesn't
-
-**Caught (cryptographically, against 1-2 bad relays):**
-
-- A relay cannot forge, alter, or insert events. (Signatures + DAG parents.)
-- A relay cannot silently drop an event it signed an event_receipt for, then omit from its group_status. (EventReceipt + group_status divergence is provable to any observer.)
-- Split-view attacks are provable when caught. (Signed group_statuses can be compared across clients.)
-- Relays that lag behind are detected via group_status comparison and the network self-heals via heal.
-- Censorship surface grows over time via the DAG: censoring a message requires censoring all its descendants, transitively.
-
-**Caught (probabilistically):**
-
-- Split-view attacks are mitigated by clients connecting from varied vantage points. Not perfect; same model as Certificate Transparency.
-
-**Not caught (fundamental):**
-
-- If **all** relays a client uses collude to suppress a message **and** all its descendants, the client has no signal. You cannot prove a negative without an honest witness.
-- A relay could refuse to **accept** a message at all (no event_receipt created). The author's mitigation is multi-relay redundancy: publish to K=3 relays; if at least one is honest, it signs an event_receipt and serves the event. The silent refusal of the others is provable by group_status divergence (honest relay has the event, dishonest one doesn't).
-
-**The trap for bad relays:** to look like a functioning relay (and avoid immediate detection), a bad relay has to accept events and issue event_receipts. Once it does, event_receipts + group_statuses make subsequent omission provable. If it refuses to accept at all, it's immediately divergent from honest relays that do have the event. Either way, 1-2 bad relays in a curated set are caught without affecting user experience — the other K-1 or K-2 honest relays serve the events.
-
----
-
-## 10. Protocol Event Types
-
-### 10.1 Protocol-Level Types
-
-These are defined by the protocol specification. They are bare strings without a dot. They handle group lifecycle, membership, root authority, and infrastructure.
-
-| Type | Author | Content | Description |
-|---|---|---|---|
-| `genesis` | Group key | `{name, description, public, founder, admins, relays}` | Creates a new group. Only event signed with the group private key. The `author` field contains the founder's user pubkey. |
-| `join` | User (self) | `{}` | User joins the group. In private groups, requires a prior `invite`. |
-| `leave` | User (self) | `{}` | User leaves the group. |
-| `invite` | Admin | `{invitee, role}` | Invites a user to the group. Required before `join` in private groups. |
-| `kick` | Admin | `{target}` | Removes a user from `joined`. User can re-join. Does not ban. |
-| `ban` | Admin | `{target, until, reason}` | Bans a user. `until` is optional (null = permanent). `reason` is a string. Prevents re-joining until `unban`. |
-| `unban` | Admin | `{target}` | Lifts a ban. |
-| `admin_add` | Admin | `{target}` | Promotes a member to admin. |
-| `admin_remove` | Admin | `{target}` | Demotes an admin to regular member. |
-| `relay_update` | Admin | `{relays: [...]}` | Updates the canonical relay list. |
-| `metadata_update` | Admin | `{name, description}` | Updates group name or description. |
-
-### 10.2 The `chat` Namespace (Default App)
-
-FERN defines an official default app namespace, `chat`, which covers basic group chat features. This is the canonical set of event types that any FERN-compatible chat client should support. Other namespaces can be built on top of FERN for different applications (polls, scheduling, collaborative boards, etc.).
-
-| Type | Content | Description |
-|---|---|---|
-| `chat.message` | `{text, channel, reply_to?}` | A chat message. `channel` scopes to a channel within the group. `reply_to` is an optional event ID for threaded replies. |
-| `chat.reaction` | `{target, emoji}` | A reaction to a message. |
-| `chat.nickname_set` | `{nickname}` | Self-asserted nickname for the signing user. |
-| `chat.channel_create` | `{name, description?, position?}` | Creates a channel. The channel ID is the event ID. |
-| `chat.channel_update` | `{id, name?, description?, position?}` | Updates channel metadata by stable channel ID. |
-| `chat.channel_delete` | `{id}` | Deletes a non-`general` channel from normal rendering. |
-| `chat.settings_update` | `{default_channel?, system_channel?}` | Updates chat-wide settings by channel ID. |
-
-Apps are free to define additional namespaces and types. Unknown types are ignored by clients that don't understand them — forward compatibility is free.
-
----
-
-## 11. Relays
-
-### 11.1 Role
-
-Relays are storage and forwarding infrastructure. They have no authority over group state, membership, or identity. A relay cannot:
-
-- **Forge events** — all events are cryptographically signed by authors
-- **Rewrite events** — modifying content breaks the signature
-- **Silently censor** — gaps in the DAG are visible, group_statuses commit to known sets, event_receipts prove event_receipt
-- **Control the group** — authority is derived from the DAG, not from the relay
-
-A relay can only choose not to host a group, or to lag behind. Both are detectable and recoverable.
-
-### 11.2 Canonical Relays
-
-Each group has a set of **canonical relays** defined in current group state (via genesis and `relay_update` events). All new events are published to all canonical relays. All group history must be present on all canonical relays at all times.
-
-The invariant: at every point in time, all current canonical relays hold identical complete history from genesis. This gives clients a clean symmetric comparison property — if all canonical relays agree on the same `set_hash`, `tips`, and `count`, the client has complete history.
-
-Anyone can stand up a new relay for an existing group at any time: fetch the log from existing relays, start serving. The founder/admins can bless it (via `relay_update`) or not. Clients decide which relays to trust based on their own policies and audit results.
-
-### 11.3 Relay Validation
-
-When a relay receives an event it must:
-
-1. Verify the event `id` matches the SHA-256 of the canonical serialisation
-2. Verify the signature is valid for the `author` pubkey
-3. Store the event if it belongs to a group the relay is hosting
-4. Return a signed event_receipt to the publishing client
-
-Relays must store events regardless of whether they hold the parent events. Relays must not apply authorisation rules — that is the client's responsibility. Relays store all events with valid signatures and valid structure, including events that clients would reject (e.g., a non-admin attempting to kick a user).
-
-For `heal_batch` actions, the relay additionally verifies the `heal_challenge` signature and expiry, all attestation signatures, the threshold quorum, and per-event size limits (32 KiB per event). Events admitted via `heal_batch` are stored without broadcasting to subscribers. The relay records admission provenance (which witness pubkeys admitted each event) for audit and trust revocation.
-
-### 11.4 Relay Garbage Collection
-
-Because relays store all events with valid signatures (including invalid admin actions that no client will honour), storage can grow with spam. The GC rule addresses this:
-
-**Rule:** When a relay holds more than **N** events in a group, it may delete events that are tips (have no children) and have not been referenced as a parent by any of the subsequent N events.
-
-Key properties:
-- The relay does not need to understand event authorisation — it only tracks whether an event was used as a parent by any subsequent event
-- An event is only GC'd if the DAG grew by N events without referencing it
-- Events that are legitimately old tips (e.g., the last message in a quiet group) are also eligible for GC after the threshold
-- Clients must never GC from their local cache — this rule applies only to relays
-- Canonical relays should set N high enough (suggested default: N = 1000) that by the time an event is GC'd, it is extremely unlikely any honest client still needs it for gap healing
-
-**Important:** GC'd events on one relay are still present on other canonical relays and in client local caches. GC is a per-relay storage optimization, not a history deletion. If a relay GC's an event that is later needed, it can be re-fetched from sibling relays or clients.
-
-### 11.5 WebSocket API
-
-Relays expose a WebSocket interface. Core actions:
-
-**Subscribe to a group** (receives new events + group_status pushes):
-```json
-{"action": "subscribe", "group": "<group pubkey>"}
-```
-
-**Publish an event** (relay validates, stores, returns event_receipt):
-```json
-{"action": "publish", "event": { ... }}
-```
-
-**Request a specific event by ID:**
-```json
-{"action": "get", "id": "<event id>"}
-```
-
-**Sync all events for a group since a timestamp:**
-```json
-{"action": "sync", "group": "<group pubkey>", "since": 1711234567}
-```
-
-**Request current group_status:**
-```json
-{"action": "group_status", "group": "<group pubkey>"}
-```
-
-**Fetch event IDs only:**
-```json
-{"action": "sync_ids", "group": "<group pubkey>"}
-```
-
-**Acquire / release a heal coordination lock:**
-```json
-{"action": "sync_lock", "group": "<group pubkey>", "client_id": "<user pubkey>"}
-{"action": "sync_unlock", "group": "<group pubkey>", "client_id": "<user pubkey>"}
-```
-
-**Heal historical event without broadcasting:**
-```json
-{"action": "heal", "event": { ... }}
-```
-
-Relay responses:
-```json
-{"type": "event", "event": { ... }}
-{"type": "event_receipt", "event_receipt": { ... }}
-{"type": "group_status", "group_status": { ... }}
-{"type": "ids", "group": "<group pubkey>", "ids": ["<event id>", "..."]}
-{"type": "sync_lock_granted", "group": "<group pubkey>", "ttl": 30}
-{"type": "sync_lock_denied", "group": "<group pubkey>", "expires_in": 15}
-{"type": "not_found", "id": "<event id>"}
-{"type": "error", "message": "..."}
-```
-
-GroupStatuses are pushed to subscribed clients periodically (every ~5 seconds or every ~100 events, configurable per relay) without requiring a request.
-
----
-
-## 12. Public vs Private Groups
-
-### 12.1 Public Groups
-
-In a public group (`public: true` in `genesis`), any user may publish a `join` event freely without a prior `invite`. Relays accept and store events from any author. Clients display the full event history to all viewers. This is the primary use case — Discord-like public servers.
-
-### 12.2 Private Groups
-
-In a private group (`public: false` in `genesis`), a user must have an `invite` event from an admin before they can publish a `join` event. The group address must be shared privately. Clients must reject `join` events from users not in `members`.
-
----
-
-## 13. Discovery and Migration
-
-### 13.1 Group Address
-
-A group address is the canonical way to share a group reference:
-
-```
-<group_pubkey>@<relay1>,<relay2>,<relay3>
-```
-
-The relay hints are starting points only. Once a client has received any events, it derives the authoritative relay list from the signed group state in the DAG (`relays` field in group state, updated via `relay_update` events).
-
-### 13.2 Initial Discovery
-
-1. Client receives a group address out-of-band (invite link, shared URL, etc.)
-2. Client connects to the hint relays
-3. Client fetches the `genesis` event, verifies the group key signature
-4. Client derives the authoritative relay list from the genesis content
-5. Client connects to all canonical relays
-
-### 13.3 Migration Procedure
-
-To migrate a group to a new relay set:
-
-1. An admin publishes a `relay_update` event naming the new relay set
-2. All connected clients observe the update and seed the new relays with full history (Section 13.4)
-3. All clients begin publishing new events to the new relay set
-4. Old relays must not be decommissioned until every new relay holds the complete history — clients confirm this by cross-referencing event sets across old and new relays before the old set is removed
-
-The invariant is that at every point in time, all current canonical relays hold identical complete history from genesis.
-
-### 13.4 New Relay Seeding
-
-When a client observes a `relay_update` event adding a new relay to the canonical list, it must:
-
-1. Connect to the new relay
-2. Walk its full local history for the group
-3. Publish any events the new relay reports as not found
-
-Clients must perform this seeding before sending new messages to the group. The migration is not complete until all canonical relays hold identical history.
-
----
-
-## 14. Client Behaviour
-
-### 14.1 Local Cache
-
-Clients must persist their full local event history to disk. This cache is essential for gap healing and relay seeding. Clients must never evict events from their local cache unless explicitly instructed by the user. The local cache is also where event_receipts are stored (author-local).
-
-### 14.2 Joining a Group
-
-1. Receive a group address out-of-band
-2. Connect to hint relays, fetch and verify the `genesis` event
-3. Derive the canonical relay list from genesis, connect to all canonical relays
-4. Sync from all canonical relays using the `sync` action; merge results
-5. Verify completeness by comparing relay group_statuses to the local known set. If a relay's `set_hash` differs, use `sync_ids` to compute differences, fetch missing events with `get`, and repair missing relay events with `heal`.
-6. Walk the DAG from genesis:
-   - Verify signatures and parent references
-   - Compute the genesis-connected event set
-   - Apply connected state events to compute current group state
-   - Store disconnected events as pending/gappy and request missing parents via gap healing
-7. Open live subscriptions on all canonical relays
-8. Begin running the monitor audit pass in the background
-
-### 14.3 Publishing Events
-
-1. Construct the event with `parents` referencing the latest known connected heads in the group
-2. Sign the event with the author's user private key
-3. Publish to all canonical relays **simultaneously and in parallel**
-4. Collect event_receipts from each relay
-5. Store event_receipts locally alongside the event in the local cache
-6. Cache the event locally
-
-Locally cached events that have not been accepted by any canonical relay are retryable local sends, not heads. If delivery fails, the client should show a retry affordance and exclude the failed event from parent selection so later messages do not build on it.
-
-Publishing to fewer than all canonical relays is strongly discouraged. Message loss resulting from single-relay publishing is the sender's responsibility. A message is considered "safely acknowledged" when event_receipts from at least 2 relays are collected (configurable).
-
-### 14.4 Receiving
-
-Clients maintain persistent WebSocket connections to all canonical relays for each group. Messages from whichever relay delivers them first are accepted. Duplicates are deduplicated by event ID.
-
-### 14.5 Live Monitoring
-
-After initial sync, the client continuously:
-
-- **Receives new events**: verify, store, recompute connectedness, trigger gap healing for disconnected events, and render connected events per client policy (hide banned/unauthorised if configured).
-- **Receives group_status pushes**: verify the group_status, compare relay state to local known-set and to other relays, then trigger ID-diff sync/heal for missing events. Short-lived clients skip held sync locks; long-lived clients retry on later group_status/sync triggers. Flag persistent divergence in local trust ledger.
-- **Maintains a local trust ledger**: `{relay_pubkey → {observed_faults, last_group_status}}`. This is local state, not network-consensus. Different clients may have different views of which relays are trustworthy.
-
-Trust propagation is **social, not protocol-enforced**. The protocol does not dictate that faulted relays are de-listed across clients. The protocol guarantees misconduct is *provable*; the social response (drop relay R from your config) is up to the client/operator.
-
-### 14.6 Displaying Gaps
-
-When rendering group history, clients must visibly indicate known gaps — event IDs referenced as parents that are not present in the local cache. Gaps must not be silently hidden. Disconnected child events should be shown only as pending/gap diagnostics, not as ordinary chat messages, until the missing parent chain is healed and the events become connected to genesis.
-
----
-
-## 15. Protocol vs App Boundary
-
-The protocol (FERN) defines:
-- Event structure and canonical serialisation
-- Cryptographic primitives (keys, hashing, signing)
-- Identity (user, group, relay)
-- The causal DAG (parents, heads, gaps, healing)
-- Group state machine (membership, root authority, relays, metadata)
-- Completeness layer (event_receipts, group_statuses, monitoring, heal, fraud proofs)
-- Trusted-heal attestation objects (`heal_challenge`, `group_host_attestation`, `inventory_attestation`) and admission logic
-- Relay protocol (WebSocket actions, relay validation, GC)
-- Discovery and migration
-- Protocol-level event types (genesis, join, leave, invite, kick, ban, unban, admin_add, admin_remove, relay_update, metadata_update)
-
-Applications define:
-- Their own event types (`appname.local_type`)
-- Content schemas for those types
-- How events are displayed and interacted with
-- App-specific state derived from events (e.g., a poll app tracks vote tallies; a chat app tracks channels and threads)
-- App-specific roles and permissions beneath protocol admins, when needed
-
-The protocol is agnostic to app-level types. It transports, stores, signs, and provides completeness guarantees for all events uniformly, regardless of type. Unknown types are stored by relays and ignored by clients that don't understand them.
-
-This separation lets multiple apps share the same infrastructure: identity, relays, completeness guarantees, group management. A new app is just a new set of event types and a client that understands them.
-
----
-
-## 16. Threat Model Summary
-
-| Attack | Protection |
-|---|---|
-| Forge a message as another user | Author signatures defeat this |
-| Forge a group state change (admin action) | Admin signatures + check against folded admin list |
-| Insert a fake event into the DAG | Signatures prevent forgery; the connected-subgraph rule prevents disconnected events from entering state, normal rendering, or future parent selection |
-| Relay silently censors a message it accepted | EventReceipt + group_status divergence; provable to any observer via fraud proof |
-| Relay refuses to accept a message at all | Multi-relay redundancy (K=3); if at least one honest, it has the event and the others are provably divergent |
-| Split-view attack (relay serves different state to different clients) | Signed group_statuses make divergence provable when clients compare notes. Defeated probabilistically by vantage diversity. |
-| Relay shuts down | Group continues on remaining relays; new relays can stand up anytime |
-| Relay lags behind | Detected via group_status comparison; self-healed via heal from sibling relays |
-| Anonymous client uses `heal` to spam a relay with events | Trusted heal (`heal_batch`) gates fast admission behind witness quorum; slow `heal` remains rate-limited |
-| Founder issues bad bans/admin decisions | Founder trust is accepted at join time. Bans are render filters; underlying log stays complete. |
-| All relays a client uses collude to suppress a message and its descendants | Censorship undetectable. Fundamental; out of scope without consensus. |
-| IP exposure between members | No client-to-client connections; only relays see client IPs |
-
-### The trap for 1-2 bad relays
-
-In a curated set of K=3 trusted relays where 1-2 go bad:
-
-- To avoid immediate detection, the bad relay must accept events and look operational.
-- Once it accepts an event, it signs an event_receipt — committing to having received it.
-- If it later omits the event, the event_receipt + group_status divergence is provable censorship.
-- If it refuses to accept at all, it's immediately divergent from the K-1 or K-2 honest relays that do have the event.
-- User experience is unaffected: the honest relays serve all events, and the bad relay is flagged and de-listed.
-
-This is the core guarantee: **1-2 misbehaving relays in a curated set are caught without affecting user experience**.
-
----
-
-## 17. Future Extensions
-
-Documented future extensions, deliberately excluded to keep the design implementable:
-
-- **Threshold founder signing**: multiple admin keys required for high-sensitivity actions. Founder single-key currently.
-- **Merkle exclusion proofs**: allowing third parties to verify non-inclusion without holding the full set. Simple sorted-set-hash group_statuses currently.
-- **Fork-proofs as first-class gossiped objects**: cross-client reputation propagation for relay misbehavior. Local trust ledgers currently.
-- **Snapshots**: founder-signed state anchors to bound new-joiner cost for large groups. Not needed for small-to-medium groups (verify from genesis is fast enough). Will be added when groups reach scaling pain.
-- **App-prefixed types with pubkey namespaces**: `<app_pubkey>.appname.type` for collision-free type names. Convention-based `appname.type` currently.
-- **Protocol versioning**: a `protocol` field in genesis content for forward compatibility.
-- **Relay-side policy enforcement**: relays checking group-state policies on ingest. Currently, relays accept any well-formed event; all moderation is client-side.
-- **Extended app surfaces**: pins, channel policies, roles beyond member/admin, message edits. Apps can define these in their own event types.
-
-These are documented as upgrade paths, not abandoned. The current design's goal is a working, secure, minimal protocol. Each deferred feature has a clear path back when concrete demand justifies the complexity.
-
----
-
-## 18. The Whole Picture in One Paragraph
-
-Signed events in a public append-only log, replicated across multiple interchangeable canonical relays that anyone can run. Events reference recent connected heads, forming a causal DAG that propagates existence proofs for free through normal chat activity without letting disconnected events poison future history. Relays sign event_receipts when they accept events, committing to having received them; relays periodically sign group_statuses committing to their full known set. Every client cross-checks relays against each other for free — monitors aren't a separate role, they're a property of clients running the audit pass on every group_status push. Heal self-heals gaps automatically: any reader who notices a gap fetches the missing event and republishes it. Trusted heal gates fast admission behind a witness quorum, preventing anonymous clients from using heal as an unlimited spam vector. Admin actions like bans are themselves events in the log, never deletions, so moderation is a render-time filter rather than a storage-level operation. The protocol is general-purpose: it handles transport, identity, group management, and completeness; applications define their own event types and content schemas on top. The result is a protocol for public group chats that can't be forged, can't be silently censored (provably if attempted by 1-2 bad relays in a curated set), can't be shut down, and hides member IPs by virtue of never connecting members directly.
+In standard mode any two quorums intersect in at least `f+1` validators, so
+under the fault assumption their intersection contains an honest validator.
+Small-set mode is a development and testing accommodation, not a claim that
+one to three validators meet the standard Byzantine fault model. Every
+validator must participate in every certificate, it offers no unavailable-
+validator tolerance, and CLI and Bracken clients display a persistent warning.
+
+A `validator_update` is an administrator-signed governance event. The old
+validator set validates and commits the transition block. The new set becomes
+active at the following height with its epoch incremented by one. The group
+freezes safely if either active set cannot form a quorum; there is no
+out-of-band membership recovery.
+
+## 7. From ingress to finality
+
+### 7.1 Ingress and pending display
+
+An active validator verifies an event against the current finalized state and
+the expected author sequence before persisting it in its mempool. The first
+local acceptance time is stable. The validator returns a signed
+`IngressReceipt` and gossips the user-signed event to peers.
+
+A client can show one valid receipt as evidence that an event is pending.
+Sending to all validators is preferred; `f+1` receipts prove that at least one
+honest validator accepted the event under the configured fault assumption.
+Receipts do not reserve a block position and are not consensus votes.
+
+### 7.2 Candidate and certified observation time
+
+For `(epoch,height,round)`, the deterministic proposer selects a bounded batch
+from its persistent mempool. The signed candidate carries the complete events,
+not just IDs. Each validator signs at most one timestamp-observation vector for
+that round, only after receiving and validating the complete candidate. Every
+entry is that validator's stable first-seen time for the corresponding event.
+
+The proposer needs `q` valid observation vectors to build a block. The
+integer median at each event position becomes its certified time. This proves
+that a quorum possessed the entire batch and supplies Byzantine-resistant
+approximate time for application policy. It does not change block order.
+
+### 7.3 Proposal, votes, and commit
+
+The proposer signs a proposal containing the complete block. Validators verify
+all signatures, bounds, ancestry, timestamp evidence, and the entire
+deterministic application transition before prevoting. Missing data, invalid
+execution, or an insufficient valid-round proof causes a nil prevote.
+
+Consensus then follows the Tendermint safety pattern:
+
+1. A quorum of prevotes for a block allows a validator to lock it and
+   precommit it.
+2. A quorum of precommits for the same block forms a commit.
+3. A validator precommits nil when the required block evidence is absent.
+4. Timeouts move the engine to later rounds. Earlier catch-up requires `f+1`
+   authenticated future-round senders. In unanimous small-set mode `f=0`, so
+   one signed future-round sender is enough to resynchronize a restarted peer.
+
+Each phase remains active until its own condition is met or its deadline
+expires. Unrelated candidates, observations, or votes wake the engine only so
+it can recheck that condition; their arrival alone never advances the phase.
+
+Before transmission, a validator durably records its own vote. It durably
+records the lock before emitting a block precommit. A validator never votes
+for two values in the same phase and round, including nil versus non-nil.
+Conflicting messages from another validator are retained as equivocation
+evidence and that signer is excluded from the affected vote/observation count.
+
+A later-round proposal may justify a locked value with a quorum of earlier
+prevotes (`valid_round`). Without that proof an honest validator does not
+unlock. Restart reloads the same votes and lock state from SQLite.
+
+## 8. Deterministic application state
+
+Every validator and client starts from genesis and executes committed events in
+exactly the same order. State includes:
+
+- chain ID, application namespace, and validator set;
+- members currently known to the group and members currently joined;
+- admins and certified-time ban records;
+- each author's last finalized sequence;
+- group metadata, chat channels, and chat settings.
+
+Protocol actions include join, leave, invite, kick, ban, unban, admin changes,
+metadata changes, and validator-set replacement. The built-in chat namespace
+includes messages, reactions, nicknames, channel administration, and settings.
+Unknown non-`chat` application namespaces can remain opaque, but protocol and
+built-in chat events receive full semantic validation.
+
+Authorization is evaluated against the state immediately before an event.
+Time-sensitive checks use certified median time, not the author's `ts` or the
+local receiving clock. The resulting state is canonically serialized and
+hashed; a proposal with the wrong root is invalid.
+
+## 9. Persistence and crash safety
+
+Each validator uses one SQLite database in WAL mode with full synchronous
+durability. It stores hosted groups, commits, events, pending status, consensus
+safety state, own votes, received votes, timestamp observations, equivocation
+evidence, and local admission decisions.
+
+Commit application is transactional: chain verification, event finalization,
+application state, checkpoint roots, and height advance succeed together or
+not at all. This prevents a crash from exposing a partially applied block.
+Thread access is serialized, and event ingress holds a per-engine async lock so
+concurrent submissions cannot both acquire the same author sequence.
+
+Local admission records are operational policy, not consensus truth. A
+validator may decide whether it has resources and trusted sources to host a
+group, but once active it must apply the same on-chain rules as every peer.
+
+## 10. Synchronization and split detection
+
+Clients obtain genesis, request signed statuses from reachable validators, and
+page complete commits from a chosen endpoint. Every commit is verified and
+executed locally from the prior trusted checkpoint. A server response is never
+accepted merely because it came from a configured validator URL.
+
+Signed `ValidatorStatus` objects bind a validator to the group, chain ID,
+height, block hash, history root, state root, epoch, validator set, and logical
+byte count. Clients compare every status that can be placed on their locally
+verified chain. Contradictory signed checkpoints are durable split evidence;
+the client reports the conflict instead of selecting a branch.
+
+History transfer currently pages up to 100 complete commits per request. It
+does not yet use independent chunks or Merkle inclusion proofs. A signed
+`HistoryManifest` fixes the target checkpoint, event/block counts, byte count,
+and expiry so validator preparation cannot silently move to a different tail
+while downloading.
+
+Active validators also supervise their own committed height. On startup and
+periodically while running, a lagging validator requires `f+1` distinct active
+validator statuses ahead of its local checkpoint before pausing its group
+engine. It then downloads and independently verifies every missing commit,
+restarts the engine from the resulting durable state, reattaches subscriber
+notifications, and resumes voting. Requiring `f+1` ahead reports prevents one
+Byzantine validator from repeatedly pausing an otherwise current engine. This
+is ordinary history catch-up, not catastrophic recovery: it cannot advance
+without valid commit certificates and does not replace a lost quorum.
+
+## 11. Safe validator admission
+
+A prospective validator must fully synchronize and verify the group before it
+can be added. Admission proceeds as follows:
+
+1. Local policy selects trusted active validators and checks matching signed
+   history-hosting evidence for one manifest.
+2. The prospective validator downloads and verifies genesis and every commit
+   through that fixed manifest checkpoint.
+3. It persists the complete history and signs `SyncReady`, bound to the exact
+   height, block hash, history root, logical byte count, source epoch, and next
+   epoch.
+4. An administrator includes readiness for exactly every newly added validator
+   in `validator_update`.
+5. The old set commits the transition. The prospective validator verifies that
+   commit and starts an engine only if the resulting set activates its key.
+
+Readiness must describe the block immediately before the transition. If the
+chain advances before the update is proposed, preparation must be repeated.
+This is intentionally strict: stale or approximate readiness cannot authorize
+a validator that may lack the history needed to validate the next proposal.
+
+## 12. Validator WebSocket boundary
+
+A validator exposes one JSON request/response and subscription endpoint.
+Current actions are:
+
+- `metadata`, `bootstrap`, and `get_genesis`;
+- `submit_event`, `get_event`, and `get_pending`;
+- `status`, `get_commits`, and `subscribe`/`unsubscribe`;
+- `history_manifest` and `hosting_attestation`;
+- `peer` for signed consensus and gossip messages.
+
+Subscriptions push `pending_event` and `commit` messages. Request size and
+per-action rate limits bound obvious ingress abuse. Genesis auto-hosting is a
+development convenience and can be disabled with `fern-validator init --closed`.
+Closed operation plus explicit preparation is recommended for untrusted
+networks.
+
+## 13. Client architecture
+
+The Python CLI and Bracken are independent verifying clients. Both keep a
+local chain cache, derive group state from verified commits, publish signed
+events to configured validators, track ingress receipts, and separate pending
+events from finalized events.
+
+The CLI preserves familiar commands such as `fern group`, `fern post`, `fern
+read`, `fern watch`, and `fern verify`. `fern chain` inspects verified head
+state, validators/quorum, recent blocks and event positions, plus pending
+events. It accepts a configured group ID for the normal sync-first workflow or
+`--db` for direct cache/validator-database inspection. `fern dag` is a hidden
+compatibility alias that reports its replacement. Validator-set replacement is
+exposed as `validator-update`.
+
+Bracken performs the same canonical hashing, Ed25519 checks, quorum checks,
+state execution, epoch transitions, and split comparison in TypeScript. Its
+IndexedDB v4 schema stores events, commits, ingress receipts, and validator
+endpoint pins; upgrading
+clears incompatible legacy DAG data. The old DAG viewer is replaced by a chain
+viewer. Each active validator endpoint has an independent reconnect supervisor;
+after a socket returns, Bracken synchronizes missed commits, verifies the
+endpoint key against finalized state, and restores the subscription before the
+UI reports it connected.
+
+## 14. Failure and attack behavior
+
+The central safety condition is that no more than `f` active validators in an
+epoch violate the protocol and that honest validators retain their durable
+vote/lock journals. Under that condition, two conflicting blocks cannot both
+obtain a valid quorum commit at the same height.
+
+Expected behavior is deliberately conservative:
+
+| Condition | Result |
+| --- | --- |
+| Invalid or incomplete proposal | Honest validators prevote nil |
+| Conflicting vote/observation from one signer | Evidence retained; signer excluded from that count |
+| Fewer than `q` responsive validators | No commit; finalized history does not fork |
+| Too few authenticated future-round senders | No forced catch-up |
+| `f+1` validators report a future round (`1` in zero-fault small-set mode) | Engine may advance to that round |
+| Conflicting signed checkpoints | Client reports a split and stops trusting automatic sync |
+| Stale or incomplete `SyncReady` | Validator update is invalid |
+| Malicious event timestamp | Display metadata only; policy uses certified time |
+
+Consensus safety does not imply message availability or fair inclusion. A
+Byzantine proposer can omit events during its rounds. Bounded queues, gossip,
+and honest proposer rotation provide a practical liveness path after network
+synchrony, but there is no proof that a proposer included every event known to
+honest validators.
+
+If more than `f` validators equivocate, lose their durable safety state, or sign
+invalid history, the protocol's Byzantine safety guarantee no longer applies.
+If a quorum is merely offline or partitioned, safety remains but liveness is
+sacrificed.
+
+## 15. Current implementation boundary
+
+This branch is a reference implementation, not a production consensus stack.
+The safety kernel is purpose-built rather than embedded from CometBFT. It is
+isolated from networking and covered by adversarial tests, but it has not had
+an external protocol audit.
+
+Known remaining work includes deterministic inclusion policy, mutual peer
+authentication, chunked archival transfer, durable public discovery,
+protocol-level operator independence, capacity/retirement leases, and a tested
+frontend build in an environment with Node.js. See [BFT-NOTES.md](BFT-NOTES.md)
+for the exact implementation notes and validation constraints.

@@ -1,5 +1,3 @@
-
-
 class ProtocolTypes:
     GENESIS = "genesis"
     JOIN = "join"
@@ -10,7 +8,7 @@ class ProtocolTypes:
     UNBAN = "unban"
     ADMIN_ADD = "admin_add"
     ADMIN_REMOVE = "admin_remove"
-    RELAY_UPDATE = "relay_update"
+    VALIDATOR_UPDATE = "validator_update"
     METADATA_UPDATE = "metadata_update"
 
 
@@ -35,7 +33,7 @@ PROTOCOL_TYPES: frozenset[str] = frozenset(
         ProtocolTypes.UNBAN,
         ProtocolTypes.ADMIN_ADD,
         ProtocolTypes.ADMIN_REMOVE,
-        ProtocolTypes.RELAY_UPDATE,
+        ProtocolTypes.VALIDATOR_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
     }
 )
@@ -62,7 +60,7 @@ STATE_EVENT_TYPES: frozenset[str] = frozenset(
         ProtocolTypes.UNBAN,
         ProtocolTypes.ADMIN_ADD,
         ProtocolTypes.ADMIN_REMOVE,
-        ProtocolTypes.RELAY_UPDATE,
+        ProtocolTypes.VALIDATOR_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
         ChatTypes.CHANNEL_CREATE,
         ChatTypes.CHANNEL_UPDATE,

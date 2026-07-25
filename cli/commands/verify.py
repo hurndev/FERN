@@ -4,123 +4,33 @@ import asyncio
 
 import click
 
-from fern.completeness.group_statuses import GroupStatus
-from fern.completeness.trust_ledger import TrustLedger
-from fern.client.monitor_runner import run_monitor_pass
-from fern.storage.sqlite_store import SqliteStore
-from cli.config import (
-    load_config,
-    get_cache_path,
-    resolve_group,
-    connect_transports,
-    get_client_id,
-)
-from cli.output import print_success, print_error
-from cli.sync import sync_group_from_transports
-from fern.client.sync import HealMode
+from cli.bft import open_store, sync_group
+from cli.config import get_cache_path, load_config, resolve_group
+from cli.output import print_success
+from fern.bft.chain import verify_chain
 
 
 @click.command()
 @click.argument("group_id")
-@click.pass_context
-def command(ctx: click.Context, group_id: str) -> None:
-    asyncio.run(_verify(ctx, group_id))
+def command(group_id: str) -> None:
+    asyncio.run(_verify(group_id))
 
 
-async def _verify(ctx: click.Context, group_id: str) -> None:
+async def _verify(group_id: str) -> None:
     config = load_config()
-    group_pubkey, group_info = resolve_group(group_id, config)
-    relay_urls = list(group_info.get("relays", []))
-    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
-
-    if not relay_urls:
-        print_error("No relays configured for this group.")
-        return
-
-    transports = await connect_transports(relay_urls)
-    for t in transports:
-        await t.subscribe(group_pubkey)
-
-    store = SqliteStore(cache_path)
-    await store.open()
-    known_set: frozenset[str] = frozenset()
-    sync_results = []
+    group, info = resolve_group(group_id, config)
+    store = open_store(str(info.get("cache_path") or get_cache_path(group)))
     try:
-        heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-        sync_results = await sync_group_from_transports(
-            group_pubkey=group_pubkey,
-            transports=transports,
-            store=store,
-            client_id=get_client_id(config),
-            heal_mode=heal_mode,
-        )
-        known_set = await store.get_known_set(group_pubkey)
+        await sync_group(group, info, store)
+        genesis = store.get_genesis(group)
+        if genesis is None:
+            raise click.ClickException("missing genesis")
+        head = verify_chain(genesis, store.commits(group))
+        print_success("Complete BFT chain verified from genesis.")
+        click.echo(f"  Height: {head.height}")
+        click.echo(f"  Epoch: {head.state.validator_set.epoch}")
+        click.echo(f"  Block hash: {head.block_hash}")
+        click.echo(f"  State root: {head.state.root}")
+        click.echo(f"  History root: {head.history_root}")
     finally:
-        pass
-
-    trust_ledger = TrustLedger()
-    sibling_group_statuses: dict[str, GroupStatus] = {}
-
-    try:
-        for t in transports:
-            try:
-                att = await t.request_group_status(group_pubkey)
-                sibling_group_statuses[t.relay_pubkey] = att
-            except Exception:
-                pass
-
-        for t in transports:
-            relay_pk = t.relay_pubkey
-            if not relay_pk or relay_pk not in sibling_group_statuses:
-                continue
-            att = sibling_group_statuses[relay_pk]
-            await run_monitor_pass(
-                relay=t,
-                group_status=att,
-                local_known_set=known_set,
-                event_receipts_for_relay={},
-                trust_ledger=trust_ledger,
-                sibling_group_statuses={
-                    k: v for k, v in sibling_group_statuses.items() if k != relay_pk
-                },
-            )
-
-    finally:
-        for t in transports:
-            try:
-                await t.close()
-            except Exception:
-                pass
-        await store.close()
-
-    click.echo(f"Verification for group {group_id}:")
-    click.echo()
-
-    if sync_results:
-        fetched = sum(r.fetched for r in sync_results)
-        healed = sum(r.healed for r in sync_results)
-        skipped = sum(1 for r in sync_results if r.skipped_locked)
-        click.echo(
-            f"  Sync pass: fetched {fetched}, healed {healed}, skipped locked {skipped}"
-        )
-        click.echo()
-
-    if not trust_ledger.entries:
-        click.echo("  No relay group_statuses received.")
-        return
-
-    any_faults = False
-    for relay_pk, entry in trust_ledger.entries.items():
-        faults = entry.observed_faults
-        if faults:
-            any_faults = True
-            click.echo(f"  Relay {relay_pk[:16]}... — {len(faults)} fault(s):")
-            for f in faults:
-                click.echo(f"    [{f.kind}] {f.evidence}")
-        else:
-            set_hash = entry.last_group_status.set_hash if entry.last_group_status else "(none)"
-            click.echo(f"  Relay {relay_pk[:16]}... — in sync (set_hash: {set_hash[:16]}...)")
-
-    if not any_faults:
-        click.echo()
-        print_success("No faults detected.")
+        store.close()

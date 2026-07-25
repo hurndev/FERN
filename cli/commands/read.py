@@ -1,191 +1,84 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import click
 
-from fern.storage.sqlite_store import SqliteStore
-from fern.identity.user import UserIdentity
+from cli.bft import open_store, sync_group
+from cli.config import get_cache_path, load_config, resolve_group
 from fern.events.event import Event
-from fern.state.machine import derive_group_state
-from fern.state.types import GroupState
-from cli.sync import sync_group_from_transports
-from fern.client.sync import HealMode
-from cli.config import (
-    load_config,
-    get_cache_path,
-    resolve_group,
-    connect_transports,
-)
-from cli.output import print_error
 
 
-ADMIN_TYPES = {"kick", "ban", "unban", "invite", "admin_add", "admin_remove", "join", "leave"}
+def _names(events: list[Event]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for event in events:
+        if event.type == "chat.nickname_set":
+            result[event.author] = str(event.content.get("nickname", ""))
+    return result
 
 
-def _compute_nicknames(events: list[Event]) -> dict[str, str]:
-    nicknames: dict[str, str] = {}
-    claimed_by: dict[str, str] = {}
-    for e in sorted(
-        [e for e in events if e.type == "chat.nickname_set"],
-        key=lambda e: (e.ts, e.id),
-    ):
-        nick = e.content.get("nickname", "")
-        if not nick:
-            continue
-        existing_owner = claimed_by.get(nick)
-        if existing_owner is not None and existing_owner != e.author:
-            continue
-        old_nick = nicknames.get(e.author)
-        if old_nick and old_nick != nick:
-            claimed_by.pop(old_nick, None)
-        nicknames[e.author] = nick
-        claimed_by[nick] = e.author
-    return nicknames
+def _name(pubkey: str, names: dict[str, str]) -> str:
+    return names.get(pubkey) or f"{pubkey[:12]}..."
 
 
-def _display_name(pubkey: str, nicknames: dict[str, str]) -> str:
-    return nicknames.get(pubkey) or f"{pubkey[:12]}..."
-
-
-def _channel_display_name(channel_id: str, state: GroupState) -> str:
-    ch = state.channels.get(channel_id)
-    return ch.name if ch else channel_id
-
-
-def _resolve_channel_filter(name_or_id: str, state: GroupState) -> str:
-    for ch in state.channels.values():
-        if ch.name == name_or_id:
-            return ch.id
-    return name_or_id
-
-
-def _format_admin_action(event: Event, nicknames: dict[str, str]) -> str | None:
-    t = event.type
-    target = event.content.get("target", "")
-    target_name = _display_name(target, nicknames) if target else ""
-    author = _display_name(event.author, nicknames) if event.author else "anon"
-    if t == "kick":
-        return f"--- {author} kicked {target_name} ---"
-    if t == "ban":
-        reason = event.content.get("reason", "")
-        until = event.content.get("until")
-        extra = f" (reason: {reason})" if reason else ""
-        if until:
-            extra += f" (until: {until})"
-        return f"--- {author} banned {target_name}{extra} ---"
-    if t == "unban":
-        return f"--- {author} unbanned {target_name} ---"
-    if t == "invite":
-        invitee = event.content.get("invitee", "")
-        invitee_name = _display_name(invitee, nicknames) if invitee else ""
-        return f"--- {author} invited {invitee_name} ---"
-    if t == "admin_add":
-        return f"--- {author} promoted {target_name} to admin ---"
-    if t == "admin_remove":
-        return f"--- {author} demoted {target_name} ---"
-    if t == "join":
-        return f"--- {author} joined the group ---"
-    if t == "leave":
-        return f"--- {author} left the group ---"
-    return None
+def _time(milliseconds: int) -> str:
+    return datetime.fromtimestamp(milliseconds / 1000, UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 @click.command()
-@click.option("--channel", default=None, help="Filter by channel")
-@click.option("-n", "--count", default=50, help="Number of entries to show")
-@click.option("--show-rejected", is_flag=True, help="Show messages from non-joined/banned users")
+@click.option("--channel", default=None)
+@click.option("-n", "--count", default=50, type=int)
+@click.option("--show-rejected", is_flag=True, hidden=True)
 @click.argument("group_id")
-@click.pass_context
-def command(ctx: click.Context, channel: str | None, count: int, show_rejected: bool, group_id: str) -> None:
-    asyncio.run(_read(ctx, channel, count, show_rejected, group_id))
+def command(channel: str | None, count: int, show_rejected: bool, group_id: str) -> None:
+    del show_rejected  # BFT history contains only consensus-valid events.
+    asyncio.run(_read(channel, count, group_id))
 
 
-async def _read(ctx: click.Context, channel: str | None, count: int, show_rejected: bool, group_id: str) -> None:
+async def _read(channel: str | None, count: int, group_id: str) -> None:
     config = load_config()
-    privkey = config.get("user_privkey_hex")
-    if not privkey:
-        print_error("No identity found. Run `fern init` first.")
-        return
-    user = UserIdentity.from_privkey_hex(privkey)
-
-    group_pubkey, group_info = resolve_group(group_id, config)
-    cache_path = group_info.get("cache_path") or str(get_cache_path(group_pubkey))
-
-    relay_urls = list(group_info.get("relays", []))
-    if relay_urls:
-        transports = await connect_transports(relay_urls)
-
-        store = SqliteStore(cache_path)
-        await store.open()
-        try:
-            heal_mode = HealMode.NONE if ctx.obj and ctx.obj.get("no_heal") else HealMode.AUTO
-            await sync_group_from_transports(
-                group_pubkey=group_pubkey,
-                transports=transports,
-                store=store,
-                client_id=user.pubkey,
-                heal_mode=heal_mode,
-            )
-        finally:
-            await store.close()
-
-        for t in transports:
-            try:
-                await t.close()
-            except Exception:
-                pass
-
-    store = SqliteStore(cache_path)
-    await store.open()
+    group, info = resolve_group(group_id, config)
+    path = str(info.get("cache_path") or get_cache_path(group))
+    store = open_store(path)
     try:
-        events = []
-        async for event in store.iter_group_events(group_pubkey):
-            events.append(event)
-
-        if not events:
-            click.echo("No events cached.")
-            return
-
-        state, rejected = derive_group_state(events)
-        rejected_ids = {e.id for e in rejected if e.id is not None}
-        nicknames = _compute_nicknames(events)
-
-        channel_filter = _resolve_channel_filter(channel, state) if channel else None
-
-        entries: list[tuple[int, str]] = []
-        for event in events:
-            ts = event.ts
-            author = _display_name(event.author, nicknames)
-
+        await sync_group(group, info, store)
+        state = store.get_chain_head(group).state
+        finalized = store.finalized_events(group)
+        plain_events = [item[0] for item in finalized]
+        names = _names(plain_events)
+        channel_id = channel
+        if channel:
+            for record in state.channels.values():
+                if record.name == channel:
+                    channel_id = record.id
+                    break
+        rows: list[str] = []
+        for event, height, position, certified_ms in finalized:
             if event.type == "chat.message":
-                msg_channel = event.content.get("channel", "")
-                if channel_filter and msg_channel != channel_filter:
+                event_channel = str(event.content.get("channel", ""))
+                if channel_id and event_channel != channel_id:
                     continue
-                text = event.content.get("text", "")
-                display_ch = _channel_display_name(msg_channel, state)
-                channel_tag = f"#{display_ch}" if msg_channel else ""
-                line = f"[{channel_tag}] <{author}> {text}"
-                if event.id in rejected_ids:
-                    line += "  [not authorized]"
-                    if not show_rejected:
-                        continue
-                entries.append((ts, line))
-
-            elif event.type in ADMIN_TYPES:
-                formatted = _format_admin_action(event, nicknames)
-                if formatted is not None:
-                    entries.append((ts, formatted))
-
-        entries.sort(key=lambda e: e[0])
-        entries = entries[-count:]
-
-        if not entries:
-            click.echo("No messages or events found.")
-            return
-
-        for _, line in entries:
-            click.echo(line)
-
+                channel_name = state.channels.get(event_channel)
+                label = channel_name.name if channel_name else event_channel
+                rows.append(
+                    f"[{_time(certified_ms)} #{label}] <{_name(event.author, names)}> "
+                    f"{event.content.get('text', '')}  [{height}:{position}]"
+                )
+            elif event.type in {"join", "leave", "kick", "ban", "unban"}:
+                rows.append(
+                    f"[{_time(certified_ms)}] --- {event.type} by "
+                    f"{_name(event.author, names)} [{height}:{position}] ---"
+                )
+        for row in rows[-count:]:
+            click.echo(row)
+        pending = store.pending_events(group)
+        for event in pending:
+            if event.type == "chat.message":
+                click.echo(
+                    f"[pending] <{_name(event.author, names)}> {event.content.get('text', '')}"
+                )
+        if not rows and not pending:
+            click.echo("No messages.")
     finally:
-        await store.close()
+        store.close()

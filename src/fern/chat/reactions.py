@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 from fern.events.event import Event
 from fern.events.build import build_event
 from fern.identity.user import UserIdentity
@@ -12,7 +10,7 @@ def build_reaction(
     *,
     user: UserIdentity,
     group: str,
-    parents: Sequence[str],
+    seq: int,
     target: str,
     emoji: str,
     ts: int | None = None,
@@ -21,7 +19,7 @@ def build_reaction(
         type=ChatTypes.REACTION,
         group=group,
         author_keypair=user.keypair,
-        parents=parents,
+        seq=seq,
         content={"target": target, "emoji": emoji},
         ts=ts,
     )

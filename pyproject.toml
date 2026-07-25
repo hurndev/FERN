@@ -26,7 +26,8 @@ dev = [
 
 [project.scripts]
 fern = "cli.main:main"
-fern-relay = "cli.relay_main:main"
+fern-validator = "cli.validator_main:main"
+fern-relay = "cli.validator_main:legacy_main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]

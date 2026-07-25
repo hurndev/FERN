@@ -16,10 +16,10 @@ from fern.events.limits import (
     MAX_MESSAGE_TEXT_BYTES,
     MAX_NICKNAME_BYTES,
     MAX_REACTION_BYTES,
-    MAX_RELAYS,
-    MAX_RELAY_URL_BYTES,
+    MAX_VALIDATOR_URL_BYTES,
 )
 from fern.events.types import ChatTypes, ProtocolTypes
+from fern.bft.validators import Validator, make_validator_set
 
 
 class SemanticValidationError(ValueError):
@@ -65,11 +65,11 @@ def _only(content: dict[str, object], allowed: set[str]) -> None:
         raise SemanticValidationError(f"unexpected content field: {sorted(extra)[0]}")
 
 
-def _relay_url(value: object) -> str:
-    url = _string(value, "relay", min_bytes=1, max_bytes=MAX_RELAY_URL_BYTES)
+def _validator_url(value: object) -> str:
+    url = _string(value, "validator", min_bytes=1, max_bytes=MAX_VALIDATOR_URL_BYTES)
     parsed = urlparse(url)
     if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
-        raise SemanticValidationError("relay must be a ws:// or wss:// URL")
+        raise SemanticValidationError("validator must be a ws:// or wss:// URL")
     return url
 
 
@@ -98,7 +98,17 @@ def validate_event_semantics(event: Event) -> None:
     t = event.type
 
     if t == ProtocolTypes.GENESIS:
-        required = {"name", "description", "public", "founder", "admins", "relays", "app"}
+        required = {
+            "chain_id",
+            "name",
+            "description",
+            "public",
+            "founder",
+            "admins",
+            "validators",
+            "fault_tolerance",
+            "app",
+        }
         missing = required - set(c)
         if missing:
             raise SemanticValidationError(f"missing genesis field: {sorted(missing)[0]}")
@@ -120,22 +130,41 @@ def validate_event_semantics(event: Event) -> None:
             _pubkey(admin, "admin")
         if founder not in admins:
             raise SemanticValidationError("admins must include founder")
-        relays = c["relays"]
-        if not isinstance(relays, list) or not 1 <= len(relays) <= MAX_RELAYS:
-            raise SemanticValidationError("relays must be a non-empty bounded array")
-        for relay in relays:
-            _relay_url(relay)
+        chain_id = c["chain_id"]
+        if not isinstance(chain_id, str) or not is_valid_event_id_hex(chain_id):
+            raise SemanticValidationError("chain_id must be 64-char lowercase hex")
+        raw_validators = c["validators"]
+        if not isinstance(raw_validators, list):
+            raise SemanticValidationError("validators must be an array")
+        try:
+            validators = [
+                Validator.from_dict(raw) for raw in raw_validators if isinstance(raw, dict)
+            ]
+            if len(validators) != len(raw_validators):
+                raise ValueError("invalid validator entry")
+            fault_tolerance = _int(c["fault_tolerance"], "fault_tolerance")
+            make_validator_set(validators, epoch=0, fault_tolerance=fault_tolerance)
+        except ValueError as exc:
+            raise SemanticValidationError(str(exc)) from exc
         app = _string(c["app"], "app", min_bytes=1, max_bytes=MAX_APP_NAME_BYTES)
         if app == "chat":
             channels = c.get("chat.channels")
             if not isinstance(channels, list) or not channels:
                 raise SemanticValidationError("chat.channels must be a non-empty array")
-            for raw in channels:
-                _validate_chat_channel(raw)
+            channel_ids = [_validate_chat_channel(raw) for raw in channels]
+            if len(channel_ids) != len(set(channel_ids)):
+                raise SemanticValidationError("chat channel ids must be unique")
+            channel_names = [str(raw["name"]) for raw in channels if isinstance(raw, dict)]
+            if len(channel_names) != len(set(channel_names)):
+                raise SemanticValidationError("chat channel names must be unique")
             if "chat.default_channel" in c:
-                _channel_id(c["chat.default_channel"], "chat.default_channel")
+                default = _channel_id(c["chat.default_channel"], "chat.default_channel")
+                if default not in channel_ids:
+                    raise SemanticValidationError("chat.default_channel is unknown")
             if "chat.system_channel" in c:
-                _channel_id(c["chat.system_channel"], "chat.system_channel")
+                system = _channel_id(c["chat.system_channel"], "chat.system_channel")
+                if system not in channel_ids:
+                    raise SemanticValidationError("chat.system_channel is unknown")
         return
 
     if t in (ProtocolTypes.JOIN, ProtocolTypes.LEAVE):
@@ -145,7 +174,12 @@ def validate_event_semantics(event: Event) -> None:
         _pubkey(c.get("invitee"), "invitee")
         if c.get("role") != "member":
             raise SemanticValidationError("role must be member")
-    elif t in (ProtocolTypes.KICK, ProtocolTypes.UNBAN, ProtocolTypes.ADMIN_ADD, ProtocolTypes.ADMIN_REMOVE):
+    elif t in (
+        ProtocolTypes.KICK,
+        ProtocolTypes.UNBAN,
+        ProtocolTypes.ADMIN_ADD,
+        ProtocolTypes.ADMIN_REMOVE,
+    ):
         _only(c, {"target"})
         _pubkey(c.get("target"), "target")
     elif t == ProtocolTypes.BAN:
@@ -156,13 +190,23 @@ def validate_event_semantics(event: Event) -> None:
             if until <= 0:
                 raise SemanticValidationError("until must be positive")
         _string(c.get("reason", ""), "reason", max_bytes=MAX_BAN_REASON_BYTES)
-    elif t == ProtocolTypes.RELAY_UPDATE:
-        _only(c, {"relays"})
-        relays = c.get("relays")
-        if not isinstance(relays, list) or not 1 <= len(relays) <= MAX_RELAYS:
-            raise SemanticValidationError("relays must be a non-empty bounded array")
-        for relay in relays:
-            _relay_url(relay)
+    elif t == ProtocolTypes.VALIDATOR_UPDATE:
+        _only(c, {"validators", "fault_tolerance", "readiness"})
+        raw_validators = c.get("validators")
+        if not isinstance(raw_validators, list):
+            raise SemanticValidationError("validators must be an array")
+        try:
+            validators = [
+                Validator.from_dict(raw) for raw in raw_validators if isinstance(raw, dict)
+            ]
+            if len(validators) != len(raw_validators):
+                raise ValueError("invalid validator entry")
+            fault_tolerance = _int(c.get("fault_tolerance"), "fault_tolerance")
+            make_validator_set(validators, epoch=0, fault_tolerance=fault_tolerance)
+        except ValueError as exc:
+            raise SemanticValidationError(str(exc)) from exc
+        if not isinstance(c.get("readiness"), list):
+            raise SemanticValidationError("readiness must be an array")
     elif t == ProtocolTypes.METADATA_UPDATE:
         _only(c, {"name", "description"})
         if "name" not in c and "description" not in c:

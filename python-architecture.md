@@ -1,655 +1,532 @@
-# FERN Python Implementation — Architecture
+# FERN-BFT Python Implementation Architecture
 
-This document describes the architecture of `fern`, the Python reference implementation of the FERN protocol. The library is modular, testable, and reusable across multiple frontends: a CLI tool ships alongside it; a web app or desktop app can use the same `GroupSession` API.
+## Status
 
-See `spec.md` for the wire-level protocol details and `architecture.md` for the high-level protocol design.
+This document describes the Python implementation on the `FERN-BFT` branch.
+It complements the protocol-level [architecture.md](architecture.md) and the
+normative [bft-spec.md](bft-spec.md). Paths and responsibilities below refer to
+the current source tree, not the removed DAG, completeness, healing, or generic
+transport packages.
 
----
+## 1. Design principles
 
-## 1. Design Principles
+### 1.1 Determinism before I/O
 
-### 1.1 Pure / Impure Boundary
+Canonical encoding, signed value objects, commit verification, and application
+execution are synchronous and deterministic. They accept explicit inputs and
+do not read clocks, files, sockets, or global process state. The validator
+runtime supplies time and persistence at their boundaries.
 
-- **Pure**: crypto, hashing, canonical serialization, signature verification, event construction, DAG operations, state machine fold, group_status/event_receipt/fraud-proof building and verification. All synchronous. Trivially testable (input → expected output).
-- **Impure-async**: WebSocket relay client/server, SQLite storage behind async store interfaces, client orchestration (`GroupSession`, publishing, subscribing, monitor runner).
-- **Impure-sync**: the `sqlite3` module itself — used synchronously inside `SqliteStore` under a store-local lock with short-lived connections.
+This split lets the same block be checked by a live validator, a synchronizing
+client, a CLI verification command, and the TypeScript implementation without
+replaying network behavior.
 
-~80% of the code is pure. Tests target pure functions directly; only integration tests need I/O.
+### 1.2 Safety state is durable state
 
-### 1.2 No Global State
+Votes and locks are not transient runtime details. `ConsensusCore` writes its
+own vote before returning it to the caller and writes a new lock before
+returning a block precommit. `BFTStore` rejects a conflicting vote even after a
+restart. Network code cannot bypass these operations.
 
-All dependencies are passed explicitly. No module-level singletons. Multiple `GroupSession` instances can run in one process (useful for tests and multi-group clients).
+### 1.3 Async orchestration at the edge
 
-### 1.3 Interfaces at the Boundaries
+WebSocket handling, peer broadcasts, consensus timers, subscriptions, and
+multi-validator requests use `asyncio`. Cryptography and state transitions
+remain ordinary synchronous calls. SQLite access is protected by a reentrant
+thread lock; each group engine additionally serializes concurrent event ingress
+with an async lock.
 
-Where pure logic needs I/O, it uses a `Protocol` (PEP 544). Tests substitute in-memory fakes that implement the same Protocol.
+### 1.4 Immutable protocol values
 
-- `EventStore` — event storage (MemoryStore for tests, SqliteStore for production)
-- `EventReceiptStore` — event_receipt storage (built into MemoryStore and SqliteStore)
-- `RelayTransport` — relay client (WebSocketRelayClient for real connections, FakeRelay for tests)
+Signed protocol objects and application snapshots are frozen dataclasses.
+Transitions construct replacements instead of mutating objects after their
+hashes or signatures have been checked. JSON parsing is strict at object
+boundaries so malformed values do not leak into the core.
 
-### 1.4 Immutability by Default
+### 1.5 Conservative validation
 
-`Event`, `EventReceipt`, `GroupStatus`, `GroupState`, `BanEntry`, `FraudProof` are `@dataclass(frozen=True)`. Mutating operations return copies. (Exception: `Keypair` is a plain class wrapping `cryptography`'s internal state.)
+Unknown evidence, missing proposal data, mismatched roots, equivocation, and
+incomplete readiness fail closed. The implementation does not infer a recovery
+fork or silently repair consensus history. Liveness policy is kept outside the
+small voting and locking kernel.
 
-### 1.5 Async at the Edge, Sync in the Core
+## 2. Dependency shape
 
-The state machine, crypto, serialization, and completeness pure logic are sync. Only the I/O layers are async. The CLI wraps everything in `asyncio.run()`.
+The intended dependency direction is:
 
-### 1.6 Layered Dependencies
-
+```text
+fern.crypto
+    ^
+    |
+fern.events -----> fern.identity / fern.chat
+    ^
+    |
+fern.bft canonical values, validators, certificates, blocks
+    ^
+    |
+fern.bft application + chain + consensus
+    ^
+    |
+fern.bft store + node + websocket + client + admission
+    ^
+    |
+cli commands / fern-validator process
 ```
-CLI / apps
-    ↓
-client.session (orchestration) · relay server
-    ↓
-transport (websocket / fake) · storage (sqlite / memory) · completeness.heal
-    ↓
-completeness (event_receipts, group_statuses, fraud_proofs, monitor, trust_ledger) · state.machine · dag
-    ↓
-events · identity · chat
-    ↓
-crypto
-```
 
----
+`consensus.py` knows how to vote safely but does not open sockets, wait on
+timeouts, select mempool events, or apply SQLite commits. `node.py` owns those
+runtime concerns. `websocket.py` adapts the node and store to the wire API.
 
-## 2. Package Structure
+The `fern.validator` package holds process configuration and network rate
+limiting. The old `fern-relay` executable remains only as a warning-emitting
+migration alias for existing installations.
 
-### 2.1 Library (`src/fern/`)
+## 3. Source tree
 
-```
+```text
 src/fern/
-├── __init__.py
-├── errors.py                    # Exception hierarchy
-├── crypto/
-│   ├── keys.py                  # Keypair class (Ed25519 generate, sign, verify)
-│   ├── hashes.py                # sha256_hex(data: bytes) → str
-│   └── encoding.py              # is_valid_pubkey_hex, is_valid_sig_hex, etc.
-├── events/
-│   ├── event.py                 # Event dataclass (frozen)
-│   ├── serialization.py         # canonical_serialization(), compute_id(), sign_event()
-│   ├── validation.py            # verify_event(), is_well_formed() — structural + crypto integrity
-│   ├── limits.py                # Per-field and per-event byte size limits
-│   ├── semantic.py              # validate_event_semantics() — content schema per event type
-│   ├── build.py                 # build_event() helper
-│   └── types.py                 # ProtocolTypes, ChatTypes constants
-├── identity/
-│   ├── user.py                  # UserIdentity dataclass (wraps Keypair)
-│   ├── group.py                 # GroupKeypair dataclass
-│   └── relay.py                 # RelayIdentity dataclass
-├── dag/
-│   ├── heads.py                 # compute_heads(), parent_to_children()
-│   ├── gaps.py                  # find_missing_parents()
-│   └── cycle_check.py           # has_cycle()
-├── state/
-│   ├── types.py                 # GroupState, BanEntry dataclasses
-│   ├── authorization.py         # is_authorised()
-│   └── machine.py               # derive_group_state(), apply_event()
-├── completeness/
-│   ├── event_receipts.py              # EventReceipt dataclass, build_event_receipt(), verify_event_receipt()
-│   ├── group_statuses.py          # GroupStatus dataclass, build/verify, compute_set_hash()
-│   ├── fraud_proofs.py          # FraudProof dataclass, build/verify, compute_fraud_proof_id()
-│   ├── monitor.py               # monitor_pass() pure logic, MonitorResult
-│   ├── trust_ledger.py          # TrustLedger, RelayTrustEntry, Fault
-│   └── heal.py              # heal_missing() async helper
-├── storage/
-│   ├── interfaces.py            # EventStore Protocol, EventReceiptStore Protocol
-│   ├── memory.py                # MemoryStore (in-memory, used in tests)
-│   └── sqlite_store.py          # SqliteStore (disk-backed, async API over locked sync sqlite)
-├── transport/
-│   ├── interfaces.py            # RelayTransport Protocol, RelayMetadata dataclass
-│   ├── websocket_client.py      # WebSocketRelayClient (single-reader model, response queue)
-│   ├── websocket_server.py      # RelayServer (subscribe, sync, publish, group_statuses, fraud proofs)
-│   ├── fake.py                  # FakeRelay (in-process relay for tests)
-│   ├── wire.py                  # Message dataclasses (not currently used by client/server)
-│   └── metadata.py              # fetch_relay_metadata() async helper
-├── client/
-│   ├── session.py               # GroupSession — per-group client orchestration
-│   ├── bootstrap.py             # fetch_genesis(), initial_sync()
-│   ├── publisher.py             # publish_event() — parallel publish + event_receipt collection
-│   ├── subscriber.py            # subscribe_to_relays(), unsubscribe_from_relays()
-│   └── monitor_runner.py        # run_monitor_pass() — async investigation + trust ledger update
-├── relay/
-│   ├── store.py                 # RelayStore wrapper
-│   ├── gc.py                    # garbage_collect() — tip cleanup with unreferenced-for-N check
-│   ├── group_status_loop.py      # Periodic group_status issuance with prev chain tracking
-│   └── metadata_handler.py      # build_metadata() helper
-├── chat/
-│   ├── messages.py              # build_chat_message(), is_chat_message()
-│   ├── reactions.py             # build_reaction()
-│   └── nicknames.py             # build_nickname_set()
-└── apps/
-    └── __init__.py              # Reserved for future app namespaces
-```
+├── bft/
+│   ├── admission.py       prospective-validator history preparation
+│   ├── application.py     deterministic replicated application state
+│   ├── blocks.py          candidate, block, proposal, and commit objects
+│   ├── canonical.py       cross-runtime canonical JSON, hashes, signatures
+│   ├── certificates.py    ingress, observation, vote, and readiness objects
+│   ├── chain.py           commit and full-chain verification
+│   ├── client.py          verified sync and multi-validator publication
+│   ├── consensus.py       crash-safe voting and locking kernel
+│   ├── constants.py       protocol version, phases, and size limits
+│   ├── manifest.py        manifests, hosting evidence, local admission
+│   ├── node.py            per-group engine and multi-group validator node
+│   ├── store.py           SQLite history, mempool, and safety journal
+│   └── validators.py      validator and quorum rules
+├── chat/                  event-content helpers for the built-in app
+├── crypto/                Ed25519, hashes, and key encoding
+├── events/                event model, building, serialization, validation
+├── identity/              user and group key wrappers
+├── validator/
+│   ├── config.py          validator process configuration and keys
+│   └── rate_limiter.py    per-action network rate limiting
+└── errors.py
 
-### 2.2 CLI (`cli/`)
-
-```
 cli/
-├── __init__.py
-├── main.py                      # Entry point (fern console_script)
-├── relay_main.py                # fern-relay console_script (with coloured logging)
-├── config.py                    # Config loading, group resolution, transport helper
-│                                #   FERN_HOME env var overrides ~/.fern default
-├── output.py                    # print_success(), print_error()
-├── dag_viewer.py                # Zero-dependency DAG web viewer (stdlib http.server + SSE)
-├── fern-wipe.sh                 # Convenience script to wipe CLI/relay storage
-└── commands/
-    ├── init.py                  # fern init — generate identity
-    ├── whoami.py                # fern whoami — show pubkey
-    ├── group.py                 # fern group create|join|list|info|members|leave
-    │                            #   kick|ban|unban|invite|admin-add|admin-remove|relay-update|nickname
-    ├── post.py                  # fern post <group> <text> (syncs state, checks auth before publishing)
-    ├── read.py                  # fern read <group> (shows admin actions inline, nicknames, auth filtering)
-    ├── watch.py                 # fern watch <group> (shows admin actions, nicknames, auth filtering)
-    ├── verify.py                # fern verify <group>
-    ├── relay.py                 # fern relay start|info
-    └── dag.py                   # fern dag --db <path> — launch the DAG viewer for any SQLite store
-```
+├── bft.py                 shared client sync/build/publish helpers
+├── config.py              identity, group addresses, and local paths
+├── logging_config.py      shared concise/verbose console formatting
+├── main.py                `fern` command registration
+├── validator_main.py      `fern-validator` process and preparation commands
+└── commands/              group and chat commands
 
-### 2.3 Tests (`tests/`)
-
-```
 tests/
-├── conftest.py                  # Shared fixtures: keypairs, sample_genesis, memory_store
-├── unit/
-│   ├── crypto/test_crypto.py
-│   ├── events/test_events.py
-│   ├── events/test_serialization_property.py
-│   ├── dag/test_dag.py
-│   ├── state/test_state.py
-│   ├── completeness/test_completeness.py
-│   └── chat/test_chat.py
-└── integration/
-    ├── test_fake_relay.py
-    ├── test_event_roundtrip.py
-    └── test_censorship_detection.py
+├── bft/                   application, protocol, store, runtime, wire, epochs
+└── unit/crypto/           retained primitive coverage
 ```
 
----
+The old `fern.client`, `fern.completeness`, `fern.dag`, `fern.state`,
+`fern.storage`, and `fern.transport` packages were removed. Their abstractions
+encoded assumptions about loose DAG events and server reconciliation that do not
+fit committed block history.
 
-## 3. Layer Details
+## 4. Pure protocol layers
 
-### 3.1 `fern.crypto` (Pure)
+### 4.1 `fern.crypto`
 
-```python
-class Keypair:
-    def __init__(self, privkey_bytes: bytes) -> None: ...
-    @classmethod def generate(cls) -> Keypair: ...
-    @classmethod def from_privkey(cls, privkey: bytes) -> Keypair: ...
-    @property def pubkey_hex(self) -> str: ...
-    @property def privkey_hex(self) -> str: ...
-    def sign(self, message: bytes) -> bytes: ...
-    def sign_detached(self, message: bytes) -> str: ...         # hex-encoded signature
-    @staticmethod def verify_static(pubkey_bytes, message, sig) -> bool: ...
+This package wraps Ed25519 keys and signatures, SHA-256 hashing, hex encoding,
+and random key/channel material. Protocol code exposes lowercase hex strings
+on the wire. Private keys stay in identity or validator configuration objects.
 
-def sha256_hex(data: bytes) -> str: ...                          # lowercase hex output
-def is_valid_pubkey_hex(s: str) -> bool: ...                     # 64-char lowercase hex
-def is_valid_event_id_hex(s: str) -> bool: ...                   # 64-char lowercase hex
-def is_valid_sig_hex(s: str) -> bool: ...                        # 128-char lowercase hex
+### 4.2 `fern.events`
+
+`Event` is the shared signed application envelope. The BFT rewrite retains the
+familiar content model while changing the signed structure to:
+
+```text
+[protocol, type, group, author, seq, content, ts, tags]
 ```
 
-### 3.2 `fern.events` (Pure)
+`build.py` constructs and signs user or genesis events. `serialization.py` and
+`validation.py` enforce exact fields, size limits, canonical IDs, signatures,
+and sequence shape. `semantic.py` validates known protocol and chat content.
+`types.py` centralizes event type constants and identifies governance/state
+events.
 
-```python
-@dataclass(frozen=True)
-class Event:
-    type: str
-    group: str
-    author: str
-    parents: tuple[str, ...] = ()
-    content: dict = field(default_factory=dict)
-    ts: int = 0
-    tags: tuple[tuple[str, ...], ...] = ()
-    id: str | None = None
-    sig: str | None = None
+Event validation here is context-free. Membership, authorization, expected
+sequence, channel existence, and certified-time bans belong to
+`bft.application` because they depend on a particular finalized state.
 
-    @property def is_genesis(self) -> bool: ...
+### 4.3 `bft.canonical`
 
-def canonical_serialization(event: Event) -> bytes: ...    # [type, group, author, parents, content, ts, tags]
-def compute_id(event: Event) -> str: ...
-def sign_event(event: Event, keypair, *, is_genesis=False) -> Event: ...
+`canonical.py` is the common serialization boundary for every BFT object. It:
 
-def verify_event(event: Event) -> None:     # raises VerificationError subclasses
-def is_well_formed(event: Event) -> bool: ...
+- recursively normalizes JSON values;
+- sorts object keys by Unicode code point;
+- emits compact UTF-8 JSON;
+- rejects booleans where an integer is required, floats, and unsafe integers;
+- produces SHA-256 IDs and Ed25519 signatures for domain payloads.
 
-def validate_event_semantics(event: Event) -> None:  # raises SemanticValidationError
-    # Content schema validation per event type (genesis fields, relay URLs,
-    # chat channel structure, message text length, nickname length, etc.)
-    # Uses limits from fern.events.limits.
+The matching TypeScript functions in Bracken must remain byte-for-byte
+compatible whenever an object schema changes.
 
-def build_event(*, type, group, author_keypair, parents, content, ts, tags,
-                group_keypair=None) -> Event: ...
+### 4.4 `bft.validators`
+
+`Validator` validates a public key, `ws://` or `wss://` URL, and bounded
+operator label. `ValidatorSet` enforces sorted distinct keys and URLs, the
+maximum of 100 validators, and one of two membership rules: unanimous
+`f=0,q=n` for one to three validators, or exact `n=3f+1,q=2f+1` membership for
+standard sets of four or more validators.
+
+It exposes the mode-dependent `quorum`, ingress `propagation_threshold = f+1`,
+and `round_catchup_threshold = f+1`. In unanimous small-set mode the declared
+fault count is zero, so one authenticated future-round sender can resynchronize
+a restarted validator. It also provides membership checks and deterministic
+proposer selection. Validator-set construction sorts by public key so input
+order cannot change the proposer schedule. The CLI and Bracken surface a
+warning whenever verified state uses the unanimous small-set mode.
+
+### 4.5 `bft.certificates`
+
+This module defines and validates four signed evidence types:
+
+- `IngressReceipt`: an active validator accepted an event at a stable local
+  first-seen time;
+- `TimestampObservation`: one validator's observation vector for one candidate
+  and consensus position;
+- `Vote`: a prevote or precommit for a block ID or nil;
+- `SyncReady`: a prospective validator has the exact verified history needed
+  for an epoch transition.
+
+All are bound to the relevant group, chain ID, epoch, and consensus/checkpoint
+coordinates. Constructors do not make an object trusted; callers must use the
+corresponding verification function and active validator set.
+
+### 4.6 `bft.blocks`
+
+The block layer is split into progressively stronger objects:
+
+- `Candidate` is the proposer's signed, complete event batch.
+- `Block` adds quorum timestamp observations, medians, ancestry, state root,
+  and history root.
+- `Proposal` binds the block to the current consensus round and optionally
+  carries a quorum valid-round proof.
+- `Commit` pairs a block with a quorum of matching precommits.
+
+`build_block` calculates medians and roots. Verification functions re-check
+signers, quorums, exact object IDs, size/event bounds, and evidence alignment.
+They do not mutate application state.
+
+### 4.7 `bft.application`
+
+`ApplicationState` is an immutable snapshot of all consensus-controlled group
+state. `initial_state_from_genesis` validates and derives height-zero state.
+`validate_event_for_state`, `apply_event`, and `execute_events` implement
+authorization and deterministic state transitions.
+
+`execute_events` enforces the ordinary-events-first, single-governance-last
+rule. Validator updates validate readiness against the incoming checkpoint and
+produce the next epoch's complete set. The `ApplicationState.root` property
+hashes canonical serialized state and is checked against each proposed block.
+
+The module never calls `time.time()`. The caller supplies certified event times
+and the checkpoint values used to validate readiness.
+
+### 4.8 `bft.chain`
+
+`verify_and_apply_commit` is the main reusable verification function. Given a
+trusted `ChainHead` and one `Commit`, it checks:
+
+- exact next height, active epoch, and parent commitments;
+- proposal and precommit evidence under the incoming validator set;
+- timestamp evidence and certified medians;
+- deterministic application execution;
+- state, history, block, and logical-byte commitments.
+
+It returns a new `ChainHead` or raises `ChainVerificationError` without changing
+storage. `verify_chain` folds the same operation over commits starting at
+genesis. Validators and clients therefore share the same validity path.
+
+### 4.9 `bft.consensus`
+
+`ConsensusCore` is the small safety-critical state machine for one validator at
+one height. It handles round entry, prevote selection, valid-round unlocking,
+locking after a prevote quorum, nil precommits, and durable own-vote creation.
+
+`VoteSet` validates and counts votes for a single group/chain/epoch/height/
+round/phase. Equivocating validators are excluded rather than allowed to count
+toward competing values. `SafetyState` contains the current round, locked
+round/block/proposal, and most recent valid proposal.
+
+Persistence is abstracted by the narrow `SafetyJournal` protocol.
+`MemorySafetyJournal` supports focused tests; `BFTStore` is the production
+implementation. Networking and timeout behavior deliberately do not appear in
+this module.
+
+## 5. Persistence and runtime layers
+
+### 5.1 `bft.store`
+
+`BFTStore` owns the SQLite connection and implements `SafetyJournal`. It enables
+WAL, `synchronous=FULL`, and foreign keys. The schema contains:
+
+- `bft_groups` for genesis, application state, and the current checkpoint;
+- `bft_commits` for finalized blocks;
+- `bft_events` for pending/finalized events and certified positions;
+- `bft_safety_state` and `bft_own_votes` for crash safety;
+- `bft_votes`, `bft_observations`, and `bft_own_observations` for live rounds;
+- `bft_equivocations` for conflicting signed evidence;
+- `bft_admissions` for local hosting policy.
+
+`save_commit` calls the shared chain verifier and applies all history and state
+changes in one `BEGIN IMMEDIATE` transaction. The store also implements stable
+first-seen times, pending author-sequence allocation, deterministic mempool
+selection, commit paging, and finalized event queries.
+
+One `BFTStore` can host many independent groups. Callers should close it
+explicitly; CLI commands use `try/finally` around each local cache.
+
+### 5.2 `bft.node`
+
+`GroupEngine` is one validator's async runtime for one group. It owns timers,
+round-local candidate/proposal caches, the `ConsensusCore`, gossip reactions,
+and commit/pending listeners. Its responsibilities include:
+
+- accepting and gossiping events without concurrent sequence races;
+- selecting candidates when the local key is proposer;
+- collecting timestamp observations and building proposals;
+- validating incoming candidates, proposals, votes, and commits;
+- moving through propose, prevote, precommit, timeout, and later rounds;
+- catching up after the validator set's mode-dependent future-round threshold;
+- persisting commits and starting the next height.
+
+`ConsensusTiming` makes block interval, phase timeouts, and round backoff
+explicit and replaceable in tests.
+The runtime waits through arbitrary inbound traffic until the active phase's
+specific condition is satisfied or its timeout expires; one partial
+observation or vote never acts as an implicit timeout.
+
+`ValidatorNode` owns one validator key, one store, and a `GroupEngine` per hosted
+group in which that key is active. It routes peer messages and starts/stops all
+engines. A fully synchronized prospective validator remains inactive; it may
+accept exactly the next verified transition commit and starts an engine only
+if that commit activates its key.
+
+### 5.3 `bft.websocket`
+
+`ValidatorServer` adapts a `ValidatorNode` to the WebSocket JSON API. It handles
+metadata, genesis bootstrap, peer messages, event submission, status and
+history queries, manifests, hosting attestations, pending lookup, and
+subscriptions. It pushes pending events and commits to subscribed clients and
+enforces message-size and per-action rate limits.
+
+`PeerBroadcaster` sends signed node messages to the active set's configured
+URLs. `BFTWebSocketClient` is the low-level request helper used by the CLI,
+admission flow, and client synchronization. `ValidatorStatus` is defined here
+because it is the signed checkpoint representation exposed by the server.
+
+The wire adapter parses untrusted JSON into strict domain objects before
+passing it inward. Handler errors become error responses rather than escaping
+the connection task.
+
+### 5.4 `bft.client`
+
+This module provides application-independent verifying client workflows:
+
+- `sync_from_validators` fetches statuses, genesis, and commits, verifies from
+  the local head, and checks comparable signed checkpoints for splits;
+- `sync_to_manifest` downloads through one fixed, signed history target for
+  prospective-validator preparation;
+- `publish_to_validators` submits to multiple validators and verifies ingress
+  receipts.
+
+`SyncResult` and `PublishResult` return evidence and partial endpoint failures
+to the caller. One unavailable validator does not erase successful signed
+responses, but contradictory evidence is a verification error.
+
+### 5.5 `bft.manifest` and `bft.admission`
+
+`manifest.py` defines signed `HistoryManifest` and `HostingAttestation` values,
+their verification, the independent-operator threshold check, and the local
+`AdmissionRecord`.
+
+`prepare_validator_history` orchestrates the safe admission path. It selects a
+matching manifest and hosting evidence using local trust configuration,
+downloads and verifies the fixed history, persists the admission decision, and
+returns a signed `SyncReady` for the exact checkpoint. Manual preparation is an
+explicit local resource-policy override; it never bypasses chain verification
+or on-chain readiness validation.
+
+## 6. CLI architecture
+
+Two console scripts are registered by `pyproject.toml`:
+
+```text
+fern        -> cli.main:main
+fern-validator -> cli.validator_main:main
+fern-relay     -> warning-emitting compatibility entry point
 ```
 
-Key canonical serialization rules:
-- Array is `[type, group, author, sorted(parents), sorted_content, ts, sorted(tags)]`
-- `parents` sorted lexicographically
-- `content`: dict keys sorted recursively (`sort_keys_recursive`)
-- Arrays inside `content` are NOT sorted (order is semantic)
-- No whitespace: `json.dumps(array, separators=(",", ":"), ensure_ascii=False)`
-- `id = sha256_hex(canon_bytes)`, `sig = ed25519_sign(privkey, canon_bytes)`
+`cli.config` stores the user key, group order, validator URLs, and per-group
+cache paths below `FERN_HOME` (default `~/.fern`). A group address has the form:
 
-### 3.3 `fern.state` (Pure)
-
-```python
-@dataclass(frozen=True)
-class Channel:
-    id: str
-    name: str
-    description: str = ""
-    position: int = 0
-
-@dataclass(frozen=True)
-class GroupState:
-    members: frozenset[str]
-    joined: frozenset[str]
-    banned: Mapping[str, BanEntry]
-    admins: frozenset[str]
-    relays: tuple[str, ...]
-    metadata: Mapping[str, str]
-    public: bool
-    app: str = "chat"
-    channels: Mapping[str, Channel] = ...
-    chat_settings: Mapping[str, str] = ...
-
-    def is_banned_at(self, pubkey: str, ts: int) -> bool: ...
-    def can_post(self, pubkey: str, ts: int) -> bool: ...
-    def can_admin(self, pubkey: str) -> bool: ...
-
-def derive_group_state(events: Iterable[Event]) -> tuple[GroupState, list[Event]]: ...
-def apply_event(state: GroupState, event: Event) -> GroupState: ...
-def is_authorised(state: GroupState, event: Event) -> bool: ...
+```text
+fern:<group-public-key>@ws[s]://validator-a,...
 ```
 
-State is folded in `(ts, id)` canonical linearisation order over the genesis-connected event set only. Events with missing parents are retained in storage for gap healing, but they must not be applied to state until their complete parent chain connects to genesis. Conflict resolution: events at same `ts` are ordered by ascending `id`. Last-writer-wins per field. When same-timestamp events have parent-child relationships and the child's ID sorts before the parent's, the child is rejected in the initial pass. A convergence loop re-evaluates rejected events after the main pass, accepting any whose parents are now all accepted, until a fixed point is reached.
+The address supplies discovery endpoints. After verified sync, the validator
+set in finalized application state is authoritative and the local config is
+updated to match it.
 
-Ban semantics: a ban persists until `unban` or `until` expiry. A banned user cannot `join`. A `kick` does not ban — user can re-join. A ban or kick removes protocol admin authority from the target.
+`cli.bft` centralizes the common flow used by commands: open a `BFTStore`, sync
+and verify the group, derive the next user sequence, build a signed event, and
+publish it to the current validator set.
 
-Chat channels are app-level state in the reference implementation. The reserved
-genesis channel has ID `"general"`; channels created after genesis use their
-`chat.channel_create` event ID as the channel ID. `chat.settings_update` stores
-chat-wide settings such as `default_channel` and `system_channel`.
+The user-facing command families are:
 
-### 3.4 `fern.dag` (Pure)
+| Command | Responsibility |
+| --- | --- |
+| `fern init`, `fern whoami` | User identity |
+| `fern group create/join/list/info/members` | Group lifecycle and verified state |
+| `fern group leave/invite/kick/ban/unban` | Membership governance |
+| `fern group admin-add/admin-remove/nickname` | Administration and profile events |
+| `fern group validator-update` | Full validator-set replacement with readiness |
+| `fern post/read/watch` | Publish, inspect, and subscribe to chat history |
+| `fern verify` | Re-verify the full cached chain from genesis |
+| `fern chain [group] [--db ...]` | Inspect head state, validators, blocks, finalized event positions, and pending events |
+| `fern validator init/start/info` | Local validator operation |
 
-```python
-def compute_connected_event_ids(events: Iterable[Event]) -> frozenset[str]: ...
-def compute_connected_heads(
-    events: Iterable[Event], *, excluded_ids: Iterable[str] = ()
-) -> frozenset[str]: ...
-def find_missing_parents(events: Iterable[Event]) -> frozenset[str]: ...
-def has_cycle(events: Iterable[Event]) -> bool: ...
+`fern dag --db ...` remains a hidden alias for `fern chain --db ...` and emits
+a rename warning. Hidden legacy options such as `--no-heal` and
+`--show-rejected` are accepted for script compatibility but have no DAG-healing
+meaning.
+
+The top-level `fern` Click group keeps only lightweight command names and help
+text in memory. It imports a command module—and therefore the BFT, WebSocket,
+SQLite, and cryptography stacks—only after that command is selected. Top-level
+help does not import any `fern.bft` module, which keeps menu startup fast even
+when the editable checkout resides on network storage.
+
+`fern-validator` uses `FERN_VALIDATOR_HOME` (default `~/.fern-validator`) and
+provides:
+
+- `init` to create a validator key, config, and SQLite path;
+- `run` to start the multi-group validator and WebSocket server;
+- `config show/add-witness/remove-witness` for local admission trust;
+- `prepare` to stage verified history and write a `SyncReady` JSON file.
+
+The `witness` command wording is retained for configuration compatibility; it
+now identifies a trusted validator source and local operator label.
+
+Both console scripts use structured standard-library logging. Validator INFO
+records cover server/group lifecycle and finalized blocks. `fern-validator
+--verbose` or `fern-validator run --verbose` enables DEBUG records at consensus
+transition points: event acceptance, round stages, candidate/proposal creation,
+local vote decisions, quorum formation, future-round catch-up, and advancement.
+Individual inbound votes and complete event content are intentionally omitted.
+
+`fern --verbose <command>` enables client DEBUG records for validator
+discovery, signed status comparison, manifest/source choice, commit pages,
+verified blocks, publication results, and ingress receipts. The WebSocket
+library's frame-level logger stays at WARNING so application records remain
+readable.
+
+## 7. Bracken boundary
+
+Bracken is a separate browser implementation, not a thin view over Python. The
+important matching modules are:
+
+```text
+bracken/src/fern/events.ts   exact fern-bft-1 event encoding and signatures
+bracken/src/fern/bft.ts      validator, proposal, commit, and chain checks
+bracken/src/fern/state.ts    deterministic application execution and state root
+bracken/src/fern/validator.ts WebSocket requests, receipts, status, subscription
+bracken/src/fern/db.ts       IndexedDB v4 events, commits, receipts, endpoint pins
+bracken/src/fern/logger.ts   structured browser lifecycle and debug logging
+bracken/src/hooks/useBracken.ts
+                             sync, publish, reconnect, split checks, and UI state
 ```
 
-Connectedness is a recursive genesis gate: `genesis` is connected, and a non-genesis event is connected only when every parent is already connected. `compute_connected_heads()` returns heads from that connected subset and excludes local-only or failed publish attempts. This prevents a disconnected event from becoming the parent of future events.
+The React layer consumes derived pending/finalized events and chain metadata.
+For the active group, one abortable supervisor per validator maintains the
+WebSocket subscription. Reconnect uses bounded exponential backoff and performs
+a verified catch-up sync before changing the endpoint back to connected.
+`ChainViewer.tsx` replaces the old graph visualization. IndexedDB upgrading to
+v3 clears legacy event objects because DAG event IDs and state are incompatible
+with `fern-bft-1`.
 
-### 3.5 `fern.completeness` (Pure logic + async orchestration)
+Bracken emits normal connection, synchronization, ingress, and finalized-block
+records to the developer console. Request-level DEBUG records are enabled in
+Vite development builds or when the `fern:verbose` local-storage key is
+`"true"`. Logs use shortened public identifiers and never include event content,
+signing seeds, or private keys.
 
-```python
-# Event Receipts (pure)
-@dataclass(frozen=True)
-class EventReceipt:
-    event_id: str; group: str; relay: str; ts: int; sig: str
-def build_event_receipt(*, event, relay_keypair, ts) -> EventReceipt: ...
-def verify_event_receipt(event_receipt: EventReceipt) -> bool: ...
+Python changes to canonical encoding, block fields, state serialization, or
+epoch execution require an equivalent TypeScript change. Cross-runtime test
+vectors are a useful future addition; currently both implementations encode
+the same rules directly.
 
-# GroupStatuses (pure)
-@dataclass(frozen=True)
-class GroupStatus:
-    group: str; relay: str; set_hash: str; tips: tuple[str, ...]
-    count: int; prev: str | None; ts: int; sig: str
-def build_group_status(*, group, relay_keypair, known_set, tips, count, prev, ts) -> GroupStatus: ...
-def verify_group_status(group_status: GroupStatus, prev: GroupStatus | None = None) -> bool: ...
-def compute_set_hash(event_ids: Iterable[str]) -> str: ...
-def hash_group_status(group_status: GroupStatus) -> str: ...
+## 8. Testing and verification
 
-# Fraud proofs (pure)
-@dataclass(frozen=True)
-class FraudProof:
-    type: str; group: str; relay: str; event_id: str
-    event: Event | None; event_receipt: EventReceipt | None; evidence: str
-def build_fraud_proof(*, relay, event, event_receipt, evidence) -> FraudProof: ...
-def verify_fraud_proof(proof: FraudProof) -> bool: ...
-def compute_fraud_proof_id(proof: FraudProof) -> str: ...
+The active Python tests are organized by architectural boundary:
 
-# Monitor (pure + async)
-@dataclass(frozen=True)
-class MonitorResult:
-    in_sync: bool
-    faults: tuple[Fault, ...] = ()
-    divergent_relays: tuple[str, ...] = ()
-    candidates_to_check: tuple[str, ...] = ()
+- `test_protocol.py`: canonical objects, signatures, commits, tamper rejection,
+  quorum intersection, locks, nil votes, restart safety, and equivocation;
+- `test_application.py`: deterministic state and certified policy behavior;
+- `test_store.py`: persistence, transactions, and concurrent ingress support;
+- `test_runtime.py`: four-validator rounds, gossip, missed candidate messages,
+  and commit progress;
+- `test_websocket.py`: server/client sync, subscriptions, and admission;
+- `test_epochs.py`: readiness, governance ordering, and epoch handoff.
+- `test_logging.py`: CLI verbose controls and real consensus lifecycle logs.
 
-def monitor_pass(*, local_known_set, local_event_receipts_for_relay, new_group_status,
-                 prev_group_status, relay_pubkey, sibling_group_statuses, now_ts) -> MonitorResult: ...
-async def run_monitor_pass(*, relay, group_status, local_known_set, event_receipts_for_relay,
-                           trust_ledger, sibling_group_statuses) -> MonitorResult: ...
-
-# Trust ledger
-@dataclass class TrustLedger: entries: dict[str, RelayTrustEntry]
-def add_fault(self, relay_pubkey, fault): ...
-```
-
-The monitor works in two stages:
-1. **Pure `monitor_pass`**: compares `set_hash` to local known set, checks group_status chain, records sibling divergence. If `in_sync=False`, returns `candidates_to_check`.
-2. **Async `run_monitor_pass`**: for each candidate, queries the relay via `get()` to determine which events are truly missing. For events with an event_receipt → `missing_event_with_event_receipt` fault (fraud). Without event_receipt → `missing_event_no_event_receipt` fault (heal candidate).
-
-### 3.6 `fern.storage` (I/O with Protocols)
-
-```python
-class EventStore(Protocol):
-    async def put_event(self, event: Event) -> None: ...
-    async def get_event(self, event_id: str) -> Event | None: ...
-    async def has_event(self, event_id: str) -> bool: ...
-    def iter_all_events(self) -> AsyncIterator[Event]: ...
-    def iter_group_events(self, group: str) -> AsyncIterator[Event]: ...
-    def iter_since(self, group: str, since_ts: int) -> AsyncIterator[Event]: ...
-    async def count_events(self, group: str) -> int: ...
-    async def get_tips(self, group: str) -> list[str]: ...
-    async def get_known_set(self, group: str) -> frozenset[str]: ...
-    async def get_parent_map(self, group: str) -> Mapping[str, frozenset[str]]: ...
-    async def get_hosted_groups(self) -> list[str]: ...
-    async def delete_event(self, event_id: str) -> None: ...
-
-class EventReceiptStore(Protocol):
-    async def put_event_receipt(self, event_id: str, relay_pubkey: str, event_receipt: EventReceipt) -> None: ...
-    async def get_event_receipt(self, event_id: str, relay_pubkey: str) -> EventReceipt | None: ...
-    def iter_event_receipts_for_event(self, event_id: str) -> AsyncIterator[EventReceipt]: ...
-```
-
-Two implementations:
-- `MemoryStore` — in-memory dicts. Used in tests and ephemeral CLI invocations.
-- `SqliteStore` — SQLite-backed. Methods are async to satisfy the storage protocols, but SQLite calls run synchronously under a store-local lock with short-lived connections. Schema includes tables for `events`, `parent_refs`, `event_receipts`, `fraud_proofs`, and `group_statuses_issued`. Used both as relay event store and per-group client cache at `~/.fern/cache/<pubkey>.sqlite`. `get_hosted_groups()` queries distinct `group_pubkey` values so the relay can reconstruct its hosted groups from disk on startup.
-
-### 3.7 `fern.transport` (I/O with Protocols)
-
-```python
-class RelayTransport(Protocol):
-    url: str
-    relay_pubkey: str
-    async def connect(self) -> None: ...
-    async def close(self) -> None: ...
-    async def fetch_metadata(self) -> RelayMetadata: ...
-    async def subscribe(self, group: str) -> None: ...
-    async def publish(self, event: Event) -> EventReceipt: ...
-    async def heal(self, event: Event) -> EventReceipt: ...
-    async def get(self, event_id: str) -> Event | None: ...
-    def sync(self, group: str, since_ts=None) -> AsyncIterator[Event]: ...
-    async def sync_ids(self, group: str) -> list[str]: ...
-    async def sync_lock(self, group: str, client_id: str) -> SyncLockResult: ...
-    async def sync_unlock(self, group: str, client_id: str) -> None: ...
-    async def request_group_status(self, group: str) -> GroupStatus: ...
-    async def submit_fraud_proof(self, proof: FraudProof) -> str: ...
-    def query_fraud_proofs(self, *, relay=None, group=None) -> AsyncIterator[FraudProof]: ...
-    def on_event(self, callback) -> None: ...
-    def on_group_status(self, callback) -> None: ...
-```
-
-Three implementations:
-- `WebSocketRelayClient` — real WSS/WS client. Uses a single-reader model: a `_listen_loop` reads all messages, pushes route to callbacks, responses go to an `asyncio.Queue` for request-response correlation. Uses `_awaiting_response` flag so `sync`/`get`/`request_group_status` responses are correctly routed to the queue rather than being swallowed by push callbacks.
-- `RelayServer` — real WSS/WS server. Implements subscribe (tracks connections, pushes events/group_statuses), sync (streams events + `sync_complete`), sync_ids (ID-only set fetch), sync_lock/sync_unlock (advisory per-group heal coordination), heal (store without broadcast), and query_fraud_proofs (streams + `query_complete`). Auto-hosts groups on valid genesis. Serves an HTTP metadata endpoint (with CORS headers) for browser clients. Reconstructs `_hosted_groups` from the database on startup via `get_hosted_groups()`. Uses structured logging with a coloured formatter.
-- `FakeRelay` — in-process relay for tests. Implements the same `RelayTransport` Protocol. Tracks `_last_group_statuses` per group for the prev chain.
-
-### 3.8 `fern.client` (Async Orchestration)
-
-```python
-class GroupSession:
-    def __init__(self, *, user: UserIdentity, store: EventStore,
-                 event_receipt_store: EventReceiptStore, trust_ledger=None): ...
-    @property def state(self) -> GroupState | None: ...
-    @property def trust_ledger(self) -> TrustLedger: ...
-
-    async def join_group(self, group_pubkey, transports) -> GroupState: ...
-    async def publish(self, event: Event) -> tuple[Event, list[EventReceipt]]: ...
-    async def refresh_state(self) -> GroupState | None: ...
-    async def get_known_set(self) -> frozenset[str]: ...
-    async def close(self) -> None: ...
-
-    def on_event(self, callback) -> None: ...
-    def on_group_status(self, callback) -> None: ...
-    def on_state_change(self, callback) -> None: ...
-```
-
-`GroupSession.join_group()` handles the full bootstrap: connect transports, fetch genesis, initial sync from all relays, derive state, subscribe for live events, register event/group_status handlers. `_handle_event()` updates `_state` when admin events arrive; `_handle_group_status()` runs the monitor pass.
-
-Helper modules:
-- `publisher.py` — `publish_event()`: parallel publish to all transports via `asyncio.gather`, collects event_receipts, stores them if an event_receipt store is provided.
-- `bootstrap.py` — `fetch_genesis()` walks DAG tips back to genesis via `get` requests; falls back to `sync`. `initial_sync()` uses group_status-gated `sync_diff()` when a client identity is available, otherwise falls back to full `sync`.
-- `sync.py` — `sync_diff()` compares relay group_statuses to the local known set, uses `sync_ids` to compute differences, fetches missing local events with `get`, and repairs missing relay events with `heal`. CLI callers use non-waiting lock behavior; long-lived clients may retry after leases.
-- `subscriber.py` — `subscribe_to_relays()` calls `transport.subscribe(group)` on each transport.
-- `monitor_runner.py` — `run_monitor_pass()`: runs pure `monitor_pass`, then asynchronously investigates candidate events by querying the relay, writes faults to trust ledger.
-
----
-
-## 4. CLI Architecture
-
-The CLI is a thin layer over `fern` library calls. Each command is a single `asyncio.run(do_command(...))` invocation — connect, act, display, exit. No daemon or persistent connections between commands.
-
-### 4.1 Group Identification
-
-Groups are numbered 1, 2, 3... in join order. `config.json` stores a `group_order` list. The `resolve_group(group_id, config)` function in `cli/config.py` handles numeric IDs, full 64-char hex pubkeys, and direct key lookup.
-
-### 4.2 Config
-
-```json
-{
-  "user_privkey_hex": "...",
-  "group_order": ["<pubkey1>", "<pubkey2>"],
-  "groups": {
-    "<pubkey1>": {
-      "relays": ["ws://relay.example.com"],
-      "cache_path": "~/.fern/cache/<pubkey1>.sqlite",
-      "joined": true
-    }
-  }
-}
-```
-
-`cli/config.py` provides: `load_config()`, `save_config()`, `get_cache_path()`, `resolve_group()`, `parse_group_address()`, `add_group_to_order()`, `connect_transports()` (shared async helper for connecting to relay URLs).
-
-### 4.3 Shared Transport Helper
-
-`connect_transports(urls: list[str]) -> list[WebSocketRelayClient]` is the single point for all relay connections in CLI commands. It:
-1. Creates a `WebSocketRelayClient` for each URL
-2. Calls `connect()` and `fetch_metadata()`
-3. Returns only successfully connected transports (failed ones are silently skipped)
-
-### 4.4 Command Table
-
-| Command | Signature | Implementation |
-|---|---|---|
-| `fern init` | (no args) | `cli/commands/init.py` — generates `UserIdentity`, saves to config |
-| `fern whoami` | (no args) | `cli/commands/whoami.py` — prints pubkey from config |
-| `fern group create` | `--name X [--public/--private] [--relay URL]...` | `cli/commands/group.py` — builds genesis, publishes to relays, assigns number. If no `--relay`, prompts interactively from known relays. Caches genesis locally. |
-| `fern group join` | `<address>` | `cli/commands/group.py` — parses `fern:<pubkey>@<relays>`, fetches genesis, syncs full history, publishes `join` event |
-| `fern group list` | (no args) | `cli/commands/group.py` — prints numbered list from config |
-| `fern group info` | `<group>` | `cli/commands/group.py` — syncs from relays, derives state, prints full pubkey and invite link |
-| `fern group members` | `<group>` | `cli/commands/group.py` — syncs, prints full pubkeys with nicknames and roles/bans |
-| `fern group leave` | `<group>` | `cli/commands/group.py` — publishes `leave` event, updates config |
-| `fern group kick` | `<group> <target>` | `cli/commands/group.py` — admin: publishes `kick` event |
-| `fern group ban` | `<group> <target> [--until ts] [--reason text]` | `cli/commands/group.py` — admin: publishes `ban` event |
-| `fern group unban` | `<group> <target>` | `cli/commands/group.py` — admin: publishes `unban` event |
-| `fern group invite` | `<group> <invitee>` | `cli/commands/group.py` — admin: publishes `invite` event |
-| `fern group admin-add` | `<group> <target>` | `cli/commands/group.py` — admin: publishes `admin_add` event |
-| `fern group admin-remove` | `<group> <target>` | `cli/commands/group.py` — admin: publishes `admin_remove` event |
-| `fern group relay-update` | `<group> <url>...` | `cli/commands/group.py` — admin: publishes `relay_update` event |
-| `fern group nickname` | `<group> <name>` | `cli/commands/group.py` — publishes `chat.nickname_set` event |
-| `fern post` | `[--channel c] [--reply-to id] <group> <text>` | `cli/commands/post.py` — syncs, derives state, checks auth (joined + not banned), publishes |
-| `fern read` | `[--channel c] [-n N] [--show-rejected] <group>` | `cli/commands/read.py` — syncs, filters by auth, shows admin actions inline, shows nicknames |
-| `fern watch` | `[--channel c] [--show-rejected] <group>` | `cli/commands/watch.py` — subscribes, shows admin actions and nicknames live (Ctrl+C stops) |
-| `fern verify` | `<group>` | `cli/commands/verify.py` — requests group_statuses, runs monitor pass, prints trust ledger |
-| `fern relay start` | `--port N --store X [--log-level L] [--no-color]` | `cli/commands/relay.py` — starts a WebSocket relay server with coloured logging |
-| `fern relay info` | `<url>` | `cli/commands/relay.py` — fetches relay metadata |
-| `fern dag` | `--db <path> [--host H] [--port P]` | `cli/commands/dag.py` — launches the zero-dependency DAG web viewer for any SQLite store |
-| `fern-relay` | `--port N --store X [--log-level L] [--no-color]` | `cli/relay_main.py` — standalone relay server with coloured logging |
-
-### 4.5 Per-Group SQLite Cache
-
-Each group gets its own SQLite database at `~/.fern/cache/<group_pubkey>.sqlite`. Commands that need the latest state (`read`, `group info`, `group members`) sync from relays into this cache before operating. `post` reads heads from the cache. `read` reads messages from the cache after sync. The cache is durable across invocations.
-
-### 4.6 Console Scripts
-
-Two entry points in `pyproject.toml`:
-- `fern = "cli.main:main"` — the main CLI
-- `fern-relay = "cli.relay_main:main"` — standalone relay server
-
----
-
-## 5. Async Model
-
-Only the I/O boundary is async:
-- `WebSocketRelayClient` / `RelayServer` (connect, subscribe, publish, sync)
-- `SqliteStore` (async API over locked synchronous SQLite)
-- `GroupSession` (orchestration)
-- `FakeRelay` (in-memory, async to match the Protocol)
-
-Everything else (crypto, events, dag, state, completeness pure logic, chat handlers) is synchronous.
-
-The CLI uses `asyncio.run()` at the top of each command. Tests use `pytest-asyncio` with `asyncio_mode = "auto"`.
-
-The `WebSocketRelayClient` uses a single-reader model: a `_listen_loop` task reads all incoming messages. Push messages (`event`, `group_status`) are dispatched to callbacks via `asyncio.ensure_future`. Response messages (`event_receipt`, `not_found`, `sync_complete`, `ok`, `error`, `query_complete`, `ids`, `sync_lock_granted`, `sync_lock_denied`) go to an `asyncio.Queue` where request-response methods (`publish`, `heal`, `get`, `request_group_status`, `sync_ids`, `sync_lock`, `sync_unlock`, `submit_fraud_proof`, `sync`, `query_fraud_proofs`) consume them.
-
----
-
-## 6. Testing Strategy
-
-### 6.1 Active Tests (57 tests)
-
-| Layer | Test File | Focus |
-|---|---|---|
-| Crypto | `tests/unit/crypto/test_crypto.py` | Key generation, signing, verification, hex encoding |
-| Events | `tests/unit/events/test_events.py` | Canonical serialization, structural validation, signature verification |
-| Events | `tests/unit/events/test_serialization_property.py` | Property-based: determinism, unicode round-trip, tag sorting |
-| DAG | `tests/unit/dag/test_dag.py` | Head computation, gap detection, cycle check |
-| State | `tests/unit/state/test_state.py` | State derivation, ban/unban/kick semantics, admin add/remove, metadata, `(ts,id)` ordering |
-| Completeness | `tests/unit/completeness/test_completeness.py` | EventReceipt build/verify, group_status build/verify, `set_hash` determinism |
-| Chat | `tests/unit/chat/test_chat.py` | Message/reaction/nickname builders |
-| Integration | `tests/integration/test_fake_relay.py` | FakeRelay publish/get/sync/group_status round-trips |
-| Integration | `tests/integration/test_event_roundtrip.py` | Build-sign-verify round-trip |
-| Integration | `tests/integration/test_censorship_detection.py` | GroupStatus divergence detection, monitor pass detects missing-with-event_receipt |
-
-### 6.2 Fixtures (`conftest.py`)
-
-- `alice_keypair`, `bob_keypair`, `founder_identity`, `alice_identity`, `bob_identity` — deterministic Ed25519 keypairs (from fixed seeds)
-- `group_keypair` — deterministic group keypair
-- `sample_genesis` — a constructed genesis event for testing
-- `memory_store` — an empty `MemoryStore`
-
-### 6.3 Running Tests
+Run the maintained checks from the repository root:
 
 ```bash
-pytest                      # all 57 tests
-pytest -v                   # verbose
-pytest --cov=fern --cov-report=term-missing  # coverage
+ruff check src cli tests
+mypy src cli
+pytest -q
 ```
 
-Tests complete in ~0.1s. `hypothesis` is available for property-based tests but only used in the serialization property test currently.
+Frontend checks require a Node.js toolchain:
 
----
-
-## 7. Dependencies
-
-### Runtime
-- `cryptography >= 42.0` — Ed25519 sign/verify (Raw encoding)
-- `websockets >= 12.0` — WebSocket client and server
-- `click >= 8.1` — CLI argument parsing
-
-### Dev
-- `pytest`, `pytest-asyncio`, `pytest-cov` — testing
-- `hypothesis` — property-based testing
-- `ruff` — linting and formatting
-- `mypy` — type checking (strict mode)
-- `build` — for building wheels
-
----
-
-## 8. Build / Packaging
-
-```toml
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "fern-protocol"
-version = "0.1.0"
-requires-python = ">=3.11"
-
-[project.scripts]
-fern = "cli.main:main"
-fern-relay = "cli.relay_main:main"
-
-[tool.setuptools.packages.find]
-where = ["src", "."]
-include = ["fern*", "cli*"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-
-[tool.mypy]
-strict = true
-files = ["src", "cli"]
+```bash
+cd bracken
+npm run lint
+npm run build
 ```
 
-Install for development: `pip install -e ".[dev]"`
+Tests use `MemorySafetyJournal` for isolated consensus rules, temporary SQLite
+stores for crash and transaction behavior, short `ConsensusTiming` values for
+runtime tests, and real loopback WebSockets for boundary coverage. Safety tests
+should assert refusal behavior as well as successful commits.
 
----
+## 9. Dependencies and packaging
 
-## 9. Frontend Apps
+Python 3.11 or newer is required. Runtime dependencies are intentionally
+small:
 
-### 9.1 Bracken (Web SPA)
+- `cryptography` for Ed25519;
+- `websockets` for client, peer, and server transport;
+- `click` for both CLIs;
+- the standard library for SQLite, asyncio, JSON, hashing, and configuration.
 
-`bracken/` is a single-page web application implementing the full FERN protocol client in the browser. It has **no backend** — all FERN logic runs in the browser:
+Development dependencies include pytest/pytest-asyncio, Hypothesis, Ruff,
+Mypy, coverage, and build tooling. Mypy is configured in strict mode for
+`src` and `cli`. Setuptools discovers both `fern*` and `cli*` packages.
 
-- **Vite + React + TypeScript** — SPA framework
-- **tweetnacl-js** — Ed25519 signing and verification
-- **idb** — IndexedDB wrapper for local event/event_receipt/identity persistence
-- **No REST API** — only WebSocket connections to FERN relays and a one-time HTTPS metadata fetch
+## 10. Change checklist
 
-Features: private-key identity create/import, group join with sync, real-time message list (connected-DAG filtering, auth filtering, admin action system messages, nickname display, jdenticon avatars, collapsed consecutive messages, retryable failed sends), profile popups with admin actions, admin-only slash commands, collapsible mobile sidebar, member/relay drawers, group info, relay count badge, settings with nickname editing, private-key export, and logout. Includes a built-in interactive DAG viewer (`bracken/src/components/DagViewer.tsx`) for visualising the group's event graph.
+When changing a signed object or consensus rule:
 
-Bracken implements the connected-DAG gate in TypeScript: disconnected events remain in IndexedDB for gap healing, but do not enter normal message rendering, group-state derivation, or future parent selection.
+1. Update the concrete rule in `bft-spec.md`.
+2. Change parsing and canonical payload code together.
+3. Verify that every signature is bound to group, chain, epoch, height, round,
+   and phase where applicable.
+4. Keep `ConsensusCore` independent of networking and timers.
+5. Persist any new vote/lock safety fact before a signed message can escape.
+6. Apply equivalent canonical, verification, and state changes in Bracken.
+7. Add rejection tests for malformed, stale, conflicting, and restart cases.
+8. Run Python checks and the frontend build when its toolchain is available.
 
-### 9.2 DAG Viewer
-
-`cli/dag_viewer.py` serves an interactive DAG visualisation on `http://localhost:8760` using Python's stdlib `http.server`. Zero external dependencies — vis.js loaded from CDN in the browser. Features: interactive node graph with click-to-inspect, search/filter, legend, live updates via Server-Sent Events, works with any SQLite FERN store.
-
-`cli/commands/dag.py` wraps it as a CLI command: `fern dag --db relay.db`.
-
-### 9.3 Reusability for Other Apps
-
-The existing `GroupSession` is the high-level API that any frontend uses. A web app (FastAPI, Starlette, etc.) would:
-1. Import `fern` as a library
-2. Instantiate `GroupSession` per user session
-3. Expose HTTP/WS endpoints that translate to `GroupSession` calls
-4. Forward live events via `session.on_event` callbacks to the frontend
-
-A desktop app (PySide6, Textual, etc.) would do the same, running `GroupSession` in an asyncio event loop and binding UI updates to callbacks.
-
-The library assumes no particular UI runtime — no `print()`, no `@app.route`, no global event loop.
-
----
-
-## 10. Design Decisions (Quick Reference)
-
-| Decision | Rationale |
-|---|---|
-| Lowercase hex everywhere | Case-mismatch in hashing breaks the protocol |
-| Canonical serialization as load-bearing primitive | `id`, `sig`, event_receipt signing, group_status signing all depend on it |
-| Frozen dataclasses | Prevent aliasing bugs, enable dict/set membership |
-| Async at edge, sync in core | ~80% of code testable without event loop |
-| Single-reader model for WebSocket client | Avoids race between request/response and pushed messages |
-| Locked short-lived SQLite connections | Avoids cross-thread SQLite connection failures during concurrent heal |
-| Author-local event_receipts, shared on-demand | Zero ongoing traffic; only published as fraud proof evidence |
-| Fraud proofs not in DAG | Audit evidence, not group history |
-| DAG for completeness propagation, not replies | Separate concerns; replies are `content.reply_to` |
-| `connect_transports` shared helper | Single point for relay connection logic across CLI commands |
-| Per-group SQLite cache | Fast reads after initial sync; durable across CLI invocations |
-| Numbered groups (1, 2, 3...) | Simple UX; also accepts full pubkey |
+When changing only operational policy, keep it out of canonical application
+state unless every validator and client must agree on it. Local trust labels,
+resource admission, timeouts, and rate limits are examples of local policy;
+validator membership, authorization, sequence numbers, and roots are consensus
+state.

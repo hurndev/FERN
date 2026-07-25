@@ -1,18 +1,23 @@
-# FERN Deployment
+# FERN-BFT Deployment
 
-Docker-based deployment for the FERN relay and Bracken web client. Each
-component is a self-contained Docker Compose project — run just the relay, just
-Bracken, or both.
+This directory contains Docker Compose projects for a FERN-BFT validator and
+the Bracken web client. They can be deployed independently. A production group
+normally uses `3f+1` validators on independently administered hosts; this stack
+runs one validator identity per `deploy/validator` deployment. One to three
+validators are accepted only as unanimous `f=0` development/test groups; all
+clients warn because every validator is required for progress.
 
-```
+The service is an active consensus validator with full history.
+
+```text
 deploy/
-├── .env.example          # shared env template
-├── relay/                # relay-only stack
+├── .env.example          shared build and volume settings
+├── validator/
 │   ├── Dockerfile
 │   ├── compose.yml
-│   ├── trust-config.example.json
-│   └── data/             # bind mount: config.json + relay.db + relay.key
-└── bracken/              # bracken-only stack
+│   ├── config.example.json
+│   └── data/             validator config, key, and SQLite history
+└── bracken/
     ├── Dockerfile
     ├── compose.yml
     └── nginx-bracken.conf
@@ -20,96 +25,154 @@ deploy/
 
 ## Prerequisites
 
-- Docker 20+ with Compose V2
-- A TLS-terminating reverse proxy that can reach the compose networks
-  (Nginx Proxy Manager, Caddy, nginx, Traefik, etc.)
-- Two hostnames pointing at this box (e.g. `relay.example.com` for the relay,
-  `chat.example.com` for Bracken). One is enough if you only deploy one
-  component.
+- Docker 20 or newer with Compose V2;
+- a host directory writable by UID/GID `1000:1000` for validator data;
+- a TLS-terminating reverse proxy that supports WebSocket upgrades;
+- one public hostname per validator and, optionally, another for Bracken.
 
-## First-time setup
+Use `wss://` validator URLs outside a trusted local network. Consensus objects
+are individually signed, but the current peer transport is not mutually
+authenticated.
+
+## Configure the Compose projects
+
+From the repository root:
 
 ```bash
-# 1. Clone the repo to a stable location
-git clone <repo-url> /opt/fern          # or wherever you keep it
-cd /opt/fern
-
-# 2. Create the shared env file
 cp deploy/.env.example deploy/.env
 $EDITOR deploy/.env
-#   Set VITE_RELAY_URL to the public wss:// URL of the relay
-#   (e.g. wss://relay.example.com)
-#   FERN_DATA_DIR can stay at the default unless you want to move it.
 
-# 3. Symlink the env file into each compose project directory.
-#    Docker Compose looks for `.env` in the same directory as the compose
-#    file when resolving ${VAR} in build args and volumes. The `env_file:
-#    ../.env` directive only affects runtime service env, not parse-time
-#    substitution. Symlinks keep a single source of truth.
-ln -sf ../.env deploy/relay/.env
+ln -sf ../.env deploy/validator/.env
 ln -sf ../.env deploy/bracken/.env
-
-# 4a. Start just the relay
-cd deploy/relay && docker compose up -d --build && cd ../..
-
-# 4b. Start just Bracken
-cd deploy/bracken && docker compose up -d --build && cd ../..
 ```
 
-The first start of the relay auto-generates a keypair and config at
-`deploy/relay/data/config.json` and `deploy/relay/data/relay.key`.
-**Back up `relay.key`** — losing it means a new pubkey on the next restart,
-which invalidates client trust pins and stored event_receipts (see spec §10.6).
+Set `VITE_VALIDATOR_URL` to one or more public validator endpoints separated by
+commas or spaces. Bracken uses them as create-group defaults and discovery
+hints. A Byzantine-tolerant `f=1` group needs exactly four independently keyed
+validators. One to three endpoints create a unanimous development/test group
+with `f=0`; Bracken displays a warning and requires every validator for each
+commit.
+
+`FERN_DATA_DIR` is the host path bind-mounted at `/data` in the validator
+container. The default is `deploy/validator/data` when Compose is run from that
+directory.
+
+For an existing checkout that already has `deploy/relay/data`, do not
+reinitialize it. Set `FERN_DATA_DIR=../relay/data` while migrating, or move the
+directory only after stopping the old container and taking a backup. Existing
+configs that name `/data/relay.key` remain valid; the validator deliberately
+reuses that key instead of generating a new identity.
+
+## Initialize a validator
+
+Build the image and initialize the persistent key and paths before the first
+start:
+
+```bash
+cd deploy/validator
+docker compose build
+docker compose run --rm validator \
+  --config /data/config.json init \
+  --name "My FERN Validator" \
+  --store /data/validator.db \
+  --closed
+docker compose up -d
+cd ../..
+```
+
+`--closed` disables automatic hosting of arbitrary genesis events. It is the
+recommended setting on a public endpoint. Omit it only for a development
+validator that should accept new groups directly from clients.
+
+Initialization creates:
+
+- `/data/config.json`, the validator and admission configuration;
+- `/data/validator.key`, the validator's Ed25519 private key;
+- `/data/validator.db`, created on first run for histories and safety state.
+
+Back up `validator.key` immediately and never replace it for an active validator.
+The public key is committed into every group's validator set. Losing it can
+remove that validator's vote and freeze any group that can no longer reach its
+derived quorum (all validators for a small set, or `2f+1` in standard mode).
+Copy the SQLite database consistently as well;
+it contains the durable vote and lock journal that prevents double signing
+after restart.
+
+The container command defaults to:
+
+```text
+fern-validator --config /data/config.json
+```
+
+With no subcommand, `fern-validator` runs the validator.
+
+## Start Bracken
+
+After setting `VITE_VALIDATOR_URL`:
+
+```bash
+cd deploy/bracken
+docker compose up -d --build
+cd ../..
+```
+
+The validator hints are compiled into the browser bundle, so changing them
+requires a Bracken rebuild. Finalized validator URLs come from each group's
+verified on-chain state; the build-time values are only starting points.
+
+Bracken stores identities, verified commits, pending events, and ingress
+receipts in each user's browser IndexedDB. The nginx container has no client
+state to back up.
 
 ## Reverse proxy integration
 
-Neither compose file publishes host ports by default. Pick one of the
-following integration patterns:
+Neither Compose project publishes a host port by default. Choose one of these
+patterns.
 
-### Option A: Attach the proxy container to the compose networks (recommended)
+### Attach the proxy container to the Compose networks
 
-The compose files create dedicated networks `fern-relay` and `fern-bracken`.
-Attach your reverse-proxy container to whichever it needs to reach:
+The projects create `fern-validator` and `fern-bracken` Docker networks:
 
 ```bash
-# Example: Nginx Proxy Manager
-docker network connect fern-relay   nginxproxymanager
+docker network connect fern-validator nginxproxymanager
 docker network connect fern-bracken nginxproxymanager
 ```
 
-Then in the proxy UI:
-- `relay.example.com` → forward to `fern-relay:8765`
-  (WebSockets on, no caching, no static asset serving)
-- `chat.example.com`  → forward to `fern-bracken:80`
-  (WebSockets on, cache static assets on)
+Configure the proxy targets as:
 
-### Option B: Publish host ports and proxy to localhost
+- `validator.example.com` -> `fern-validator:8765`, with WebSockets enabled and no
+  response caching;
+- `chat.example.com` -> `fern-bracken:80`, with ordinary static-asset caching.
 
-If your reverse proxy runs on the host (not in a container), edit each
-`compose.yml` and uncomment/add:
+The public validator URL committed into a group must be the externally
+reachable `wss://validator.example.com`, not the container hostname.
+
+### Publish loopback ports
+
+If the reverse proxy runs directly on the host, add loopback-only port mappings
+to the relevant Compose services:
 
 ```yaml
-# relay/compose.yml
+# deploy/validator/compose.yml
 services:
-  relay:
+  validator:
     ports:
       - "127.0.0.1:8765:8765"
 
-# bracken/compose.yml
+# deploy/bracken/compose.yml
 services:
   bracken:
     ports:
       - "127.0.0.1:8080:80"
 ```
 
-The `127.0.0.1` binding means only the host can reach the port — not exposed
-to the LAN. Then in the proxy UI, forward to `127.0.0.1:8765` and
-`127.0.0.1:8080` respectively.
+Proxy to `127.0.0.1:8765` and `127.0.0.1:8080`. Do not expose an unencrypted
+`ws://` validator port directly to the public Internet.
 
-### Option C: Put the compose networks on an existing shared network
+### Reuse an existing Docker network
 
-If you already have a Docker network your reverse proxy is on (e.g.
-`npm_network`), edit the `networks:` block in each `compose.yml`:
+Replace the `networks` section in each Compose file if the proxy already uses a
+shared external network:
 
 ```yaml
 networks:
@@ -118,79 +181,157 @@ networks:
     external: true
 ```
 
-This drops the compose-managed `fern-relay` / `fern-bracken` networks and
-puts both services on `npm_network` directly. The proxy reaches them by
-container name (`fern-relay:8765`, `fern-bracken:80`).
+The proxy can then reach the services by their container names.
 
-## Trusted-heal configuration
+## Multi-validator groups
 
-The relay supports **trusted-witness fast heal**, where missing events are
-fetched from peer relays that countersign attestations, rather than relying
-solely on rate-limited slow heal from clients.
-
-To enable it:
-
-1. After first start, edit `deploy/relay/data/config.json`.
-2. Add witness relays to the `trusted_witness_relays` array (see
-   `trust-config.example.json` for the full format).
-3. Restart the relay: `cd deploy/relay && docker compose up -d`.
-
-Alternatively, use the CLI inside the container:
+Repeat the validator deployment on each independent host. Each process must
+have its own `validator.key`, public `wss://` URL, and durable database. Confirm the
+metadata endpoint through the CLI before creating a group:
 
 ```bash
-docker exec fern-relay config add-witness wss://peer-relay.example.com/ <pubkey>
+fern validator info wss://validator-a.example.com
 ```
 
-Without any trusted witnesses the relay works normally — only slow heal
-(client-driven re-request with rate limits) is available.
+For production, create the group with exactly `3f+1` endpoints. For `f=1`:
 
-All relay settings (port, host, name, store path, thresholds, rate limits,
-quotas) live in the single `config.json` file. Edit it directly or use
-`fern-relay config` commands.
+```bash
+fern group create --name "My Group" --faults 1 \
+  --validator wss://validator-a.example.com \
+  --validator wss://validator-b.example.com \
+  --validator wss://validator-c.example.com \
+  --validator wss://validator-d.example.com
+```
 
-## Backup
+Every validator must be able to make outbound WebSocket connections to the
+other committed endpoints. Firewalls and proxies must allow long-lived inbound
+client/peer connections and outbound peer traffic.
 
-The relay persists three files in `deploy/relay/data/` (or whatever
-`FERN_DATA_DIR` points to):
+## History admission and adding a validator
 
-- `config.json` — relay configuration (edit once, back up)
-- `relay.db` — SQLite event store (grows over time, back up periodically)
-- `relay.key` — relay identity (64-char hex, back up *once* and keep safe)
+Trusted-host configuration no longer authorizes DAG healing. It is local
+resource policy for deciding which active validators may attest a fixed full-
+history checkpoint before this process starts hosting a new group.
 
-Bracken is stateless: all client state lives in the user's browser
-(IndexedDB). Nothing to back up on the server.
+Add trusted history sources with independent operator labels:
 
-## Updating
+```bash
+docker exec fern-validator fern-validator --config /data/config.json \
+  config add-witness wss://validator-a.example.com <validator-a-pubkey> \
+  --operator operator-a
+docker exec fern-validator fern-validator --config /data/config.json \
+  config add-witness wss://validator-b.example.com <validator-b-pubkey> \
+  --operator operator-b
+```
+
+The `witness` spelling is retained for CLI compatibility; these entries are
+trusted active validators used only for local admission. The full JSON shape is
+shown in `validator/config.example.json`.
+
+To stage a group on the prospective validator, run:
+
+```bash
+docker exec fern-validator fern-validator --config /data/config.json prepare \
+  'fern:<group-key>@wss://validator-a.example.com,wss://validator-b.example.com' \
+  --output /data/sync-ready.json
+```
+
+Preparation verifies genesis and every commit through one signed manifest,
+persists the history, and emits `SyncReady` for that exact checkpoint. Copy the
+file to an existing group administrator and submit a complete replacement set:
+
+```bash
+fern group validator-update <group-key> \
+  wss://validator-a.example.com \
+  wss://validator-b.example.com \
+  wss://validator-c.example.com \
+  wss://new-validator.example.com \
+  --faults 1 --readiness sync-ready.json
+```
+
+If the group advances after preparation, generate readiness again. The
+transition is invalid unless readiness covers exactly every newly added
+validator and the block immediately before the transition.
+
+## Configuration
+
+Display the effective validator configuration with:
+
+```bash
+docker exec fern-validator fern-validator --config /data/config.json config show
+```
+
+The main sections are:
+
+- `consensus`: block interval and phase/round timeout policy;
+- `ingress`: event-submission rate limit;
+- `history_admission`: trusted sources, minimum distinct operator labels, and
+  maximum logical history size;
+- `maximum_message_bytes`: WebSocket message limit;
+- `allow_genesis`: open development bootstrap or closed operator admission.
+
+Timeout and rate-limit changes are local policy. Validator membership,
+quorums, event validity, and checkpoint roots come from verified group history
+and cannot be overridden in this file.
+
+## Backup and restore
+
+Back up all three files in the mounted data directory:
+
+- `config.json`;
+- `validator.key`;
+- `validator.db`, including all SQLite WAL data.
+
+Stop the container or use a SQLite-aware snapshot/backup procedure before
+copying the database. Restore the key, config, and database together before
+starting the validator. Restoring an old database while retaining a newer copy
+elsewhere risks operating from stale consensus safety state; never run two
+instances with the same validator key.
+
+## Updating and logs
 
 ```bash
 git pull
-cd deploy/relay   && docker compose pull && docker compose up -d --build && cd ../..
-cd deploy/bracken && docker compose pull && docker compose up -d --build && cd ../..
+cd deploy/validator && docker compose up -d --build && cd ../..
+cd deploy/bracken && docker compose up -d --build && cd ../..
 ```
 
-(Run only the commands for components you've deployed.)
-
-To change the relay URL Bracken connects to, edit `VITE_RELAY_URL` in
-`deploy/.env` and rebuild Bracken (build arg is baked in at image build
-time, not runtime).
-
-## Logs
+Run only the command for deployed components. Follow logs with:
 
 ```bash
-cd deploy/relay   && docker compose logs -f
+cd deploy/validator && docker compose logs -f
 cd deploy/bracken && docker compose logs -f
 ```
 
-## Cleanup
+The validator logs startup, hosted groups, genesis, finalized blocks, and epoch
+changes at the default level. To include accepted events and consensus stages,
+temporarily add this override to the `validator` service and recreate it:
 
-```bash
-cd deploy/relay   && docker compose down
-cd deploy/bracken && docker compose down
-
-# Nuclear: also delete images, build cache, and (for the relay) the data dir
-docker image prune -f
-rm -rf deploy/relay/data    # ⚠️ destroys relay identity + all stored events
+```yaml
+services:
+  validator:
+    command: ["--config", "/data/config.json", "--verbose"]
 ```
 
-The repo's `./fern-wipe.sh` is for the Python CLI/relay workflow, not the
-Docker setup.
+Verbose output records round/proposer selection, candidate and proposal
+construction, local prevote/precommit decisions, quorum transitions, catch-up,
+and round advancement. It deliberately does not print every peer vote or full
+event content.
+
+After an update, `fern verify <group>` can independently re-check a client
+cache from genesis. Monitor validator logs and signed statuses for stalled
+heights or contradictory checkpoints.
+
+## Cleanup
+
+Stopping services preserves data:
+
+```bash
+cd deploy/validator && docker compose down
+cd deploy/bracken && docker compose down
+```
+
+Deleting `FERN_DATA_DIR` destroys the validator key, full history, and safety
+journal. Do not remove it for a validator that is still committed in a group.
+The repository's `fern-wipe.sh` is for local CLI/validator data and is not a
+Docker cleanup command.

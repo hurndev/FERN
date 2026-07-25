@@ -27,6 +27,7 @@ export function Composer({
 }: Props) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  const [commandError, setCommandError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const isSlash = text.startsWith('/')
@@ -44,6 +45,11 @@ export function Composer({
     ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`
   }, [text])
 
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setText(e.target.value)
+    if (commandError) setCommandError(null)
+  }
+
   const handleSend = async () => {
     const trimmed = text.trim()
     if (!trimmed || !canPost || sending) return
@@ -55,9 +61,12 @@ export function Composer({
       const cmdDef = commands.find((c) => c.cmd === cmd)
       if (cmdDef) {
         setSending(true)
-        setText('')
+        setCommandError(null)
         try {
           await onCommand(cmd, args)
+          setText('')
+        } catch (err) {
+          setCommandError(String(err))
         } finally {
           setSending(false)
         }
@@ -66,9 +75,12 @@ export function Composer({
     }
 
     setSending(true)
-    setText('')
+    setCommandError(null)
     try {
       await onSend(trimmed, channelId)
+      setText('')
+    } catch (err) {
+      setCommandError(String(err))
     } finally {
       setSending(false)
     }
@@ -115,7 +127,7 @@ export function Composer({
           ref={textareaRef}
           className={styles.composerTextarea}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={handleChange}
           onKeyDown={handleKeyDown}
           placeholder={`Message #${channelName}`}
           rows={1}
@@ -129,6 +141,9 @@ export function Composer({
           ↑
         </button>
       </div>
+      {commandError && (
+        <div className={styles.composerError}>{commandError}</div>
+      )}
     </div>
   )
 }

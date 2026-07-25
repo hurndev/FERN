@@ -1,6 +1,9 @@
+import type { ValidatorSet } from './bft'
+import { GOVERNANCE_TYPES, validateValidatorSet } from './bft'
 import type { FernEvent } from './events'
-import { log } from './logger'
-import { validateEventSemantics } from './semantic'
+import { canonicalJson } from './events'
+import { sha256Hex } from './utils'
+import { isValidEventId, isValidPubkey } from './utils'
 
 export interface BanEntry {
   until: number | null
@@ -15,229 +18,313 @@ export interface Channel {
 }
 
 export interface GroupState {
+  group: string
+  chainId: string
+  validatorSet: ValidatorSet
   members: Set<string>
   joined: Set<string>
   banned: Map<string, BanEntry>
   admins: Set<string>
-  relays: string[]
+  sequences: Map<string, number>
   metadata: { name: string; description: string }
   public: boolean
   app: string
   channels: Map<string, Channel>
-  chatSettings: { default_channel: string; system_channel: string }
+  chatSettings: { default_channel?: string; system_channel?: string }
 }
 
-const PROTOCOL_TYPES = new Set([
-  'genesis', 'join', 'leave', 'invite', 'kick', 'ban', 'unban',
-  'admin_add', 'admin_remove', 'relay_update', 'metadata_update',
-])
+const encoder = new TextEncoder()
 
-function channelFromConfig(raw: unknown, position: number): Channel {
-  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
-    const record = raw as Record<string, unknown>
-    const id = String(record['id'] ?? '').trim()
-    const name = String(record['name'] ?? '').trim()
-    const rawPosition = record['position']
-    return {
-      id,
-      name: name || id,
-      description: String(record['description'] ?? ''),
-      position: typeof rawPosition === 'number' ? rawPosition : position,
+function record(value: unknown, field: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    throw new Error(`${field} must be an object`)
+  return value as Record<string, unknown>
+}
+
+function boundedString(value: unknown, field: string, maximum: number, minimum = 0): string {
+  if (typeof value !== 'string') throw new Error(`${field} must be a string`)
+  const length = encoder.encode(value).length
+  if (length < minimum || length > maximum) throw new Error(`${field} has invalid length`)
+  return value
+}
+
+function exactKeys(value: Record<string, unknown>, allowed: string[]): void {
+  const extra = Object.keys(value).find((key) => !allowed.includes(key))
+  if (extra) throw new Error(`unexpected content field: ${extra}`)
+}
+
+function pubkey(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !isValidPubkey(value)) throw new Error(`${field} is not a public key`)
+  return value
+}
+
+function eventId(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !isValidEventId(value)) throw new Error(`${field} is not an event ID`)
+  return value
+}
+
+function integer(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value)) throw new Error(`${field} must be a safe integer`)
+  return value as number
+}
+
+function validateGenesis(genesis: FernEvent): void {
+  const content = genesis.content
+  const required = ['chain_id', 'name', 'description', 'public', 'founder', 'admins', 'validators', 'fault_tolerance', 'app']
+  for (const key of required) if (!(key in content)) throw new Error(`missing genesis field: ${key}`)
+  for (const key of Object.keys(content)) {
+    if (!key.includes('.') && !required.includes(key)) throw new Error(`unexpected genesis field: ${key}`)
+  }
+  eventId(content['chain_id'], 'chain_id')
+  boundedString(content['name'], 'name', 100, 1)
+  boundedString(content['description'], 'description', 2000)
+  if (typeof content['public'] !== 'boolean') throw new Error('public must be boolean')
+  if (pubkey(content['founder'], 'founder') !== genesis.author) throw new Error('founder must equal author')
+  if (!Array.isArray(content['admins']) || content['admins'].length < 1 || content['admins'].length > 256)
+    throw new Error('invalid genesis admins')
+  const admins = content['admins'].map((value) => pubkey(value, 'admin'))
+  if (!admins.includes(genesis.author)) throw new Error('founder must be an admin')
+  boundedString(content['app'], 'app', 64, 1)
+  if (!Array.isArray(content['validators'])) throw new Error('validators must be an array')
+  validateValidatorSet({
+    epoch: 0,
+    fault_tolerance: integer(content['fault_tolerance'], 'fault_tolerance'),
+    validators: content['validators'] as ValidatorSet['validators'],
+  })
+  if (content['app'] === 'chat') {
+    if (!Array.isArray(content['chat.channels']) || content['chat.channels'].length === 0)
+      throw new Error('chat genesis needs a channel')
+    const ids = new Set<string>()
+    const names = new Set<string>()
+    for (const raw of content['chat.channels']) {
+      const channel = record(raw, 'channel')
+      exactKeys(channel, ['id', 'name', 'description', 'position'])
+      const id = eventId(channel['id'], 'channel.id')
+      if (ids.has(id)) throw new Error('duplicate channel ID')
+      ids.add(id)
+      const name = boundedString(channel['name'], 'channel.name', 80, 1)
+      if (names.has(name)) throw new Error('duplicate channel name')
+      names.add(name)
+      if ('description' in channel) boundedString(channel['description'], 'channel.description', 500)
+      if ('position' in channel) integer(channel['position'], 'channel.position')
+    }
+    for (const key of ['chat.default_channel', 'chat.system_channel']) {
+      if (key in content && !ids.has(eventId(content[key], key)))
+        throw new Error(`${key} references an unknown channel`)
     }
   }
-  throw new Error('channel config must be a dict with id and name fields')
 }
 
-function initialiseFromGenesis(genesis: FernEvent): GroupState {
-  const c = genesis.content
-  const founder = c['founder'] as string
-  const app = c['app'] as string
+function initialState(genesis: FernEvent): GroupState {
+  validateGenesis(genesis)
+  const content = genesis.content
+  const validators = content['validators'] as ValidatorSet['validators']
+  const validatorSet: ValidatorSet = {
+    epoch: 0,
+    fault_tolerance: Number(content['fault_tolerance']),
+    validators,
+  }
+  validateValidatorSet(validatorSet)
   const channels = new Map<string, Channel>()
-  if (app === 'chat') {
-    const raw = c['chat.channels'] as unknown[]
-    raw.forEach((entry, idx) => {
-      const channel = channelFromConfig(entry, idx)
-      if (channel.id) channels.set(channel.id, channel)
+  const rawChannels = content['chat.channels']
+  if (Array.isArray(rawChannels)) {
+    rawChannels.forEach((raw, index) => {
+      const value = raw as Record<string, unknown>
+      const id = String(value['id'] ?? '')
+      channels.set(id, {
+        id,
+        name: String(value['name'] ?? id),
+        description: String(value['description'] ?? ''),
+        position: typeof value['position'] === 'number' ? value['position'] : index,
+      })
     })
-    if (channels.size === 0) {
-      throw new Error('chat.channels must contain at least one channel')
-    }
   }
-  const firstChannelId = channels.size > 0 ? channels.keys().next().value! : ''
+  const first = channels.keys().next().value ?? ''
+  const founder = String(content['founder'])
   return {
+    group: genesis.group,
+    chainId: String(content['chain_id']),
+    validatorSet,
     members: new Set([founder]),
     joined: new Set([founder]),
     banned: new Map(),
-    admins: new Set(c['admins'] as string[]),
-    relays: c['relays'] as string[],
+    admins: new Set(content['admins'] as string[]),
+    sequences: new Map(),
     metadata: {
-      name: (c['name'] as string) ?? '',
-      description: (c['description'] as string) ?? '',
+      name: String(content['name'] ?? ''),
+      description: String(content['description'] ?? ''),
     },
-    public: c['public'] as boolean,
-    app,
+    public: content['public'] as boolean,
+    app: String(content['app'] ?? ''),
     channels,
-    chatSettings: {
-      default_channel: String(c['chat.default_channel'] ?? firstChannelId),
-      system_channel: String(c['chat.system_channel'] ?? firstChannelId),
-    },
+    chatSettings: channels.size > 0 ? {
+      default_channel: String(content['chat.default_channel'] ?? first),
+      system_channel: String(content['chat.system_channel'] ?? first),
+    } : {},
   }
 }
 
-function isBannedAt(state: GroupState, pubkey: string, ts: number): boolean {
+function bannedAt(state: GroupState, pubkey: string, certifiedSeconds: number): boolean {
   const entry = state.banned.get(pubkey)
-  if (!entry) return false
-  if (entry.until === null) return true
-  return entry.until > ts
+  return entry !== undefined && (entry.until === null || entry.until > certifiedSeconds)
 }
 
-function isAuthorised(state: GroupState, event: FernEvent): boolean {
-  if (event.type === 'genesis') return true
-  if (event.type === 'join' || event.type === 'leave') return true
-  const adminTypes = new Set([
-    'invite', 'kick', 'ban', 'unban', 'admin_add', 'admin_remove',
-    'relay_update', 'metadata_update',
-    'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update',
-  ])
-  if (adminTypes.has(event.type)) return state.admins.has(event.author)
-  if (event.type.startsWith('chat.')) {
-    return state.joined.has(event.author) && !isBannedAt(state, event.author, event.ts)
+function authorised(state: GroupState, event: FernEvent, certifiedSeconds: number): boolean {
+  if (event.type === 'join') {
+    return (state.public || state.members.has(event.author)) && !bannedAt(state, event.author, certifiedSeconds)
   }
-  return true
+  if (event.type === 'leave') return true
+  if (GOVERNANCE_TYPES.has(event.type)) return state.admins.has(event.author)
+  if (event.type.includes('.')) return event.type.split('.', 1)[0] === state.app &&
+    state.joined.has(event.author) && !bannedAt(state, event.author, certifiedSeconds)
+  return false
 }
 
-function applyEvent(state: GroupState, event: FernEvent): GroupState {
-  const c = event.content
-  const t = event.type
-  const members = new Set(state.members)
-  const joined = new Set(state.joined)
-  const banned = new Map(state.banned)
-  const admins = new Set(state.admins)
-  const relays = [...state.relays]
-  const metadata = { ...state.metadata }
-  const channels = new Map(state.channels)
-  const chatSettings = { ...state.chatSettings }
+function validateForState(state: GroupState, event: FernEvent): void {
+  if (event.group !== state.group) throw new Error('event belongs to another group')
+  const content = event.content
+  const type = event.type
+  if (type === 'join' || type === 'leave') exactKeys(content, [])
+  else if (type === 'invite') {
+    exactKeys(content, ['invitee', 'role'])
+    pubkey(content['invitee'], 'invitee')
+    if (content['role'] !== 'member') throw new Error('invite role must be member')
+  } else if (['kick', 'unban', 'admin_add', 'admin_remove'].includes(type)) {
+    exactKeys(content, ['target']); pubkey(content['target'], 'target')
+  } else if (type === 'ban') {
+    exactKeys(content, ['target', 'until', 'reason']); pubkey(content['target'], 'target')
+    if (content['until'] !== null && content['until'] !== undefined && integer(content['until'], 'until') <= 0)
+      throw new Error('ban expiry must be positive')
+    boundedString(content['reason'] ?? '', 'reason', 500)
+  } else if (type === 'metadata_update') {
+    exactKeys(content, ['name', 'description'])
+    if (!('name' in content) && !('description' in content)) throw new Error('empty metadata update')
+    if ('name' in content) boundedString(content['name'], 'name', 100, 1)
+    if ('description' in content) boundedString(content['description'], 'description', 2000)
+  } else if (type === 'validator_update') {
+    exactKeys(content, ['validators', 'fault_tolerance', 'readiness'])
+    if (!Array.isArray(content['validators']) || !Array.isArray(content['readiness']))
+      throw new Error('invalid validator update arrays')
+    validateValidatorSet({
+      epoch: state.validatorSet.epoch + 1,
+      fault_tolerance: integer(content['fault_tolerance'], 'fault_tolerance'),
+      validators: content['validators'] as ValidatorSet['validators'],
+    })
+  } else if (type === 'chat.message') {
+    exactKeys(content, ['text', 'channel', 'reply_to'])
+    boundedString(content['text'], 'text', 16_000, 1)
+    const channel = eventId(content['channel'], 'channel')
+    if (!state.channels.has(channel)) throw new Error('message channel does not exist')
+    if (content['reply_to'] !== null && content['reply_to'] !== undefined) eventId(content['reply_to'], 'reply_to')
+  } else if (type === 'chat.reaction') {
+    exactKeys(content, ['target', 'emoji']); eventId(content['target'], 'target')
+    boundedString(content['emoji'], 'emoji', 64, 1)
+  } else if (type === 'chat.nickname_set') {
+    exactKeys(content, ['nickname']); boundedString(content['nickname'], 'nickname', 80, 1)
+  } else if (type === 'chat.channel_create') {
+    exactKeys(content, ['id', 'name', 'description', 'position'])
+    const id = eventId(content['id'], 'id')
+    if (state.channels.has(id)) throw new Error('channel ID already exists')
+    const name = boundedString(content['name'], 'name', 80, 1)
+    if ([...state.channels.values()].some((channel) => channel.name === name))
+      throw new Error('channel name already exists')
+    if ('description' in content) boundedString(content['description'], 'description', 500)
+    if ('position' in content) integer(content['position'], 'position')
+  } else if (type === 'chat.channel_update') {
+    exactKeys(content, ['id', 'name', 'description', 'position'])
+    const id = eventId(content['id'], 'id')
+    if (!state.channels.has(id)) throw new Error('channel does not exist')
+    if (!['name', 'description', 'position'].some((key) => key in content)) throw new Error('empty channel update')
+    if ('name' in content) boundedString(content['name'], 'name', 80, 1)
+    if ('description' in content) boundedString(content['description'], 'description', 500)
+    if ('position' in content) integer(content['position'], 'position')
+  } else if (type === 'chat.channel_delete') {
+    exactKeys(content, ['id', 'name'])
+    const id = eventId(content['id'], 'id')
+    if (!state.channels.has(id) || state.chatSettings.default_channel === id)
+      throw new Error('cannot delete this channel')
+    if ('name' in content) boundedString(content['name'], 'name', 80, 1)
+  } else if (type === 'chat.settings_update') {
+    exactKeys(content, ['default_channel', 'system_channel'])
+    if (!('default_channel' in content) && !('system_channel' in content)) throw new Error('empty settings update')
+    for (const key of ['default_channel', 'system_channel']) {
+      if (key in content && !state.channels.has(eventId(content[key], key)))
+        throw new Error('chat setting references an unknown channel')
+    }
+  } else if (!type.includes('.') || type.startsWith('chat.') || type.split('.', 1)[0] !== state.app) {
+    throw new Error(`unknown event type: ${type}`)
+  }
+}
 
-  switch (t) {
-    case 'invite':
-      members.add(c['invitee'] as string)
-      break
-    case 'join':
-      if (state.public || members.has(event.author)) {
-        if (!isBannedAt(state, event.author, event.ts)) {
-          joined.add(event.author)
-        }
-      }
-      break
-    case 'leave':
-      joined.delete(event.author)
-      break
+function apply(state: GroupState, event: FernEvent): void {
+  const content = event.content
+  switch (event.type) {
+    case 'invite': state.members.add(String(content['invitee'])); break
+    case 'join': state.members.add(event.author); state.joined.add(event.author); break
+    case 'leave': state.joined.delete(event.author); break
     case 'kick':
-      joined.delete(c['target'] as string)
-      admins.delete(c['target'] as string)
+      state.joined.delete(String(content['target']))
+      state.admins.delete(String(content['target']))
       break
     case 'ban':
-      banned.set(c['target'] as string, {
-        until: (c['until'] as number | null) ?? null,
-        reason: (c['reason'] as string) ?? '',
+      state.banned.set(String(content['target']), {
+        until: content['until'] === null || content['until'] === undefined ? null : Number(content['until']),
+        reason: String(content['reason'] ?? ''),
       })
-      joined.delete(c['target'] as string)
-      admins.delete(c['target'] as string)
+      state.joined.delete(String(content['target']))
+      state.admins.delete(String(content['target']))
       break
-    case 'unban':
-      banned.delete(c['target'] as string)
-      break
-    case 'admin_add':
-      admins.add(c['target'] as string)
-      break
-    case 'admin_remove':
-      admins.delete(c['target'] as string)
-      break
-    case 'relay_update':
-      relays.splice(0, relays.length, ...(c['relays'] as string[]))
-      break
+    case 'unban': state.banned.delete(String(content['target'])); break
+    case 'admin_add': state.admins.add(String(content['target'])); break
+    case 'admin_remove': state.admins.delete(String(content['target'])); break
     case 'metadata_update':
-      if ('name' in c) metadata.name = c['name'] as string
-      if ('description' in c) metadata.description = c['description'] as string
+      if ('name' in content) state.metadata.name = String(content['name'])
+      if ('description' in content) state.metadata.description = String(content['description'])
       break
-    case 'chat.channel_create':
-      {
-        const id = c['id'] as string
-        const name = c['name'] as string
-        const duplicateName = [...channels.values()].some((channel) => channel.name === name)
-        if (id && name && !duplicateName) {
-          const position = typeof c['position'] === 'number' ? c['position'] as number : channels.size
-          channels.set(id, {
-            id,
-            name,
-            description: (c['description'] as string) ?? '',
-            position,
-          })
-        }
+    case 'validator_update': {
+      const validators = content['validators'] as ValidatorSet['validators']
+      state.validatorSet = {
+        epoch: state.validatorSet.epoch + 1,
+        fault_tolerance: Number(content['fault_tolerance']),
+        validators,
       }
+      validateValidatorSet(state.validatorSet)
       break
-    case 'chat.channel_update':
-      {
-        const id = c['id'] as string
-        const existing = channels.get(id)
-        if (existing) {
-          channels.set(id, {
-            id,
-            name: (c['name'] as string) ?? existing.name,
-            description: (c['description'] as string) ?? existing.description,
-            position: typeof c['position'] === 'number' ? c['position'] as number : existing.position,
-          })
-        }
-      }
+    }
+    case 'chat.channel_create': {
+      const id = String(content['id'])
+      state.channels.set(id, {
+        id,
+        name: String(content['name']),
+        description: String(content['description'] ?? ''),
+        position: Number(content['position'] ?? state.channels.size),
+      })
       break
-    case 'chat.channel_delete':
-      {
-        const id = c['id'] as string
-        const defaultId = chatSettings.default_channel ?? ''
-        if (id && id !== defaultId) {
-          channels.delete(id)
-          const firstRemaining = channels.size > 0 ? channels.keys().next().value! : ''
-          if (chatSettings.default_channel === id) chatSettings.default_channel = firstRemaining
-          if (chatSettings.system_channel === id) chatSettings.system_channel = firstRemaining
-        }
-      }
+    }
+    case 'chat.channel_update': {
+      const id = String(content['id'])
+      const current = state.channels.get(id)
+      if (current) state.channels.set(id, {
+        id,
+        name: String(content['name'] ?? current.name),
+        description: String(content['description'] ?? current.description),
+        position: Number(content['position'] ?? current.position),
+      })
       break
+    }
+    case 'chat.channel_delete': {
+      const id = String(content['id'])
+      state.channels.delete(id)
+      if (state.chatSettings.system_channel === id)
+        state.chatSettings.system_channel = state.channels.keys().next().value ?? ''
+      break
+    }
     case 'chat.settings_update':
-      {
-        const defaultChannel = c['default_channel'] as string | undefined
-        const systemChannel = c['system_channel'] as string | undefined
-        if (defaultChannel && channels.has(defaultChannel)) chatSettings.default_channel = defaultChannel
-        if (systemChannel && channels.has(systemChannel)) chatSettings.system_channel = systemChannel
-      }
+      if ('default_channel' in content) state.chatSettings.default_channel = String(content['default_channel'])
+      if ('system_channel' in content) state.chatSettings.system_channel = String(content['system_channel'])
       break
   }
-
-  return {
-    members, joined, banned, admins, relays, metadata, public: state.public,
-    app: state.app, channels, chatSettings,
-  }
-}
-
-function validateStateDependentSemantics(state: GroupState, event: FernEvent): void {
-  if (event.type === 'chat.message' && !state.channels.has(event.content['channel'] as string)) {
-    throw new Error('message channel does not exist')
-  }
-  if (event.type === 'chat.channel_create') {
-    const id = event.content['id'] as string
-    if (state.channels.has(id)) {
-      throw new Error('channel id already exists')
-    }
-    if ([...state.channels.values()].some((channel) => channel.name === event.content['name'])) {
-      throw new Error('channel name already exists')
-    }
-  }
-  if (event.type === 'chat.channel_delete') {
-    const id = event.content['id'] as string
-    const defaultId = state.chatSettings.default_channel ?? ''
-    if (id === defaultId) {
-      throw new Error('cannot delete the default channel')
-    }
-  }
+  state.sequences.set(event.author, event.seq)
 }
 
 export function deriveGroupState(events: FernEvent[]): {
@@ -246,97 +333,72 @@ export function deriveGroupState(events: FernEvent[]): {
   acceptedIds: Set<string>
   genesis: FernEvent | null
 } {
-  let rejected: FernEvent[] = []
-  const genesisEvents = events.filter((e) => e.type === 'genesis' && e.parents.length === 0)
-  let genesis: FernEvent | null = null
-  for (const event of genesisEvents) {
-    try {
-      validateEventSemantics(event)
-      genesis = event
-      break
-    } catch (err) {
-      log.stateEventRejected(event.type, event.id, `genesis semantic: ${err}`)
-      rejected.push(event)
-    }
-  }
-  if (!genesis) {
-    return { state: null, rejected, acceptedIds: new Set(), genesis: null }
-  }
-  let state = initialiseFromGenesis(genesis)
+  const genesis = events.find((event) => event.type === 'genesis') ?? null
+  if (!genesis) return { state: null, rejected: [], acceptedIds: new Set(), genesis: null }
+  const state = initialState(genesis)
+  const rejected: FernEvent[] = []
   const acceptedIds = new Set<string>([genesis.id])
-
-  const nonGenesis = events
-    .filter((e) => e.type !== 'genesis')
-    .sort((a, b) => {
-      if (a.ts !== b.ts) return a.ts - b.ts
-      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
-    })
-
-  const eventTs = new Map<string, number>()
-  for (const e of events) eventTs.set(e.id, e.ts)
-
-  for (const event of nonGenesis) {
-    if (!event.parents.every((parent) => acceptedIds.has(parent))) {
-      log.stateEventRejected(event.type, event.id, 'missing parent(s)')
-      rejected.push(event)
-      continue
-    }
-    const maxParentTs = Math.max(...event.parents.map((p) => eventTs.get(p) ?? 0))
-    if (event.ts < maxParentTs) {
-      log.stateEventRejected(event.type, event.id, `ts ${event.ts} < max parent ts ${maxParentTs}`)
-      rejected.push(event)
-      continue
-    }
+  const finalized = events
+    .filter((event) => event.type !== 'genesis' && event.bft?.status === 'finalized')
+    .sort((a, b) => (a.bft?.height ?? 0) - (b.bft?.height ?? 0) || (a.bft?.position ?? 0) - (b.bft?.position ?? 0))
+  for (const event of finalized) {
+    const expected = (state.sequences.get(event.author) ?? 0) + 1
+    const certifiedSeconds = Math.floor((event.bft?.certifiedTimeMs ?? 0) / 1000)
     try {
-      validateEventSemantics(event)
-      validateStateDependentSemantics(state, event)
-    } catch (err) {
-      log.stateEventRejected(event.type, event.id, `semantic: ${err}`)
+      validateForState(state, event)
+    } catch {
       rejected.push(event)
       continue
     }
-    if (!isAuthorised(state, event)) {
-      log.stateEventRejected(event.type, event.id, 'unauthorized author')
+    if (event.seq !== expected || !authorised(state, event, certifiedSeconds)) {
       rejected.push(event)
       continue
     }
-    state = applyEvent(state, event)
+    apply(state, event)
     acceptedIds.add(event.id)
   }
-
-  let changed = true
-  while (changed) {
-    changed = false
-    const stillRejected: FernEvent[] = []
-    for (const event of rejected) {
-      if (!event.parents.every((parent) => acceptedIds.has(parent))) {
-        stillRejected.push(event)
-        continue
-      }
-      const maxParentTs = Math.max(...event.parents.map((p) => eventTs.get(p) ?? 0))
-      if (event.ts < maxParentTs) {
-        stillRejected.push(event)
-        continue
-      }
-      try {
-        validateEventSemantics(event)
-        validateStateDependentSemantics(state, event)
-      } catch {
-        stillRejected.push(event)
-        continue
-      }
-      if (!isAuthorised(state, event)) {
-        stillRejected.push(event)
-        continue
-      }
-      state = applyEvent(state, event)
-      acceptedIds.add(event.id)
-      changed = true
+  const pendingSequences = new Map(state.sequences)
+  const pending = events
+    .filter((event) => event.bft?.status === 'pending')
+    .sort((left, right) => left.author.localeCompare(right.author) || left.seq - right.seq)
+  for (const event of pending) {
+    const expected = (pendingSequences.get(event.author) ?? 0) + 1
+    try {
+      validateForState(state, event)
+      if (event.seq !== expected || !authorised(state, event, Math.floor(Date.now() / 1000))) continue
+    } catch {
+      continue
     }
-    rejected = stillRejected
+    pendingSequences.set(event.author, event.seq)
+    acceptedIds.add(event.id)
   }
-
   return { state, rejected, acceptedIds, genesis }
 }
 
-export { isBannedAt, isAuthorised, PROTOCOL_TYPES }
+export async function computeStateRoot(state: GroupState): Promise<string> {
+  const banned: Record<string, unknown> = {}
+  for (const key of [...state.banned.keys()].sort()) banned[key] = state.banned.get(key)
+  const sequences: Record<string, number> = {}
+  for (const key of [...state.sequences.keys()].sort()) sequences[key] = state.sequences.get(key)!
+  const channels: Record<string, unknown> = {}
+  for (const key of [...state.channels.keys()].sort()) channels[key] = state.channels.get(key)
+  const value = {
+    protocol: 'fern-bft-1',
+    group: state.group,
+    chain_id: state.chainId,
+    validator_set: state.validatorSet,
+    members: [...state.members].sort(),
+    joined: [...state.joined].sort(),
+    banned,
+    admins: [...state.admins].sort(),
+    sequences,
+    metadata: state.metadata,
+    public: state.public,
+    app: state.app,
+    channels,
+    chat_settings: state.chatSettings,
+  }
+  return sha256Hex(canonicalJson(['fern-bft-state', value]))
+}
+
+export { bannedAt as isBannedAt, authorised as isAuthorised }

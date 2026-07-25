@@ -1,0 +1,42 @@
+{
+  "name": "My FERN Validator",
+  "description": "A FERN-BFT validator",
+  "host": "0.0.0.0",
+  "port": 8765,
+  "store": "/data/validator.db",
+  "key_file": "/data/validator.key",
+  "allow_genesis": false,
+  "consensus": {
+    "block_interval": 20.0,
+    "observation_timeout": 3.0,
+    "observation_timeout_delta": 0.5,
+    "proposal_timeout": 3.0,
+    "proposal_timeout_delta": 0.5,
+    "prevote_timeout": 3.0,
+    "prevote_timeout_delta": 0.5,
+    "precommit_timeout": 3.0,
+    "precommit_timeout_delta": 0.5,
+    "round_backoff": 1.0
+  },
+  "ingress": {
+    "max_requests": 60,
+    "window_seconds": 60
+  },
+  "history_admission": {
+    "minimum_trusted_operators": 2,
+    "maximum_group_logical_bytes": 10737418240,
+    "trusted_hosts": [
+      {
+        "url": "wss://validator-a.example.com/",
+        "pubkey": "VALIDATOR_A_PUBLIC_KEY_HEX",
+        "operator": "operator-a"
+      },
+      {
+        "url": "wss://validator-b.example.com/",
+        "pubkey": "VALIDATOR_B_PUBLIC_KEY_HEX",
+        "operator": "operator-b"
+      }
+    ]
+  },
+  "maximum_message_bytes": 4194304
+}

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-
+from fern.bft.canonical import canonical_json
 from fern.events.event import Event
 
 
@@ -18,25 +17,20 @@ def _sort_tags(tags: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]
 
 
 def canonical_serialization(event: Event) -> bytes:
-    sorted_parents = sorted(event.parents)
     sorted_tags = _sort_tags(event.tags)
     sorted_content = sort_keys_recursive(event.content)
 
     array = [
+        event.protocol,
         event.type,
         event.group,
         event.author,
-        sorted_parents,
+        event.seq,
         sorted_content,
         event.ts,
         sorted_tags,
     ]
-    return json.dumps(
-        array,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        sort_keys=False,
-    ).encode("utf-8")
+    return canonical_json(array)
 
 
 def compute_id(event: Event) -> str:
@@ -53,10 +47,11 @@ def sign_event(event: Event, keypair: object, *, is_genesis: bool = False) -> Ev
     event_id = compute_id(event)
     sig_hex = keypair.sign_detached(canon_bytes)
     return Event(
+        protocol=event.protocol,
         type=event.type,
         group=event.group,
         author=event.author,
-        parents=event.parents,
+        seq=event.seq,
         content=event.content,
         ts=event.ts,
         tags=event.tags,

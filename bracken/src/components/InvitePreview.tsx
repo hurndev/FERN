@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { FernLogo } from './FernLogo'
 import { IdentitySetup } from './IdentitySetup'
-import { fetchGroupPreview, type GroupPreview } from '../fern/relay'
+import { fetchGroupPreview, type GroupPreview } from '../fern/validator'
 import styles from '../styles/components.module.css'
 
 export interface PendingJoin {
   pubkey: string
-  relays: string[]
+  validators: string[]
 }
 
 interface Props {
@@ -19,7 +19,7 @@ interface Props {
   onCancel: () => void
 }
 
-type LoadPhase = 'loading' | 'preview' | 'noRelays' | 'notFound'
+type LoadPhase = 'loading' | 'preview' | 'noValidators' | 'notFound'
 type JoinPhase = 'idle' | 'joining' | 'error'
 
 function truncateKey(key: string, head = 8, tail = 4): string {
@@ -39,13 +39,13 @@ export function InvitePreview({
   const [loadPhase, setLoadPhase] = useState<LoadPhase>('loading')
   const [preview, setPreview] = useState<GroupPreview | null>(null)
   const [unreachable, setUnreachable] = useState<string[]>([])
-  const [extraRelays, setExtraRelays] = useState<string[]>([])
+  const [extraValidators, setExtraValidators] = useState<string[]>([])
   const [joinPhase, setJoinPhase] = useState<JoinPhase>('idle')
   const [joinError, setJoinError] = useState<string | null>(null)
 
-  const allRelays = useMemo(
-    () => [...pendingJoin.relays, ...extraRelays].filter((v, i, a) => a.indexOf(v) === i),
-    [pendingJoin.relays, extraRelays],
+  const allValidators = useMemo(
+    () => [...pendingJoin.validators, ...extraValidators].filter((v, i, a) => a.indexOf(v) === i),
+    [pendingJoin.validators, extraValidators],
   )
 
   useEffect(() => {
@@ -53,8 +53,8 @@ export function InvitePreview({
     const loadPreview = async () => {
       await Promise.resolve()
       if (cancelled) return
-      if (allRelays.length === 0) {
-        setLoadPhase('noRelays')
+      if (allValidators.length === 0) {
+        setLoadPhase('noValidators')
         setPreview(null)
         setUnreachable([])
         return
@@ -63,7 +63,7 @@ export function InvitePreview({
       setPreview(null)
       setJoinError(null)
       setJoinPhase('idle')
-      const result = await fetchGroupPreview(pendingJoin.pubkey, allRelays)
+      const result = await fetchGroupPreview(pendingJoin.pubkey, allValidators)
       if (cancelled) return
       if ('error' in result) {
         setLoadPhase('notFound')
@@ -77,12 +77,12 @@ export function InvitePreview({
     return () => {
       cancelled = true
     }
-  }, [pendingJoin.pubkey, allRelays])
+  }, [pendingJoin.pubkey, allValidators])
 
   const handleJoin = async () => {
     setJoinPhase('joining')
     setJoinError(null)
-    const address = `fern:${pendingJoin.pubkey}@${allRelays.join(',')}`
+    const address = `fern:${pendingJoin.pubkey}@${allValidators.join(',')}`
     try {
       await onJoin(address)
       onCancel()
@@ -126,25 +126,25 @@ export function InvitePreview({
           </div>
         )}
 
-        {loadPhase === 'noRelays' && (
+        {loadPhase === 'noValidators' && (
           <div className={styles.inviteError}>
-            <p>This invite link has no relay hints.</p>
+            <p>This invite link has no validator endpoints.</p>
             <p className={styles.inviteErrorHint}>
-              Add at least one relay URL below. The relay must host the group.
+              Add at least one current validator URL below. It must host the complete group history.
             </p>
           </div>
         )}
 
         {loadPhase === 'notFound' && (
           <div className={styles.inviteError}>
-            <p>Could not load group info from any provided relay.</p>
+            <p>Could not load group info from any provided validator.</p>
             {unreachable.length > 0 && (
               <p className={styles.inviteErrorHint}>
                 Tried: {unreachable.join(', ')}
               </p>
             )}
             <p className={styles.inviteErrorHint}>
-              Add a different relay URL below and we'll try again.
+              Add a different validator URL below and we'll try again.
             </p>
           </div>
         )}
@@ -205,12 +205,12 @@ export function InvitePreview({
           </div>
         )}
 
-        {(loadPhase === 'noRelays' || loadPhase === 'notFound') && (
-          <RelayInput
-            relays={allRelays}
-            onAdd={(url) => setExtraRelays((r) => [...r, url])}
+        {(loadPhase === 'noValidators' || loadPhase === 'notFound') && (
+          <ValidatorInput
+            validators={allValidators}
+            onAdd={(url) => setExtraValidators((current) => [...current, url])}
             onRemove={(url) =>
-              setExtraRelays((r) => r.filter((x) => x !== url))
+              setExtraValidators((current) => current.filter((value) => value !== url))
             }
           />
         )}
@@ -237,20 +237,26 @@ function GroupCard({ preview, pubkey }: { preview: GroupPreview; pubkey: string 
       )}
       <div className={styles.inviteGroupMeta}>
         <span>
-          {preview.canonicalRelays.length > 0
-            ? `${preview.canonicalRelays.length} canonical relay${preview.canonicalRelays.length === 1 ? '' : 's'}`
-            : 'No canonical relays listed'}
+          {preview.canonicalValidators.length > 0
+            ? `${preview.canonicalValidators.length} validator${preview.canonicalValidators.length === 1 ? '' : 's'}`
+            : 'No validators listed'}
         </span>
         <span className={styles.inviteGroupPubkey}>
           <span className={styles.inviteGroupMetaLabel}>group</span>
           <code className="mono">{truncateKey(pubkey, 10, 6)}</code>
         </span>
       </div>
-      {preview.canonicalRelays.length > 0 && (
-        <div className={styles.inviteRelayList}>
-          {preview.canonicalRelays.map((r) => (
-            <code key={r} className={`mono ${styles.inviteRelayItem}`}>
-              {r}
+      {preview.canonicalValidators.length > 0 && preview.canonicalValidators.length < 4 && (
+        <div className={styles.smallSetWarning} role="alert">
+          Warning: this group requires all {preview.canonicalValidators.length} validator{preview.canonicalValidators.length === 1 ? '' : 's'}
+          {' '}to participate. Any unavailable validator halts consensus.
+        </div>
+      )}
+      {preview.canonicalValidators.length > 0 && (
+        <div className={styles.inviteValidatorList}>
+          {preview.canonicalValidators.map((url) => (
+            <code key={url} className={`mono ${styles.inviteValidatorItem}`}>
+              {url}
             </code>
           ))}
         </div>
@@ -259,12 +265,12 @@ function GroupCard({ preview, pubkey }: { preview: GroupPreview; pubkey: string 
   )
 }
 
-function RelayInput({
-  relays,
+function ValidatorInput({
+  validators,
   onAdd,
   onRemove,
 }: {
-  relays: string[]
+  validators: string[]
   onAdd: (url: string) => void
   onRemove: (url: string) => void
 }) {
@@ -279,15 +285,15 @@ function RelayInput({
   }
 
   return (
-    <div className={styles.inviteRelayInput}>
-      {relays.length > 0 && (
-        <div className={styles.inviteRelayList}>
-          {relays.map((r) => (
-            <div key={r} className={styles.inviteRelayItemRow}>
-              <code className="mono">{r}</code>
+    <div className={styles.inviteValidatorInput}>
+      {validators.length > 0 && (
+        <div className={styles.inviteValidatorList}>
+          {validators.map((url) => (
+            <div key={url} className={styles.inviteValidatorItemRow}>
+              <code className="mono">{url}</code>
               <button
-                className={styles.inviteRelayRemove}
-                onClick={() => onRemove(r)}
+                className={styles.inviteValidatorRemove}
+                onClick={() => onRemove(url)}
                 title="Remove"
               >
                 ✕
@@ -296,12 +302,12 @@ function RelayInput({
           ))}
         </div>
       )}
-      <div className={styles.inviteRelayAddRow}>
+      <div className={styles.inviteValidatorAddRow}>
         <input
           className={styles.modalInput}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder="wss://relay.example.com"
+          placeholder="wss://validator.example.com"
           spellCheck={false}
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleAdd()

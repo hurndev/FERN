@@ -1,44 +1,40 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import type { FernEvent, EventInput } from '../fern/events'
-import { buildEvent, verifyEvent } from '../fern/events'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Commit, SyncReady, Validator, ValidatorSet } from '../fern/bft'
+import {
+  isSmallUnanimousValidatorSet, validateValidatorSet, validatorQuorum,
+  verifyCommitEvidence, verifyValidatorTransition,
+} from '../fern/bft'
 import type { Keypair } from '../fern/crypto'
 import { generateKeypair, keypairFromSeed } from '../fern/crypto'
-import type { GroupState } from '../fern/state'
-import { deriveGroupState } from '../fern/state'
 import {
-  getIdentity, saveIdentity, putEvent, getGroupEvents,
-  getTips, putEventReceipt, putRelayPin, setMeta, getMeta,
-  clearLocalData, getGroupEventIds,
+  advanceHead, clearLocalData, getCommits, getGroupEvents, getIdentity, getMeta,
+  putCommit, putEvent, putIngressReceipt, putPendingEvent, putValidatorPin, saveIdentity, setMeta,
 } from '../fern/db'
-import { RelayClient, parseGroupAddress } from '../fern/relay'
-import type { GroupStatus, EventReceipt } from '../fern/relay'
-import { randomHexId } from '../fern/utils'
-import { computeSetHash, verifyGroupStatus } from '../fern/completeness'
-import { log } from '../fern/logger'
-import type {
-  HealChallenge,
-  GroupHostAttestation,
-  InventoryAttestation,
-  HealBatchResult,
-} from '../fern/heal_attestations'
+import type { FernEvent } from '../fern/events'
+import { buildEvent, canonicalJson, toWireEvent, verifyEvent } from '../fern/events'
+import { log, shortId } from '../fern/logger'
+import type { IngressReceipt, ValidatorStatus } from '../fern/validator'
 import {
-  computeChallengeId,
-  verifyHealChallenge,
-  verifyGroupHostAttestation,
-  verifyInventoryAttestation,
-} from '../fern/heal_attestations'
+  ValidatorClient, parseGroupAddress, validatorReconnectDelay, verifyIngressReceipt,
+} from '../fern/validator'
+import type { GroupState } from '../fern/state'
+import { computeStateRoot, deriveGroupState } from '../fern/state'
+import { randomHexId, sha256Hex } from '../fern/utils'
 
 export interface GroupEntry {
   pubkey: string
   name: string
-  relays: string[]
+  validators: string[]
 }
 
-export interface RelayConnection {
+export interface ValidatorConnection {
   url: string
-  client?: RelayClient
+  client?: ValidatorClient
   connected: boolean
+  reconnecting: boolean
   pubkey: string
+  name?: string
+  status?: ValidatorStatus
 }
 
 export interface MessageDelivery {
@@ -48,374 +44,111 @@ export interface MessageDelivery {
   error?: string
 }
 
-async function publishToRelaysWith(
-  event: FernEvent,
-  client: RelayClient,
-): Promise<boolean> {
-  try {
-    const event_receipt: EventReceipt = await client.publish(event)
-    await putEventReceipt({
-      event_id: event_receipt.event_id,
-      group: event_receipt.group,
-      relay: event_receipt.relay,
-      ts: event_receipt.ts,
-      sig: event_receipt.sig,
-    })
-    return true
-  } catch (err) {
-    log.sessionPublishFailed(event.group, event.type, err)
-    return false
+interface LocalHead {
+  height: number
+  blockHash: string
+  historyRoot: string
+  stateRoot: string
+  chainId: string
+  logicalBytes: number
+}
+
+function positionEvents(commit: Commit): FernEvent[] {
+  const events = [
+    ...commit.block.candidate.events,
+    ...(commit.block.candidate.governance ? [commit.block.candidate.governance] : []),
+  ]
+  return events.map((event, position) => ({
+    ...event,
+    bft: {
+      status: 'finalized' as const,
+      height: commit.height,
+      position,
+      certifiedTimeMs: commit.block.certified_times_ms[position],
+    },
+  }))
+}
+
+function sameStrings(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+async function initialHead(genesis: FernEvent): Promise<LocalHead> {
+  const result = deriveGroupState([genesis])
+  if (!result.state) throw new Error('Invalid BFT genesis state')
+  return {
+    height: 0,
+    blockHash: genesis.id,
+    historyRoot: await sha256Hex(canonicalJson(['fern-bft-history', genesis.id])),
+    stateRoot: await computeStateRoot(result.state),
+    chainId: result.state.chainId,
+    logicalBytes: canonicalJson(toWireEvent(genesis)).length,
   }
 }
 
-async function publishToRelaysEphemeral(
-  event: FernEvent,
-  url: string,
-): Promise<boolean> {
-  const client = new RelayClient(url)
-  try {
-    await client.connect()
-    return await publishToRelaysWith(event, client)
-  } catch (err) {
-    log.sessionPublishFailed(event.group, event.type, `ephemeral ${url}: ${err}`)
-    return false
-  } finally {
-    await client.close()
+async function verifyNextCommit(
+  currentEvents: FernEvent[],
+  head: LocalHead,
+  commit: Commit,
+): Promise<{ events: FernEvent[]; head: LocalHead; state: GroupState }> {
+  const derived = deriveGroupState(currentEvents)
+  if (!derived.state) throw new Error('Cannot verify a commit without genesis')
+  await verifyCommitEvidence(commit, derived.state.validatorSet)
+  const block = commit.block
+  if (
+    block.height !== head.height + 1 || block.candidate.previous_block_hash !== head.blockHash ||
+    block.candidate.previous_state_root !== head.stateRoot ||
+    block.previous_history_root !== head.historyRoot || block.chain_id !== head.chainId
+  ) throw new Error('Commit does not extend the verified local checkpoint')
+  if (block.candidate.governance?.type === 'validator_update') {
+    verifyValidatorTransition(
+      block.candidate.governance,
+      derived.state.validatorSet,
+      block.group,
+      block.chain_id,
+      head.height,
+      head.blockHash,
+      head.historyRoot,
+      head.logicalBytes,
+    )
+  }
+  const ids = new Set(positionEvents(commit).map((event) => event.id))
+  const merged = [...currentEvents.filter((event) => !ids.has(event.id)), ...positionEvents(commit)]
+  const next = deriveGroupState(merged)
+  if (!next.state || next.rejected.length > 0) throw new Error('Committed application transition is invalid')
+  const stateRoot = await computeStateRoot(next.state)
+  if (stateRoot !== block.state_root) throw new Error('Committed state root mismatch')
+  return {
+    events: merged,
+    state: next.state,
+    head: {
+      height: block.height,
+      blockHash: block.id,
+      historyRoot: block.history_root,
+      stateRoot,
+      chainId: block.chain_id,
+      logicalBytes: head.logicalBytes + canonicalJson(commit).length,
+    },
   }
 }
 
-async function fallbackFullSync(
-  client: RelayClient,
-  groupPubkey: string,
-): Promise<{ fetched: number; healed: number }> {
-  log.syncFallbackFullSync(client.url)
-  const syncEvents = await client.sync(groupPubkey)
-  let fetched = 0
-  for (const event of syncEvents) {
-    try {
-      await verifyEvent(event)
-      await putEvent(event)
-      fetched += 1
-    } catch (e) {
-      log.eventVerifyFailed(event.type, event.id, String(e))
+async function connect(url: string): Promise<ValidatorClient> {
+  const client = new ValidatorClient(url)
+  await client.connect()
+  return client
+}
+
+function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const finish = () => {
+      window.clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      resolve()
     }
-  }
-  log.syncFallbackResult(client.url, fetched)
-  return { fetched, healed: 0 }
-}
-
-async function batchHeal(
-  events: FernEvent[],
-  client: RelayClient,
-  batchSize = 10,
-): Promise<number> {
-  if (events.length === 0) return 0
-  log.healBatch(client.url, events.length)
-  let healed = 0
-  for (let i = 0; i < events.length; i += batchSize) {
-    const batch = events.slice(i, i + batchSize)
-    const results = await Promise.all(batch.map(async (event) => {
-      try {
-        await client.heal(event)
-        return true
-      } catch {
-        try {
-          await client.publish(event)
-          return true
-        } catch {
-          return false
-        }
-      }
-    }))
-    healed += results.filter(Boolean).length
-  }
-  log.healBatchResult(client.url, healed, events.length)
-  return healed
-}
-
-function sortForHeal(events: FernEvent[]): FernEvent[] {
-  return [...events].sort((a, b) => {
-    if (a.type === 'genesis' && b.type !== 'genesis') return -1
-    if (a.type !== 'genesis' && b.type === 'genesis') return 1
-    return a.ts - b.ts || a.id.localeCompare(b.id)
+    const timer = window.setTimeout(finish, delayMs)
+    signal.addEventListener('abort', finish, { once: true })
   })
-}
-
-async function attemptTrustedHeal(
-  laggingClient: RelayClient,
-  groupPubkey: string,
-  events: FernEvent[],
-  relays?: Map<string, RelayClient>,
-): Promise<{ healed: number; failedIds: string[] } | null> {
-  if (events.length === 0) return { healed: 0, failedIds: [] }
-
-  const BATCH_LIMIT = 500
-  log.healTrustedStart(laggingClient.url, events.length)
-  let challenge: HealChallenge
-  try {
-    const ids = events.map((e) => e.id)
-    challenge = await laggingClient.getHealChallenge(groupPubkey, ids)
-    const now = Math.floor(Date.now() / 1000)
-    if (!(await verifyHealChallenge(challenge, undefined, now))) {
-      log.healTrustedChallengeVerifyFailed()
-      return null
-    }
-    const threshold = challenge.threshold
-    log.healTrustedChallenge(laggingClient.url, challenge.trusted_witnesses.length, `${threshold.num}/${threshold.den} min=${threshold.min}`)
-  } catch (e) {
-    log.healTrustedChallengeFailed(laggingClient.url, e)
-    return null
-  }
-
-  const hostAtts: GroupHostAttestation[] = []
-  const invAtts: { attestation: InventoryAttestation; ids: string[] }[] = []
-  const tempClients: RelayClient[] = []
-
-  try {
-    const challengeId = await computeChallengeId(challenge)
-
-    for (const witness of challenge.trusted_witnesses) {
-      let witnessClient: RelayClient | undefined
-      if (relays) {
-        for (const c of relays.values()) {
-          if (c.relayPubkey === witness.relay && c.isConnected) {
-            witnessClient = c
-            break
-          }
-        }
-      }
-
-      if (!witnessClient) {
-        try {
-          witnessClient = new RelayClient(witness.url)
-          await witnessClient.connect()
-          const meta = await witnessClient.fetchMetadata()
-          if (meta.pubkey !== witness.relay) {
-            log.healTrustedWitnessPubkeyMismatch(witness.url, witness.relay, meta.pubkey)
-            await witnessClient.close()
-            continue
-          }
-          tempClients.push(witnessClient)
-          log.healTrustedWitnessConnected(witness.url, witness.relay)
-        } catch {
-          log.healTrustedWitnessConnectFailed(witness.url)
-          if (witnessClient) await witnessClient.close()
-          continue
-        }
-      }
-
-      try {
-        const hostAtt = await witnessClient.getGroupHostAttestation(challenge)
-        const now = Math.floor(Date.now() / 1000)
-        if (!(await verifyGroupHostAttestation(hostAtt, challengeId, witness.relay, now))) {
-          log.healTrustedHostAttestationVerifyFailed(witness.relay)
-          continue
-        }
-        if (!hostAtt.hosts) {
-          log.healTrustedHostAttestation(witness.relay, false)
-          continue
-        }
-        log.healTrustedHostAttestation(witness.relay, true)
-        hostAtts.push(hostAtt)
-      } catch (e) {
-        log.healTrustedHostAttestationFailed(witness.relay, e)
-        continue
-      }
-
-      try {
-        const ids = events.map((ev) => ev.id)
-        const invResult = await witnessClient.getInventoryAttestation(challenge, ids)
-        if (invResult.inventoryMissing) {
-          log.healTrustedInventoryMissing(witness.relay)
-          continue
-        }
-        const att = invResult.attestation
-        if (!att) continue
-        const now = Math.floor(Date.now() / 1000)
-        if (!(await verifyInventoryAttestation(att, challengeId, witness.relay, now, invResult.covered))) {
-          log.healTrustedInventoryVerifyFailed(witness.relay)
-          continue
-        }
-        log.healTrustedInventoryAttestation(witness.relay, invResult.covered.length)
-        invAtts.push({ attestation: att, ids: invResult.covered })
-      } catch (e) {
-        log.healTrustedHostAttestationFailed(witness.relay, e)
-      }
-    }
-
-    if (hostAtts.length === 0 || invAtts.length === 0) {
-      log.healTrustedNoAttestations()
-      return null
-    }
-
-    let totalHealed = 0
-    const allFailedIds: string[] = []
-
-    for (let i = 0; i < events.length; i += BATCH_LIMIT) {
-      const batch = events.slice(i, i + BATCH_LIMIT)
-      const batchIds = batch.map((e) => e.id)
-
-      const relevantInvAtts = invAtts
-        .map((ia) => ({
-          attestation: ia.attestation,
-          ids: ia.ids.filter((id) => batchIds.includes(id)),
-        }))
-        .filter((ia) => ia.ids.length > 0)
-
-      if (relevantInvAtts.length === 0) {
-        allFailedIds.push(...batchIds)
-        continue
-      }
-
-      let result: HealBatchResult
-      try {
-        result = await laggingClient.healBatch(challenge, batch, hostAtts, relevantInvAtts)
-      } catch (e) {
-        log.healTrustedBatchFailed(laggingClient.url, e)
-        allFailedIds.push(...batchIds)
-        continue
-      }
-
-      totalHealed += result.stored.length
-      log.healTrustedBatchResult(laggingClient.url, result.stored.length, result.rejected.length)
-      for (const rej of result.rejected) {
-        if (rej.reason === 'insufficient_trusted_witnesses') {
-          allFailedIds.push(rej.id)
-        }
-      }
-    }
-
-    log.healTrustedComplete(laggingClient.url, totalHealed, allFailedIds.length)
-    return { healed: totalHealed, failedIds: allFailedIds }
-  } catch (e) {
-    log.healTrustedFailed(laggingClient.url, e)
-    return null
-  } finally {
-    for (const tc of tempClients) {
-      try {
-        await tc.close()
-      } catch {
-        // best effort
-      }
-    }
-  }
-}
-
-async function syncDiff(
-  client: RelayClient,
-  groupPubkey: string,
-  identityPubkey: string,
-  onLockDenied?: (expiresIn: number) => void,
-  relays?: Map<string, RelayClient>,
-): Promise<{ fetched: number; healed: number }> {
-  log.syncStart(client.url, groupPubkey)
-  let att: GroupStatus
-  try {
-    att = await client.requestGroupStatus(groupPubkey)
-  } catch (e) {
-    log.syncGroupStatusFailed(client.url, e)
-    if (String(e).toLowerCase().includes('group not hosted')) {
-      const localEvents = sortForHeal(await getGroupEvents(groupPubkey))
-      return { fetched: 0, healed: await batchHeal(localEvents, client) }
-    }
-    return fallbackFullSync(client, groupPubkey)
-  }
-
-  if (!verifyGroupStatus(att)) {
-    log.syncGroupStatusVerificationFailed(client.url)
-    return fallbackFullSync(client, groupPubkey)
-  }
-
-  const localIds = await getGroupEventIds(groupPubkey)
-  const localHash = await computeSetHash(localIds)
-  if (att.set_hash === localHash) {
-    log.syncSetHashMatch(client.url)
-    return { fetched: 0, healed: 0 }
-  }
-  log.syncSetHashMismatch(client.url, localHash, att.set_hash)
-
-  try {
-    const lock = await client.syncLock(groupPubkey, identityPubkey)
-    if (!lock.granted) {
-      log.syncLockDenied(client.url, lock.expiresIn)
-      onLockDenied?.(lock.expiresIn ?? 30)
-      return { fetched: 0, healed: 0 }
-    }
-    log.syncLockGranted(client.url, lock.ttl)
-  } catch {
-    // Older relays may not support advisory locks. Relay-side dedup keeps
-    // uncoordinated heal safe, though less efficient.
-  }
-
-  try {
-    let relayIds: Set<string>
-    try {
-      relayIds = new Set(await client.syncIds(groupPubkey))
-    } catch (e) {
-      log.syncGroupStatusFailed(client.url, e)
-      if (String(e).toLowerCase().includes('group not hosted')) {
-        const localEvents = sortForHeal(await getGroupEvents(groupPubkey))
-        return { fetched: 0, healed: await batchHeal(localEvents, client) }
-      }
-      return fallbackFullSync(client, groupPubkey)
-    }
-
-    const latestLocalIds = await getGroupEventIds(groupPubkey)
-    const missingLocally = [...relayIds].filter((id) => !latestLocalIds.has(id))
-    const missingOnRelay = [...latestLocalIds].filter((id) => !relayIds.has(id))
-
-    if (missingLocally.length > 0) log.syncMissingLocally(client.url, missingLocally.length)
-    if (missingOnRelay.length > 0) log.syncMissingOnRelay(client.url, missingOnRelay.length)
-
-    let fetched = 0
-    for (const id of missingLocally) {
-      try {
-        const event = await client.get(id)
-        if (event) {
-          await verifyEvent(event)
-          await putEvent(event)
-          fetched += 1
-        }
-      } catch (e) {
-        log.syncGetFailed(client.url, id, e)
-      }
-    }
-    if (fetched > 0) log.syncFetched(client.url, fetched)
-
-    const missingSet = new Set(missingOnRelay)
-    const localEvents = sortForHeal(
-      (await getGroupEvents(groupPubkey)).filter((event) => missingSet.has(event.id)),
-    )
-
-    let healed = 0
-    const BATCH_LIMIT = 500
-
-    const trustedHealResult = await attemptTrustedHeal(
-      client,
-      groupPubkey,
-      localEvents,
-      relays,
-    )
-    if (trustedHealResult !== null) {
-      healed += trustedHealResult.healed
-      if (trustedHealResult.failedIds.length > 0) {
-        const failedSet = new Set(trustedHealResult.failedIds)
-        const fallbackEvents = localEvents.filter((e) => failedSet.has(e.id))
-        healed += await batchHeal(fallbackEvents, client, BATCH_LIMIT)
-      }
-    } else {
-      healed += await batchHeal(localEvents, client, BATCH_LIMIT)
-    }
-
-    log.syncComplete(client.url, fetched, healed)
-    return { fetched, healed }
-  } finally {
-    try {
-      await client.syncUnlock(groupPubkey, identityPubkey)
-    } catch {
-      // Best effort; the lease expires lazily if unlock fails.
-    }
-  }
 }
 
 export function useBracken() {
@@ -424,781 +157,714 @@ export function useBracken() {
   const [activeGroup, setActiveGroup] = useState<string | null>(null)
   const [events, setEvents] = useState<FernEvent[]>([])
   const [state, setState] = useState<GroupState | null>(null)
-  const [connStates, setConnStates] = useState<RelayConnection[]>([])
+  const [connStates, setConnStates] = useState<ValidatorConnection[]>([])
   const [defaultNickname, setDefaultNicknameState] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [messageDeliveries, setMessageDeliveries] = useState<Record<string, MessageDelivery>>({})
-  const clientsRef = useRef<Map<string, RelayClient>>(new Map())
-  const reconnectRef = useRef<((url: string) => void) | null>(null)
-  const healInFlightRef = useRef<Set<string>>(new Set())
-  const healRetryGateRef = useRef<Map<string, number>>(new Map())
-  const lastLocalEventRef = useRef<Map<string, string>>(new Map())
+  const clientsRef = useRef<Map<string, ValidatorClient>>(new Map())
+  const commitQueues = useRef<Map<string, Promise<void>>>(new Map())
 
-  // Derive the full relay list from the active group's canonical relays, merged
-  // with live connection status. This ensures all canonical relays are always
-  // shown (never hidden), even before or after connection attempts.
-  const relayConns = useMemo(() => {
-    const group = groups.find((g) => g.pubkey === activeGroup)
-    const canonical = group?.relays ?? []
-    const byUrl = new Map(connStates.map((c) => [c.url, c]))
-    return canonical.map(
-      (url) => byUrl.get(url) ?? { url, connected: false, pubkey: '' },
-    )
+  const validatorConns = useMemo(() => {
+    const entry = groups.find((group) => group.pubkey === activeGroup)
+    const current = new Map(connStates.map((connection) => [connection.url, connection]))
+    return (entry?.validators ?? []).map((url) => current.get(url) ?? {
+      url, connected: false, reconnecting: true, pubkey: '',
+    })
   }, [groups, activeGroup, connStates])
 
-  // Load identity on mount
+  const refresh = useCallback(async (group: string) => {
+    const stored = await getGroupEvents(group)
+    const derived = deriveGroupState(stored)
+    setEvents(stored)
+    setState(derived.state)
+  }, [])
+
+  const applyCommit = useCallback(async (group: string, commit: Commit) => {
+    const previous = commitQueues.current.get(group) ?? Promise.resolve()
+    const next = previous.then(async () => {
+      const currentEvents = await getGroupEvents(group)
+      const genesis = currentEvents.find((event) => event.type === 'genesis')
+      if (!genesis) throw new Error('Missing genesis')
+      const storedHead = await getMeta<LocalHead>(`bft-head:${group}`) ?? await initialHead(genesis)
+      if (commit.height <= storedHead.height) return
+      log.debug('consensus', 'verifying pushed commit', {
+        group: shortId(group), height: commit.height, round: commit.round,
+        block: shortId(commit.block.id), events: positionEvents(commit).length,
+      })
+      const verified = await verifyNextCommit(currentEvents, storedHead, commit)
+      await putCommit(commit)
+      await advanceHead(group, verified.head)
+      setEvents(verified.events)
+      setState(verified.state)
+      const validatorUrls = verified.state.validatorSet.validators.map((validator) => validator.url)
+      setGroups((current) => {
+        const existing = current.find((entry) => entry.pubkey === group)
+        if (!existing || sameStrings(existing.validators, validatorUrls)) return current
+        const updated = current.map((entry) => entry.pubkey === group
+          ? { ...entry, validators: validatorUrls } : entry)
+        void setMeta('groups', updated)
+        return updated
+      })
+      setMessageDeliveries((current) => {
+        const copy = { ...current }
+        for (const event of positionEvents(commit)) delete copy[event.id]
+        return copy
+      })
+      log.info('consensus', 'block finalized', {
+        group: shortId(group), epoch: verified.state.validatorSet.epoch,
+        height: commit.height, round: commit.round, block: shortId(commit.block.id),
+        events: positionEvents(commit).length,
+      })
+    }).catch((error) => log.error('consensus', 'rejected validator commit', {
+      group: shortId(group), height: commit.height, block: shortId(commit.block.id),
+      reason: String(error),
+    }))
+    commitQueues.current.set(group, next)
+    await next
+  }, [])
+
+  const syncEntry = useCallback(async (entry: GroupEntry): Promise<void> => {
+    log.info('sync', 'group sync starting', {
+      group: shortId(entry.pubkey), validators: entry.validators.length,
+    })
+    const reachable: {
+      client: ValidatorClient
+      status: Awaited<ReturnType<ValidatorClient['status']>>
+    }[] = []
+    const probed = await Promise.allSettled(entry.validators.map(async (url) => {
+      const client = await connect(url)
+      const status = await client.status(entry.pubkey)
+      return { url, client, status }
+    }))
+    probed.forEach((result, index) => {
+      const url = entry.validators[index]
+      if (result.status === 'fulfilled') {
+        reachable.push({ client: result.value.client, status: result.value.status })
+        log.debug('sync', 'validator status verified', {
+          group: shortId(entry.pubkey), url, validator: shortId(result.value.status.validator),
+          epoch: result.value.status.epoch, height: result.value.status.height,
+          block: shortId(result.value.status.block_hash),
+        })
+      } else {
+        log.warn('sync', 'validator unavailable during sync', { url, reason: String(result.reason) })
+      }
+    })
+    if (reachable.length === 0) throw new Error('No group validator is reachable')
+    try {
+      const byHeight = new Map<number, Set<string>>()
+      for (const item of reachable) {
+        const hashes = byHeight.get(item.status.height) ?? new Set<string>()
+        hashes.add(item.status.block_hash)
+        byHeight.set(item.status.height, hashes)
+      }
+      if ([...byHeight.values()].some((hashes) => hashes.size > 1))
+        throw new Error('Validators expose conflicting finalized checkpoints')
+
+      let currentEvents = await getGroupEvents(entry.pubkey)
+      let genesis = currentEvents.find((event) => event.type === 'genesis')
+      if (!genesis) {
+        genesis = await reachable[0].client.getGenesis(entry.pubkey) ?? undefined
+        if (!genesis) throw new Error('Validator did not return genesis')
+        await verifyEvent(genesis)
+        await putEvent(genesis)
+        currentEvents = [genesis]
+        log.info('sync', 'genesis verified', {
+          group: shortId(entry.pubkey), event: shortId(genesis.id),
+        })
+      }
+      let head = await initialHead(genesis)
+      const localCommits = await getCommits(entry.pubkey)
+      const localPending = currentEvents.filter((event) => event.bft?.status === 'pending')
+      let rebuiltEvents = [genesis]
+      for (const commit of localCommits) {
+        const verified = await verifyNextCommit(rebuiltEvents, head, commit)
+        // Re-persist verified commits so an event that a late pending push
+        // downgraded back to pending is restored to finalized.
+        await putCommit(commit)
+        rebuiltEvents = verified.events
+        head = verified.head
+      }
+      log.debug('sync', 'local chain rebuilt', {
+        group: shortId(entry.pubkey), height: head.height, commits: localCommits.length,
+      })
+      currentEvents = [...rebuiltEvents, ...localPending]
+      const source = reachable.sort((a, b) => b.status.height - a.status.height)[0]
+      while (head.height < source.status.height) {
+        const commits = await source.client.getCommits(entry.pubkey, head.height + 1)
+        if (commits.length === 0) throw new Error('Validator omitted committed history')
+        log.debug('sync', 'commit page received', {
+          group: shortId(entry.pubkey), url: source.client.url,
+          fromHeight: head.height + 1, count: commits.length, target: source.status.height,
+        })
+        for (const commit of commits) {
+          if (commit.height > source.status.height) break
+          const verified = await verifyNextCommit(currentEvents, head, commit)
+          await putCommit(commit)
+          currentEvents = verified.events
+          head = verified.head
+          log.debug('sync', 'commit verified', {
+            group: shortId(entry.pubkey), height: commit.height,
+            block: shortId(commit.block.id), events: positionEvents(commit).length,
+          })
+        }
+      }
+      if (head.height === source.status.height && head.blockHash !== source.status.block_hash)
+        throw new Error('Downloaded checkpoint mismatch')
+      const verifiedHashes = new Map<number, string>([[0, genesis.id]])
+      for (const commit of await getCommits(entry.pubkey)) verifiedHashes.set(commit.height, commit.block.id)
+      for (const item of reachable) {
+        if (item.status.chain_id !== head.chainId ||
+          verifiedHashes.get(item.status.height) !== item.status.block_hash)
+          throw new Error(`Validator ${item.status.validator} exposes a conflicting finalized checkpoint`)
+      }
+      await advanceHead(entry.pubkey, head)
+      const synced = deriveGroupState(currentEvents)
+      if (synced.state) {
+        if (isSmallUnanimousValidatorSet(synced.state.validatorSet)) {
+          log.warn('consensus', 'participating in unanimous small-set mode', {
+            group: shortId(entry.pubkey),
+            validators: synced.state.validatorSet.validators.length,
+            quorum: validatorQuorum(synced.state.validatorSet),
+            faultTolerance: 0,
+          })
+        }
+        const validatorUrls = synced.state.validatorSet.validators.map((validator) => validator.url)
+        setGroups((current) => {
+          const existing = current.find((value) => value.pubkey === entry.pubkey)
+          if (!existing || sameStrings(existing.validators, validatorUrls)) return current
+          const updated = current.map((value) => value.pubkey === entry.pubkey
+            ? { ...value, name: synced.state!.metadata.name, validators: validatorUrls } : value)
+          void setMeta('groups', updated)
+          return updated
+        })
+      }
+      await refresh(entry.pubkey)
+      log.info('sync', 'group sync complete', {
+        group: shortId(entry.pubkey), height: head.height,
+        reachable: reachable.length, validators: entry.validators.length,
+      })
+    } finally {
+      await Promise.all(reachable.map(({ client }) => client.close()))
+    }
+  }, [refresh])
+
   useEffect(() => {
-    ;(async () => {
+    void (async () => {
       const stored = await getIdentity()
-      if (stored) {
-        setIdentity(keypairFromSeed(stored.seed))
-      }
-      const savedGroups = (await getMeta<GroupEntry[]>('groups')) ?? []
-      const savedDefaultNickname = (await getMeta<string>('defaultNickname')) ?? null
+      if (stored) setIdentity(keypairFromSeed(stored.seed))
+      const storedGroups = await getMeta<Array<GroupEntry & { relays?: string[] }>>('groups') ?? []
+      const savedGroups = storedGroups.map((group) => ({
+        pubkey: group.pubkey,
+        name: group.name,
+        validators: group.validators ?? group.relays ?? [],
+      }))
+      if (storedGroups.some((group) => !group.validators)) void setMeta('groups', savedGroups)
       setGroups(savedGroups)
-      setDefaultNicknameState(savedDefaultNickname)
-      if (savedGroups.length > 0) {
-        setActiveGroup(savedGroups[0].pubkey)
-      }
+      setDefaultNicknameState(await getMeta<string>('defaultNickname') ?? null)
+      setActiveGroup(savedGroups[0]?.pubkey ?? null)
       setLoading(false)
+      log.info('client', 'local client state loaded', {
+        identity: stored ? shortId(stored.pubkey) : 'none', groups: savedGroups.length,
+      })
     })()
   }, [])
 
-  // Load events when active group changes
   useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      if (!activeGroup) {
-        await Promise.resolve()
-        if (!cancelled) {
-          setEvents([])
-          setState(null)
-        }
-        return
-      }
+    if (!activeGroup) { setEvents([]); setState(null); return }
+    const entry = groups.find((group) => group.pubkey === activeGroup)
+    if (!entry) return
+    const abortController = new AbortController()
+    const { signal } = abortController
+    const clients = clientsRef.current
+    let syncPromise: Promise<void> | null = null
 
-      log.sessionSetActiveGroup(activeGroup)
-      const groupEvents = await getGroupEvents(activeGroup)
-      log.stateDeriveStart(activeGroup, groupEvents.length)
-      const { state: derived, rejected } = deriveGroupState(groupEvents)
-      if (rejected.length > 0) {
-        for (const rej of rejected) {
-          log.stateEventRejected(rej.type, rej.id, 'semantic/authorization failure')
-        }
+    const ensureSynchronized = async (): Promise<void> => {
+      if (!syncPromise) {
+        syncPromise = syncEntry(entry)
+          .finally(() => { syncPromise = null })
       }
-      log.stateDeriveComplete(activeGroup, groupEvents.length - rejected.length, rejected.length)
-      if (!cancelled) {
-        setEvents(groupEvents)
-        setState(derived)
-      }
-    })()
-    return () => {
-      cancelled = true
+      await syncPromise
     }
-  }, [activeGroup])
 
-  // Subscribe to active group relays
-  useEffect(() => {
-    if (!activeGroup || groups.length === 0) return
-    const groupPubkey = activeGroup
-    const group = groups.find((g) => g.pubkey === groupPubkey)
-    if (!group) return
-
-    const clientMap = clientsRef.current
-    const healInFlight = healInFlightRef.current
-    const healRetryGate = healRetryGateRef.current
-    let cancelled = false
-    const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>()
-    const healKey = (url: string) => `${url}|${groupPubkey}`
-
-    const upsertConn = (url: string, patch: Partial<RelayConnection>) => {
-      if (cancelled) return
-      setConnStates((prev) => {
-        const idx = prev.findIndex((c) => c.url === url)
-        if (idx === -1) {
-          return [...prev, { url, connected: false, pubkey: '', ...patch }]
-        }
-        return prev.map((c, i) => (i === idx ? { ...c, ...patch } : c))
+    const updateConnection = (
+      url: string,
+      value: Partial<ValidatorConnection>,
+    ): void => {
+      if (signal.aborted) return
+      setConnStates((current) => {
+        const previous = current.find((connection) => connection.url === url)
+        return [
+          ...current.filter((connection) => connection.url !== url),
+          {
+            url,
+            connected: false,
+            reconnecting: true,
+            pubkey: '',
+            ...previous,
+            ...value,
+          },
+        ]
       })
     }
 
-    const scheduleReconnect = (url: string, attempt = 0) => {
-      if (cancelled) return
-      const existing = reconnectTimers.get(url)
-      if (existing) clearTimeout(existing)
-      const delay = Math.min(2000 * 2 ** attempt, 30000)
-      log.relayReconnect(url, attempt, delay)
-      const timer = setTimeout(() => {
-        reconnectTimers.delete(url)
-        void setupRelay(url, attempt)
-      }, delay)
-      reconnectTimers.set(url, timer)
-    }
-
-    reconnectRef.current = (url: string) => scheduleReconnect(url, 0)
-
-    async function setupRelay(url: string, attempt = 0) {
-      if (cancelled) return
-      try {
-        const client = new RelayClient(url)
-        await client.connect()
-
+    const supervise = async (url: string): Promise<void> => {
+      let attempt = 0
+      while (!signal.aborted) {
+        updateConnection(url, { connected: false, reconnecting: true })
+        const client = new ValidatorClient(url)
         try {
-          const meta = await client.fetchMetadata()
-          if (meta.pubkey) {
-            await putRelayPin(url, meta.pubkey)
-          }
-          client.relayPubkey = meta.pubkey
-        } catch {
-          // metadata fetch failed (CORS, relay down, etc.) — continue without it
-        }
+          await client.connect()
+          const metadata = await client.fetchMetadata()
+          client.onPending(async (event, receipt) => {
+            try {
+              await verifyEvent(event)
+              const currentState = deriveGroupState(await getGroupEvents(entry.pubkey)).state
+              const currentValidator = currentState?.validatorSet.validators.find(
+                (validator) => validator.url === url,
+              )
+              if (!currentState || !currentValidator || currentValidator.pubkey !== metadata.pubkey ||
+                !verifyIngressReceipt(receipt) || receipt.event_id !== event.id ||
+                receipt.validator !== metadata.pubkey || receipt.group !== entry.pubkey ||
+                receipt.chain_id !== currentState.chainId ||
+                receipt.epoch !== currentState.validatorSet.epoch) {
+                log.warn('ingress', 'discarded invalid pending event evidence', {
+                  group: shortId(entry.pubkey), event: shortId(event.id), url,
+                })
+                return
+              }
+              await putIngressReceipt(receipt)
+              await putPendingEvent(event)
+              log.info('ingress', 'pending event verified', {
+                group: shortId(event.group), event: shortId(event.id), type: event.type,
+                author: shortId(event.author), seq: event.seq,
+                validator: shortId(receipt.validator), url,
+              })
+              if (event.group === activeGroup) await refresh(activeGroup)
+            } catch (error) {
+              log.warn('ingress', 'rejected pending event push', { url, reason: String(error) })
+            }
+          })
+          client.onCommit((commit) => {
+            log.debug('consensus', 'commit push received', {
+              group: shortId(entry.pubkey), url, height: commit.height,
+              block: shortId(commit.block.id),
+            })
+            void applyCommit(entry.pubkey, commit)
+          })
+          await client.subscribe(entry.pubkey)
+          if (signal.aborted) break
 
-        if (cancelled) {
-          await client.close()
-          return
-        }
-
-        const refreshGroup = async () => {
-          const updated = await getGroupEvents(groupPubkey)
-          setEvents(updated)
-          const { state: derived } = deriveGroupState(updated)
-          setState(derived)
-        }
-
-        const canRetryHeal = () => {
-          const retryAt = healRetryGateRef.current.get(healKey(url))
-          return retryAt === undefined || Date.now() >= retryAt
-        }
-
-        const runHeal = async () => {
-          const key = healKey(url)
-          if (healInFlightRef.current.has(key) || !canRetryHeal()) return
-          healInFlightRef.current.add(key)
-          try {
-            const result = await syncDiff(
-              client,
-              groupPubkey,
-              identity?.publicKey ?? '0'.repeat(64),
-              (expiresIn) => {
-                healRetryGateRef.current.set(key, Date.now() + expiresIn * 1000)
-              },
-              clientMap,
+          // Authorize the endpoint against the local verified validator set so a
+          // healthy validator connects immediately. Only fall back to a blocking
+          // sync when the local state cannot authorize it (a brand-new group, or
+          // an epoch transition that rebound this endpoint while we were offline).
+          const keyAuthorized = async (): Promise<boolean> => {
+            const localState = deriveGroupState(await getGroupEvents(entry.pubkey)).state
+            const expected = localState?.validatorSet.validators.find(
+              (validator) => validator.url === url,
             )
-            if (result.fetched > 0 || result.healed > 0) {
-              healRetryGateRef.current.delete(key)
-              await refreshGroup()
-            }
-          } finally {
-            healInFlightRef.current.delete(key)
+            return expected?.pubkey === metadata.pubkey
           }
-        }
-
-        client.onClose(() => {
-          clientMap.delete(url)
-          healInFlight.delete(healKey(url))
-          healRetryGate.delete(healKey(url))
-          upsertConn(url, { connected: false, client: undefined })
-          scheduleReconnect(url)
-        })
-        client.onEvent(async (event) => {
-          try {
-            await verifyEvent(event)
-            await putEvent(event)
-            log.sessionReceive(url, event.type, event.id)
-            if (event.group === groupPubkey) {
-              await refreshGroup()
-            }
-          } catch (e) {
-            log.sessionVerifyFailed(event.type, event.id, e)
-          }
-        })
-        client.onGroupStatus(async (att) => {
-          if (att.group !== groupPubkey) return
-          log.groupStatusPush(url, att.group, att.set_hash, att.count, att.tips.length)
-          if (!verifyGroupStatus(att)) {
-            log.groupStatusVerifyFailed(url)
-            return
-          }
-          const localHash = await computeSetHash(await getGroupEventIds(groupPubkey))
-          if (att.set_hash !== localHash) {
-            log.groupStatusDivergence(url, localHash, att.set_hash)
-            void runHeal()
+          if (await keyAuthorized()) {
+            // Catch up any missed history without blocking the connection.
+            void ensureSynchronized().catch((error) => log.warn('sync', 'background sync failed', {
+              group: shortId(entry.pubkey), url, reason: String(error),
+            }))
           } else {
-            log.groupStatusInSync(url)
-            healRetryGateRef.current.delete(healKey(url))
+            await ensureSynchronized()
+            if (signal.aborted) break
+            // A finalized epoch transition may deliberately rebind an endpoint
+            // to a new key; the committed validator set is the authority here.
+            if (!await keyAuthorized())
+              throw new Error('validator endpoint key does not match finalized group state')
           }
+          await putValidatorPin(url, metadata.pubkey)
+          clients.set(url, client)
+          updateConnection(url, {
+            client, connected: true, reconnecting: false, pubkey: metadata.pubkey,
+            name: metadata.name || url,
+          })
+          void client.status(entry.pubkey)
+            .then((st) => updateConnection(url, { status: st }))
+            .catch(() => { /* group not hosted on this validator yet */ })
+          log.info('transport', 'validator subscribed', {
+            group: shortId(entry.pubkey), url, validator: shortId(metadata.pubkey),
+          })
+          attempt = 0
+          await client.waitForClose()
+          if (signal.aborted) break
+          updateConnection(url, {
+            client: undefined, connected: false, reconnecting: true,
+          })
+          log.info('transport', 'validator reconnect scheduled', {
+            group: shortId(entry.pubkey), url,
+          })
+        } catch (error) {
+          if (signal.aborted) break
+          log.warn('transport', 'validator subscription failed', {
+            group: shortId(entry.pubkey), url, reason: String(error),
+          })
+          updateConnection(url, {
+            client: undefined, connected: false, reconnecting: true,
+          })
+        } finally {
+          if (clients.get(url) === client) clients.delete(url)
+          await client.close()
+        }
+        if (signal.aborted) break
+        const delayMs = validatorReconnectDelay(attempt)
+        log.debug('transport', 'waiting before validator reconnect', {
+          group: shortId(entry.pubkey), url, delayMs, attempt: attempt + 1,
         })
-        await client.subscribe(groupPubkey)
-
-        await runHeal()
-
-        clientMap.set(url, client)
-        upsertConn(url, { client, connected: true, pubkey: client.relayPubkey })
-      } catch {
-        upsertConn(url, { connected: false })
-        scheduleReconnect(url, attempt + 1)
+        attempt += 1
+        await waitForRetry(delayMs, signal)
       }
     }
 
-    for (const url of group.relays) {
-      void setupRelay(url)
-    }
+    setConnStates(entry.validators.map((url) => ({
+      url, connected: false, reconnecting: true, pubkey: '',
+    })))
+    // Render the locally verified snapshot immediately; supervisors catch up any
+    // missed history in the background once they connect.
+    void refresh(entry.pubkey)
+    for (const url of entry.validators) void supervise(url)
 
     return () => {
-      cancelled = true
-      reconnectRef.current = null
-      for (const timer of reconnectTimers.values()) {
-        clearTimeout(timer)
-      }
-      reconnectTimers.clear()
-      for (const client of clientMap.values()) {
-        client.close()
-      }
-      for (const url of group.relays) {
-        healInFlight.delete(healKey(url))
-        healRetryGate.delete(healKey(url))
-      }
-      clientMap.clear()
+      abortController.abort()
+      for (const client of clients.values()) void client.close()
+      clients.clear()
       setConnStates([])
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGroup, groups.map((g) => g.relays.join(',')).join('|')])
+  }, [activeGroup, groups, applyCommit, refresh, syncEntry])
 
-  const createIdentity = useCallback(async () => {
-    const kp = generateKeypair()
-    await saveIdentity({
-      pubkey: kp.publicKey,
-      seed: kp.seed,
-      secretKey: kp.secretKey,
-    })
-    setIdentity(kp)
+  const importIdentity = useCallback(async (seed: string) => {
+    const keypair = keypairFromSeed(seed)
+    await saveIdentity({ pubkey: keypair.publicKey, seed: keypair.seed, secretKey: keypair.secretKey })
+    setIdentity(keypair)
   }, [])
-
-  const importIdentity = useCallback(async (seedHex: string) => {
-    const kp = keypairFromSeed(seedHex)
-    await saveIdentity({
-      pubkey: kp.publicKey,
-      seed: kp.seed,
-      secretKey: kp.secretKey,
-    })
-    setIdentity(kp)
-  }, [])
-
-  const getFailedDeliveryIds = useCallback(() => {
-    return new Set(
-      Object.entries(messageDeliveries)
-        .filter(([, delivery]) => delivery.state === 'failed')
-        .map(([eventId]) => eventId),
-    )
-  }, [messageDeliveries])
-
-  const getPublishParents = useCallback(
-    async (groupPubkey: string): Promise<string[]> => {
-      const pendingId = lastLocalEventRef.current.get(groupPubkey)
-      if (pendingId) return [pendingId]
-
-      const tips = await getTips(groupPubkey, getFailedDeliveryIds())
-      if (tips.length > 0) return tips
-
-      const genesis = (await getGroupEvents(groupPubkey)).find((event) => event.type === 'genesis')
-      return genesis ? [genesis.id] : []
-    },
-    [getFailedDeliveryIds],
-  )
-
-  const publishToGroupRelays = useCallback(
-    async (event: FernEvent, relays: string[]): Promise<{ ok: number; total: number; error?: string }> => {
-      if (relays.length === 0) {
-        return { ok: 0, total: 0, error: 'No relays configured for this group.' }
-      }
-
-      const results = await Promise.all(
-        relays.map(async (url) => {
-          const existing = clientsRef.current.get(url)
-          if (existing && existing.isConnected) {
-            const ok = await publishToRelaysWith(event, existing)
-            if (!ok) {
-              clientsRef.current.delete(url)
-              reconnectRef.current?.(url)
-            }
-            return ok
-          }
-          const ok = await publishToRelaysEphemeral(event, url)
-          if (ok) {
-            reconnectRef.current?.(url)
-          }
-          return ok
-        }),
-      )
-
-      const ok = results.filter(Boolean).length
-      return {
-        ok,
-        total: relays.length,
-        error: ok === relays.length ? undefined : `${ok}/${relays.length} relays accepted the message.`,
-      }
-    },
-    [],
-  )
 
   const logout = useCallback(async () => {
-    log.sessionLogout()
-    for (const client of clientsRef.current.values()) {
-      await client.close()
-    }
-    clientsRef.current.clear()
+    for (const client of clientsRef.current.values()) await client.close()
     await clearLocalData()
-    setIdentity(null)
-    setGroups([])
-    setActiveGroup(null)
-    setEvents([])
-      setState(null)
-      setConnStates([])
-      setDefaultNicknameState(null)
-      setMessageDeliveries({})
+    setIdentity(null); setGroups([]); setActiveGroup(null); setEvents([]); setState(null)
   }, [])
 
   const setDefaultNickname = useCallback(async (name: string | null) => {
-    const normalized = name?.trim() || null
-    setDefaultNicknameState(normalized)
-    await setMeta('defaultNickname', normalized)
+    setDefaultNicknameState(name)
+    await setMeta('defaultNickname', name)
   }, [])
 
-  const removeGroupEntry = useCallback(
-    async (groupPubkey: string) => {
-      const updatedGroups = groups.filter((g) => g.pubkey !== groupPubkey)
-      setGroups(updatedGroups)
-      await setMeta('groups', updatedGroups)
-      if (activeGroup === groupPubkey) {
-        const nextActive = updatedGroups[0]?.pubkey ?? null
-        setActiveGroup(nextActive)
-        if (!nextActive) {
-          setEvents([])
-          setState(null)
-          setConnStates([])
-        }
-      }
-    },
-    [activeGroup, groups],
-  )
-
-  const leaveGroup = useCallback(
-    async (groupPubkey: string): Promise<void> => {
-      if (!identity) return
-      const group = groups.find((g) => g.pubkey === groupPubkey)
-      if (!group) return
-
-      log.sessionLeave(groupPubkey)
-
-      const groupEvents = await getGroupEvents(groupPubkey)
-      const { state: derived } = deriveGroupState(groupEvents)
-      const isMember = derived?.joined.has(identity.publicKey) ?? false
-
-      if (isMember) {
-        const parents = await getPublishParents(groupPubkey)
-        if (parents.length > 0) {
-          const input: EventInput = {
-            type: 'leave',
-            group: groupPubkey,
-            author: identity.publicKey,
-            parents,
-            content: {},
-            ts: Math.floor(Date.now() / 1000),
-            tags: [],
-          }
-          const event = await buildEvent(input, identity)
-          await putEvent(event)
-          await publishToGroupRelays(event, group.relays)
-        }
-      }
-
-      await removeGroupEntry(groupPubkey)
-    },
-    [identity, groups, getPublishParents, publishToGroupRelays, removeGroupEntry],
-  )
-
-  const joinGroup = useCallback(
-    async (address: string) => {
-      if (!identity) throw new Error('No identity')
-      const { groupPubkey, relays } = parseGroupAddress(address)
-      if (relays.length === 0) throw new Error('No relay URLs in address')
-
-      log.sessionJoin(groupPubkey, relays)
-
-      // Connect and sync
-      for (const url of relays) {
-        try {
-          const client = new RelayClient(url)
-          await client.connect()
-          await syncDiff(client, groupPubkey, identity.publicKey)
-          await client.close()
-          break
-        } catch {
-          continue
-        }
-      }
-
-      // Read genesis from local store
-      const localEvents = await getGroupEvents(groupPubkey)
-      const genesis = localEvents.find((e) => e.type === 'genesis')
-      if (!genesis) throw new Error('Could not fetch genesis')
-
-      const groupName = (genesis.content['name'] as string) ?? 'Unnamed'
-      log.sessionJoined(groupPubkey, groupName)
-      const groupEntry: GroupEntry = {
-        pubkey: groupPubkey,
-        name: groupName,
-        relays,
-      }
-      const updatedGroups = [...groups.filter((g) => g.pubkey !== groupPubkey), groupEntry]
-      setGroups(updatedGroups)
-      await setMeta('groups', updatedGroups)
-
-      // Publish join event
-      const tips = await getTips(groupPubkey)
-      const parents = tips.length > 0 ? tips : [genesis.id]
-      const joinInput: EventInput = {
-        type: 'join',
-        group: groupPubkey,
-        author: identity.publicKey,
-        parents,
-        content: {},
-        ts: Math.floor(Date.now() / 1000),
-        tags: [],
-      }
-      const joinEvent = await buildEvent(joinInput, identity)
-      await putEvent(joinEvent)
-
-      const nickname = defaultNickname?.trim()
-      let nicknameEvent: FernEvent | null = null
-      if (nickname) {
-        const nicknameInput: EventInput = {
-          type: 'chat.nickname_set',
-          group: groupPubkey,
-          author: identity.publicKey,
-          parents: [joinEvent.id],
-          content: { nickname },
-          ts: Math.floor(Date.now() / 1000),
-          tags: [],
-        }
-        nicknameEvent = await buildEvent(nicknameInput, identity)
-        await putEvent(nicknameEvent)
-      }
-
-      for (const url of relays) {
-        try {
-          const client = new RelayClient(url)
-          await client.connect()
-          await client.publish(joinEvent)
-          if (nicknameEvent) await client.publish(nicknameEvent)
-          await client.close()
-        } catch {
-          // best effort
-        }
-      }
-
-      setActiveGroup(groupPubkey)
-    },
-    [defaultNickname, identity, groups],
-  )
-
-  const sendMessage = useCallback(
-    async (text: string, channel: string): Promise<boolean> => {
-      if (!identity || !activeGroup) return false
-      const group = groups.find((g) => g.pubkey === activeGroup)
-      if (!group) return false
-
-      const parents = await getPublishParents(activeGroup)
-      if (parents.length === 0) return false
-
-      const input: EventInput = {
-        type: 'chat.message',
-        group: activeGroup,
-        author: identity.publicKey,
-        parents,
-        content: { text, channel },
-        ts: Math.floor(Date.now() / 1000),
-        tags: [],
-      }
-      const event = await buildEvent(input, identity)
-      await putEvent(event)
-      lastLocalEventRef.current.set(activeGroup, event.id)
-      log.sessionPublish(activeGroup, 'chat.message', event.id)
-      setMessageDeliveries((prev) => ({
-        ...prev,
-        [event.id]: {
-          state: 'sending',
-          ok: 0,
-          total: group.relays.length,
-        },
-      }))
-
-      const updated = await getGroupEvents(activeGroup)
-      setEvents(updated)
-      const { state: derived } = deriveGroupState(updated)
-      setState(derived)
-
-      void (async () => {
-        const result = await publishToGroupRelays(event, group.relays)
-        log.sessionPublishResult(activeGroup, event.id, result.ok, result.total)
-        lastLocalEventRef.current.delete(activeGroup)
-        setMessageDeliveries((prev) => {
-          const next = { ...prev }
-          if (result.ok >= 1) {
-            delete next[event.id]
-          } else {
-            next[event.id] = {
-              state: 'failed',
-              ok: result.ok,
-              total: result.total,
-              error: result.error,
-            }
-          }
-          return next
+  const publish = useCallback(async (event: FernEvent, entry: GroupEntry) => {
+    log.info('ingress', 'publishing event', {
+      group: shortId(event.group), event: shortId(event.id), type: event.type,
+      author: shortId(event.author), seq: event.seq, validators: entry.validators.length,
+    })
+    setMessageDeliveries((current) => ({
+      ...current, [event.id]: { state: 'sending', ok: 0, total: entry.validators.length },
+    }))
+    let ok = 0
+    let error = ''
+    const localState = deriveGroupState(await getGroupEvents(event.group)).state
+    if (!localState) throw new Error('Cannot publish without verified group state')
+    await Promise.all(entry.validators.map(async (url) => {
+      let client = clientsRef.current.get(url)
+      let ephemeral = false
+      try {
+        if (!client?.isConnected) { client = await connect(url); ephemeral = true }
+        const expected = localState.validatorSet.validators.find((validator) => validator.url === url)
+        if (!expected) throw new Error('Endpoint is not in the finalized validator set')
+        const metadata = client.validatorPubkey
+          ? { pubkey: client.validatorPubkey }
+          : await client.fetchMetadata()
+        if (metadata.pubkey !== expected.pubkey) throw new Error('Validator endpoint key mismatch')
+        const receipt = await client.publish(event)
+        if (!verifyIngressReceipt(receipt) || receipt.event_id !== event.id ||
+          receipt.validator !== expected.pubkey || receipt.group !== event.group ||
+          receipt.chain_id !== localState.chainId || receipt.epoch !== localState.validatorSet.epoch)
+          throw new Error('Invalid ingress receipt')
+        await putIngressReceipt(receipt)
+        ok += 1
+        log.debug('ingress', 'ingress receipt verified', {
+          group: shortId(event.group), event: shortId(event.id), url,
+          validator: shortId(receipt.validator), firstSeenMs: receipt.first_seen_ms,
         })
-      })()
+      } catch (caught) {
+        error ||= String(caught)
+        log.warn('ingress', 'validator rejected event', {
+          group: shortId(event.group), event: shortId(event.id), url, reason: String(caught),
+        })
+      } finally { if (ephemeral) await client?.close() }
+    }))
+    if (ok > 0) await putPendingEvent(event)
+    setMessageDeliveries((current) => ({
+      ...current,
+      [event.id]: ok > 0
+        ? { state: 'sending', ok, total: entry.validators.length }
+        : { state: 'failed', ok, total: entry.validators.length, error },
+    }))
+    await refresh(event.group)
+    log.info('ingress', 'event publication complete', {
+      group: shortId(event.group), event: shortId(event.id), receipts: ok,
+      validators: entry.validators.length, propagationConfirmed:
+        ok >= localState.validatorSet.fault_tolerance + 1,
+    })
+    return { ok, total: entry.validators.length, error: error || undefined }
+  }, [refresh])
 
-      return true
-    },
-    [identity, activeGroup, groups, getPublishParents, publishToGroupRelays],
-  )
+  const nextSequence = useCallback((author: string): number | null => {
+    if (!state) return null
+    const pending = new Set(
+      events
+        .filter((event) => event.author === author && event.bft?.status === 'pending')
+        .map((event) => event.seq),
+    )
+    let sequence = (state.sequences.get(author) ?? 0) + 1
+    while (pending.has(sequence)) sequence += 1
+    return sequence
+  }, [state, events])
 
-  const retryMessage = useCallback(
-    async (eventId: string): Promise<void> => {
-      const event = events.find((e) => e.id === eventId)
-      if (!event) return
-      const group = groups.find((g) => g.pubkey === event.group)
-      if (!group) return
+  const sendMessage = useCallback(async (text: string, channel: string): Promise<boolean> => {
+    if (!identity || !activeGroup) return false
+    const entry = groups.find((group) => group.pubkey === activeGroup)
+    const seq = nextSequence(identity.publicKey)
+    if (!entry || seq === null) return false
+    const event = await buildEvent({
+      type: 'chat.message', group: activeGroup, author: identity.publicKey, seq,
+      content: { text, channel }, ts: Math.floor(Date.now() / 1000), tags: [],
+    }, identity)
+    return (await publish(event, entry)).ok > 0
+  }, [identity, activeGroup, groups, nextSequence, publish])
 
-      log.sessionPublish(event.group, `retry:${event.type}`, event.id)
-      setMessageDeliveries((prev) => ({
-        ...prev,
-        [event.id]: {
-          state: 'sending',
-          ok: 0,
-          total: group.relays.length,
-        },
-      }))
+  const retryMessage = useCallback(async (eventId: string) => {
+    const event = events.find((value) => value.id === eventId)
+    const entry = event ? groups.find((group) => group.pubkey === event.group) : undefined
+    if (event && entry) await publish(event, entry)
+  }, [events, groups, publish])
 
-      const result = await publishToGroupRelays(event, group.relays)
-      log.sessionPublishResult(event.group, event.id, result.ok, result.total)
-      setMessageDeliveries((prev) => {
-        const next = { ...prev }
-        if (result.ok >= 1) {
-          delete next[event.id]
-        } else {
-          next[event.id] = {
-            state: 'failed',
-            ok: result.ok,
-            total: result.total,
-            error: result.error,
-          }
-        }
-        return next
+  const adminAction = useCallback(async (
+    type: string, target = '', extra: Record<string, unknown> = {},
+  ) => {
+    if (!identity || !activeGroup) return
+    if (type === 'validator_update')
+      throw new Error('Validator changes require sync-ready proofs and are currently CLI-only.')
+    const entry = groups.find((group) => group.pubkey === activeGroup)
+    const seq = nextSequence(identity.publicKey)
+    if (!entry || seq === null) return
+    const content = { ...extra }
+    if (type === 'invite') { content['invitee'] = target; content['role'] = 'member' }
+    else if (!['metadata_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'].includes(type)) content['target'] = target
+    const event = await buildEvent({
+      type, group: activeGroup, author: identity.publicKey, seq, content,
+      ts: Math.floor(Date.now() / 1000), tags: [],
+    }, identity)
+    await publish(event, entry)
+  }, [identity, activeGroup, groups, nextSequence, publish])
+
+  const createGroup = useCallback(async (
+    name: string, validatorUrls: string[], options?: { description?: string; public?: boolean },
+  ) => {
+    if (!identity) throw new Error('No identity')
+    log.info('group', 'group creation starting', { name, validators: validatorUrls.length })
+    const discovered: Validator[] = []
+    for (const url of [...new Set(validatorUrls)]) {
+      const client = await connect(url)
+      try {
+        const metadata = await client.fetchMetadata()
+        discovered.push({ pubkey: metadata.pubkey, url, operator: metadata.name || url })
+        log.debug('group', 'validator discovered', {
+          url, validator: shortId(metadata.pubkey), operator: metadata.name || url,
+        })
+      } finally { await client.close() }
+    }
+    discovered.sort((a, b) => a.pubkey.localeCompare(b.pubkey))
+    const faultTolerance = discovered.length === 1 ? 0 : Math.floor((discovered.length - 1) / 3)
+    const validatorSet: ValidatorSet = { epoch: 0, fault_tolerance: faultTolerance, validators: discovered }
+    validateValidatorSet(validatorSet)
+    const groupKeypair = generateKeypair()
+    const channel = randomHexId()
+    const genesis = await buildEvent({
+      type: 'genesis', group: groupKeypair.publicKey, author: identity.publicKey, seq: 0,
+      content: {
+        chain_id: randomHexId(), name, description: options?.description ?? '',
+        public: options?.public ?? true, founder: identity.publicKey,
+        admins: [identity.publicKey], validators: discovered,
+        fault_tolerance: faultTolerance, app: 'chat',
+        'chat.channels': [{ id: channel, name: 'general', description: '', position: 0 }],
+        'chat.default_channel': channel, 'chat.system_channel': channel,
+      },
+      ts: Math.floor(Date.now() / 1000), tags: [],
+    }, identity, groupKeypair)
+    let ok = 0
+    let error = ''
+    await Promise.all(validatorUrls.map(async (url) => {
+      const client = await connect(url)
+      try {
+        await client.bootstrap(genesis)
+        ok += 1
+        log.debug('group', 'genesis accepted by validator', {
+          group: shortId(genesis.group), url,
+        })
+      } catch (caught) {
+        error ||= String(caught)
+        log.warn('group', 'validator rejected genesis', { url, reason: String(caught) })
+      } finally { await client.close() }
+    }))
+    if (ok !== validatorUrls.length) return { ok, total: validatorUrls.length, error }
+    await putEvent(genesis)
+    await setMeta(`bft-head:${genesis.group}`, await initialHead(genesis))
+    const entry = {
+      pubkey: genesis.group,
+      name,
+      validators: discovered.map((validator) => validator.url),
+    }
+    const updated = [...groups, entry]
+    setGroups(updated); await setMeta('groups', updated); setActiveGroup(genesis.group)
+    log.info('group', 'group created', {
+      group: shortId(genesis.group), validators: discovered.length,
+      faults: faultTolerance, quorum: validatorQuorum(validatorSet),
+    })
+    if (isSmallUnanimousValidatorSet(validatorSet)) {
+      log.warn('consensus', 'created group in unanimous small-set mode', {
+        group: shortId(genesis.group), validators: discovered.length,
+        quorum: validatorQuorum(validatorSet), faultTolerance: 0,
       })
-    },
-    [events, groups, publishToGroupRelays],
-  )
+    }
+    return { ok, total: validatorUrls.length, error: error || undefined }
+  }, [identity, groups])
 
-  const adminAction = useCallback(
-    async (type: string, targetPubkey = '', extra?: Record<string, unknown>): Promise<void> => {
-      if (!identity || !activeGroup) return
-      const group = groups.find((g) => g.pubkey === activeGroup)
-      if (!group) return
+  const joinGroup = useCallback(async (address: string) => {
+    if (!identity) throw new Error('Create or import an identity first')
+    const parsed = parseGroupAddress(address)
+    if (!parsed.groupPubkey || parsed.validators.length === 0) throw new Error('Invalid group address')
+    log.info('group', 'group join starting', {
+      group: shortId(parsed.groupPubkey), validators: parsed.validators.length,
+    })
+    const provisional: GroupEntry = {
+      pubkey: parsed.groupPubkey,
+      name: 'Loading…',
+      validators: parsed.validators,
+    }
+    await syncEntry(provisional)
+    const stored = await getGroupEvents(parsed.groupPubkey)
+    const derived = deriveGroupState(stored)
+    if (!derived.state) throw new Error('Invalid group genesis')
+    const entry: GroupEntry = {
+      pubkey: parsed.groupPubkey,
+      name: derived.state.metadata.name,
+      validators: derived.state.validatorSet.validators.map((validator) => validator.url),
+    }
+    const seq = (derived.state.sequences.get(identity.publicKey) ?? 0) + 1
+    const event = await buildEvent({
+      type: 'join', group: entry.pubkey, author: identity.publicKey, seq,
+      content: {}, ts: Math.floor(Date.now() / 1000), tags: [],
+    }, identity)
+    await publish(event, entry)
+    const updated = [...groups.filter((group) => group.pubkey !== entry.pubkey), entry]
+    setGroups(updated); await setMeta('groups', updated); setActiveGroup(entry.pubkey)
+    log.info('group', 'group join submitted', {
+      group: shortId(entry.pubkey), validators: entry.validators.length,
+    })
+  }, [identity, groups, publish, syncEntry])
 
-      log.sessionAdminAction(type, targetPubkey)
-      const parents = await getPublishParents(activeGroup)
-      if (parents.length === 0) return
+  const setNickname = useCallback(async (name: string) => {
+    await setDefaultNickname(name)
+    await adminAction('chat.nickname_set', '', { nickname: name })
+  }, [adminAction, setDefaultNickname])
 
-      const content: Record<string, unknown> = extra ?? {}
-      if (type === 'invite') {
-        if (!targetPubkey) return
-        content['invitee'] = targetPubkey
-        content['role'] = 'member'
-      } else if (type === 'relay_update') {
-        if (!Array.isArray(content['relays'])) return
-      } else if (type === 'metadata_update') {
-        if (!('name' in content) && !('description' in content)) return
-      } else if (type === 'chat.channel_create') {
-        if (!('name' in content)) return
-      } else if (type === 'chat.channel_update' || type === 'chat.channel_delete') {
-        if (!('id' in content)) return
-      } else if (type === 'chat.settings_update') {
-        if (!('default_channel' in content) && !('system_channel' in content)) return
-      } else {
-        if (!targetPubkey) return
-        content['target'] = targetPubkey
-      }
+  const updateValidatorSet = useCallback(async (
+    newValidators: Validator[],
+    readiness: SyncReady[],
+  ) => {
+    if (!identity || !activeGroup) return
+    const entry = groups.find((group) => group.pubkey === activeGroup)
+    if (!entry) return
+    const localState = deriveGroupState(await getGroupEvents(activeGroup)).state
+    if (!localState) throw new Error('Cannot update validators without verified group state')
+    const head = await getMeta<LocalHead>(`bft-head:${activeGroup}`)
+    if (!head) throw new Error('Cannot update validators without a verified checkpoint')
+    const faultTolerance = newValidators.length < 4 ? 0 : Math.floor((newValidators.length - 1) / 3)
+    const nextSet: ValidatorSet = {
+      epoch: localState.validatorSet.epoch + 1,
+      fault_tolerance: faultTolerance,
+      validators: [...newValidators].sort((a, b) => a.pubkey.localeCompare(b.pubkey)),
+    }
+    validateValidatorSet(nextSet)
+    const seq = nextSequence(identity.publicKey)
+    if (seq === null) return
+    const event = await buildEvent({
+      type: 'validator_update', group: activeGroup, author: identity.publicKey, seq,
+      content: {
+        validators: nextSet.validators,
+        fault_tolerance: faultTolerance,
+        readiness,
+      },
+      ts: Math.floor(Date.now() / 1000), tags: [],
+    }, identity)
+    // Validate readiness proofs against the current checkpoint before publishing.
+    verifyValidatorTransition(
+      event, localState.validatorSet, activeGroup, localState.chainId,
+      head.height, head.blockHash, head.historyRoot, head.logicalBytes,
+    )
+    await publish(event, entry)
+  }, [identity, activeGroup, groups, nextSequence, publish])
 
-      const input: EventInput = {
-        type,
-        group: activeGroup,
-        author: identity.publicKey,
-        parents,
-        content,
-        ts: Math.floor(Date.now() / 1000),
-        tags: [],
-      }
-      const event = await buildEvent(input, identity)
-      await putEvent(event)
-      lastLocalEventRef.current.set(activeGroup, event.id)
+  const addValidatorByUrl = useCallback(async (url: string, readinessJson: string) => {
+    const current = state?.validatorSet
+    if (!current) throw new Error('No verified validator set available')
+    const client = new ValidatorClient(url)
+    try {
+      await client.connect()
+      const metadata = await client.fetchMetadata()
+      if (current.validators.some((v) => v.pubkey === metadata.pubkey))
+        throw new Error('That validator is already in the set')
+      let readiness: SyncReady
+      try { readiness = JSON.parse(readinessJson) as SyncReady }
+      catch { throw new Error('Readiness argument is not valid JSON') }
+      await updateValidatorSet(
+        [...current.validators, { pubkey: metadata.pubkey, url, operator: metadata.name || url }],
+        [readiness],
+      )
+    } finally { await client.close() }
+  }, [state, updateValidatorSet])
 
-      const updated = await getGroupEvents(activeGroup)
-      setEvents(updated)
-      const { state: derived } = deriveGroupState(updated)
-      setState(derived)
-      if (type === 'relay_update' && Array.isArray(content['relays'])) {
-        const relays = content['relays'].filter((relay): relay is string => typeof relay === 'string')
-        const updatedGroups = groups.map((entry) =>
-          entry.pubkey === activeGroup ? { ...entry, relays } : entry,
-        )
-        setGroups(updatedGroups)
-        await setMeta('groups', updatedGroups)
-      }
+  const removeValidatorByUrl = useCallback(async (url: string) => {
+    const current = state?.validatorSet
+    if (!current) throw new Error('No verified validator set available')
+    const remaining = current.validators.filter((v) => v.url !== url)
+    if (remaining.length === current.validators.length)
+      throw new Error(`No validator with URL ${url} in the current set`)
+    if (remaining.length === 0) throw new Error('Cannot remove the last validator')
+    await updateValidatorSet(remaining, [])
+  }, [state, updateValidatorSet])
 
-      void (async () => {
-        await Promise.all(
-          group.relays.map(async (url) => {
-            try {
-              const client = new RelayClient(url)
-              await client.connect()
-              await client.publish(event)
-              await client.close()
-            } catch {
-              // best effort
-            }
-          }),
-        )
-        lastLocalEventRef.current.delete(activeGroup)
-      })()
-    },
-    [identity, activeGroup, groups, getPublishParents],
-  )
+  const fetchValidatorStatus = useCallback(async (url: string): Promise<ValidatorStatus | null> => {
+    if (!activeGroup) return null
+    const live = clientsRef.current.get(url)
+    if (live?.isConnected) {
+      try { return await live.status(activeGroup) } catch { return null }
+    }
+    let ephemeral: ValidatorClient | null = null
+    try {
+      ephemeral = await connect(url)
+      return await ephemeral.status(activeGroup)
+    } catch {
+      return null
+    } finally {
+      if (ephemeral) await ephemeral.close()
+    }
+  }, [activeGroup])
 
-  const createGroup = useCallback(
-    async (
-      name: string,
-      relayUrls: string[],
-      options?: { description?: string; public?: boolean },
-    ): Promise<{ ok: number; total: number; error?: string }> => {
-      if (!identity) throw new Error('No identity')
-      const groupKeypair = generateKeypair()
-      log.sessionCreateGroup(name, groupKeypair.publicKey, relayUrls)
-      const defaultChannelId = randomHexId()
-      const input: EventInput = {
-        type: 'genesis',
-        group: groupKeypair.publicKey,
-        author: identity.publicKey,
-        parents: [],
-        content: {
-          name,
-          description: options?.description ?? '',
-          public: options?.public ?? true,
-          founder: identity.publicKey,
-          admins: [identity.publicKey],
-          relays: relayUrls,
-          app: 'chat',
-          'chat.channels': [{
-            id: defaultChannelId,
-            name: 'general',
-            position: 0,
-          }],
-          'chat.default_channel': defaultChannelId,
-          'chat.system_channel': defaultChannelId,
-        },
-        ts: Math.floor(Date.now() / 1000),
-        tags: [],
-      }
-      const genesis = await buildEvent(input, identity, groupKeypair)
-      await putEvent(genesis)
-
-      const result = await publishToGroupRelays(genesis, relayUrls)
-      log.sessionCreateGroupResult(name, result.ok, result.total)
-
-      const groupEntry: GroupEntry = {
-        pubkey: groupKeypair.publicKey,
-        name,
-        relays: relayUrls,
-      }
-      const updatedGroups = [...groups, groupEntry]
-      setGroups(updatedGroups)
-      await setMeta('groups', updatedGroups)
-      setActiveGroup(groupKeypair.publicKey)
-
-      return result
-    },
-    [identity, groups, publishToGroupRelays],
-  )
-
-  const setNickname = useCallback(
-    async (name: string): Promise<void> => {
-      if (!identity || !activeGroup) return
-      log.sessionSetNickname(name)
-      await setDefaultNickname(name)
-      const group = groups.find((g) => g.pubkey === activeGroup)
-      if (!group) return
-
-      const parents = await getPublishParents(activeGroup)
-      if (parents.length === 0) return
-
-      const input: EventInput = {
-        type: 'chat.nickname_set',
-        group: activeGroup,
-        author: identity.publicKey,
-        parents,
-        content: { nickname: name },
-        ts: Math.floor(Date.now() / 1000),
-        tags: [],
-      }
-      const event = await buildEvent(input, identity)
-      await putEvent(event)
-      lastLocalEventRef.current.set(activeGroup, event.id)
-
-      const updated = await getGroupEvents(activeGroup)
-      setEvents(updated)
-      const { state: derived } = deriveGroupState(updated)
-      setState(derived)
-
-      void (async () => {
-        await Promise.all(
-          group.relays.map(async (url) => {
-            try {
-              const client = new RelayClient(url)
-              await client.connect()
-              await client.publish(event)
-              await client.close()
-            } catch {
-              // best effort
-            }
-          }),
-        )
-        lastLocalEventRef.current.delete(activeGroup)
-      })()
-    },
-    [identity, activeGroup, groups, getPublishParents, setDefaultNickname],
-  )
+  const leaveGroup = useCallback(async (group: string) => {
+    if (group === activeGroup) await adminAction('leave')
+    const updated = groups.filter((entry) => entry.pubkey !== group)
+    setGroups(updated); await setMeta('groups', updated); setActiveGroup(updated[0]?.pubkey ?? null)
+  }, [activeGroup, adminAction, groups])
 
   return {
-    identity,
-    loading,
-    groups,
-    activeGroup,
-    events,
-    state,
-    defaultNickname,
-    relayConns,
-    messageDeliveries,
-    setActiveGroup,
-    createIdentity,
-    importIdentity,
-    logout,
-    joinGroup,
-    sendMessage,
-    retryMessage,
-    createGroup,
-    adminAction,
-    setNickname,
-    setDefaultNickname,
-    leaveGroup,
+    identity, loading, groups, activeGroup, events, state, defaultNickname,
+    validatorConns, messageDeliveries, setActiveGroup, importIdentity, logout,
+    joinGroup, sendMessage, retryMessage, createGroup, adminAction,
+    setNickname, setDefaultNickname, leaveGroup, updateValidatorSet,
+    addValidatorByUrl, removeValidatorByUrl, fetchValidatorStatus,
   }
 }
