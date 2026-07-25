@@ -26,6 +26,7 @@ export function SettingsModal({
   const [nickname, setNickname] = useState(currentNickname ?? '')
   const [showPrivateKey, setShowPrivateKey] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [nicknameError, setNicknameError] = useState<string | null>(null)
 
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
@@ -50,8 +51,11 @@ export function SettingsModal({
   const handleSetNickname = async () => {
     if (!onSetNickname || !nickname.trim()) return
     setBusy(true)
+    setNicknameError(null)
     try {
       await onSetNickname(nickname.trim())
+    } catch (err) {
+      setNicknameError(String(err))
     } finally {
       setBusy(false)
     }
@@ -131,6 +135,7 @@ export function SettingsModal({
               {busy ? '...' : 'Set'}
             </button>
           </div>
+          {nicknameError && <div className={styles.formError}>{nicknameError}</div>}
         </div>
         <div className={styles.logoutSection}>
           <button className={styles.dangerBtn} onClick={handleLogout} disabled={busy}>

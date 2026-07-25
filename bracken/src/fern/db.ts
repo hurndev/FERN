@@ -39,6 +39,9 @@ export async function getDB(): Promise<IDBPDatabase<BrackenDB>> {
   if (db) return db
   db = await openDB<BrackenDB>('bracken', 4, {
     upgrade(database, oldVersion, _newVersion, transaction) {
+      // Legacy object stores are not part of the typed schema, so name checks
+      // and deletions go through the untyped IDBDatabase interface.
+      const rawDatabase = database as unknown as IDBDatabase
       if (oldVersion < 1) {
         const events = database.createObjectStore('events', { keyPath: 'id' })
         events.createIndex('by-group', 'group')
@@ -48,9 +51,9 @@ export async function getDB(): Promise<IDBPDatabase<BrackenDB>> {
       }
       if (oldVersion < 3) {
         // Legacy DAG events and receipts are not valid fern-bft-1 objects.
-        if (database.objectStoreNames.contains('events')) transaction.objectStore('events').clear()
-        if (database.objectStoreNames.contains('event_receipts'))
-          (database as unknown as IDBDatabase).deleteObjectStore('event_receipts')
+        if (rawDatabase.objectStoreNames.contains('events')) transaction.objectStore('events').clear()
+        if (rawDatabase.objectStoreNames.contains('event_receipts'))
+          rawDatabase.deleteObjectStore('event_receipts')
         if (!database.objectStoreNames.contains('commits')) {
           const commits = database.createObjectStore('commits', { keyPath: 'key' })
           commits.createIndex('by-group', 'group')
@@ -61,10 +64,9 @@ export async function getDB(): Promise<IDBPDatabase<BrackenDB>> {
         }
       }
       if (oldVersion < 4) {
-        const rawDatabase = database as unknown as IDBDatabase
-        if (database.objectStoreNames.contains('relayPins'))
+        if (rawDatabase.objectStoreNames.contains('relayPins'))
           rawDatabase.deleteObjectStore('relayPins')
-        if (database.objectStoreNames.contains('trustLedger'))
+        if (rawDatabase.objectStoreNames.contains('trustLedger'))
           rawDatabase.deleteObjectStore('trustLedger')
         if (!database.objectStoreNames.contains('validatorPins'))
           database.createObjectStore('validatorPins', { keyPath: 'url' })

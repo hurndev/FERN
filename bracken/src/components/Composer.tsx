@@ -6,7 +6,7 @@ interface Props {
   channelName: string
   canPost: boolean
   disabledReason?: string
-  onSend: (text: string, channel?: string) => Promise<boolean>
+  onSend: (text: string, channel: string) => Promise<boolean>
   onCommand?: (command: string, args: string) => Promise<void>
   commands: SlashCommand[]
 }

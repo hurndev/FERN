@@ -234,27 +234,21 @@ function ValidatorInfoPopup({
   const connWord = conn.connected ? 'Connected' : conn.reconnecting ? 'Reconnecting' : 'Offline'
   const connColor = conn.connected ? 'var(--accent)' : conn.reconnecting ? 'var(--gap)' : 'var(--danger)'
   const displayName = conn.name && conn.name !== hostOf(conn.url) ? conn.name : hostOf(conn.url)
-  const truncStyle = {
-    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', wordBreak: 'normal',
-  } as const
 
   const dotClass = conn.connected ? styles.valDotOn
     : conn.reconnecting ? styles.valDotRecon : styles.valDotOff
 
-  const rootRow = (label: string, key: string, value: string) => (
-    <div className={styles.valRootRow}>
-      <span className={styles.valRootLabel}>{label}</span>
-      <span className={styles.valRootVal} title={value}>{truncateId(value, 14)}</span>
-      <button className={`${styles.profileCopyBtn} ${styles.valRootCopy}`} onClick={() => copy(key, value)}>
-        {copied === key ? 'Copied' : 'Copy'}
-      </button>
-    </div>
+  const copyBtn = (key: string, value: string) => (
+    <button className={styles.valCopyBtn} onClick={() => copy(key, value)}>
+      {copied === key ? 'Copied' : 'Copy'}
+    </button>
   )
 
-  const statRow = (label: string, value: ReactNode) => (
-    <div className={styles.valStatRow}>
-      <span className={styles.valStatRowLabel}>{label}</span>
-      <span className={styles.valStatRowVal}>{value}</span>
+  const infoRow = (label: string, value: ReactNode, copyKey?: string, copyVal?: string) => (
+    <div className={styles.valInfoRow}>
+      <span className={styles.valInfoLabel}>{label}</span>
+      <span className={styles.valInfoValue}>{value}</span>
+      {copyKey && copyVal && copyBtn(copyKey, copyVal)}
     </div>
   )
 
@@ -262,123 +256,60 @@ function ValidatorInfoPopup({
     <div className={styles.profileOverlay} {...overlayHandlers}>
       <div className={styles.valModal}>
         <button className={styles.profileClose} onClick={onClose}>✕</button>
+
         <div className={styles.valModalHead}>
-          <div className={styles.profileHeader}>
-            <div className={styles.profileAvatar}>
-              <Avatar value={conn.pubkey || conn.url} size={48} />
-            </div>
-            <div className={styles.profileIdentity}>
-              <div className={styles.profileName}>{displayName}</div>
-              <div className={styles.profileRole}>
-                <span className={styles.valRoleLine}>
-                  <span className={`${styles.valDot} ${dotClass}`} />
-                  <span style={{ color: connColor }}>{connWord}</span>
-                  <span className={styles.valRoleSep}>·</span>
-                  <span>Validator</span>
-                </span>
-              </div>
+          <div className={styles.valModalAvatar}>
+            <Avatar value={conn.pubkey || conn.url} size={40} />
+          </div>
+          <div className={styles.valModalIdentity}>
+            <div className={styles.valModalName}>{displayName}</div>
+            <div className={styles.valModalStatus}>
+              <span className={`${styles.valDot} ${dotClass}`} />
+              <span style={{ color: connColor }}>{connWord}</span>
             </div>
           </div>
         </div>
 
         <div className={styles.valModalBody}>
-          <div>
-            <div className={styles.valSection}>
-              <span>Identity</span>
-              <span className={styles.valSectionLine} />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div className={styles.profileField}>
-                <span className={styles.profileLabel}>Public Key</span>
-                {conn.pubkey ? (
-                  <div className={styles.profileValue}>
-                    <span className={styles.profilePubkey}>{conn.pubkey}</span>
-                    <button className={styles.profileCopyBtn} onClick={() => copy('pk', conn.pubkey)}>
-                      {copied === 'pk' ? 'Copied' : 'Copy'}
-                    </button>
-                  </div>
-                ) : (
-                  <span className={styles.profileValue} style={{ color: 'var(--text-ghost)' }}>Not yet known</span>
-                )}
-              </div>
-              <div className={styles.profileField}>
-                <span className={styles.profileLabel}>Endpoint</span>
-                <div className={styles.profileValue}>
-                  <span className={styles.profilePubkey} style={truncStyle} title={conn.url}>{conn.url}</span>
-                  <button className={styles.profileCopyBtn} onClick={() => copy('url', conn.url)}>
-                    {copied === 'url' ? 'Copied' : 'Copy'}
-                  </button>
-                </div>
-              </div>
-              {conn.name && conn.name !== hostOf(conn.url) && (
-                <div className={styles.profileField}>
-                  <span className={styles.profileLabel}>Operator</span>
-                  <span className={styles.profileValue}>{conn.name}</span>
-                </div>
-              )}
-            </div>
+          <div className={styles.valCard}>
+            <div className={styles.valSectionHeading}>Connection</div>
+            {conn.pubkey ? (
+              infoRow('Public key', <span className={styles.valMono}>{truncateId(conn.pubkey, 22)}</span>, 'pk', conn.pubkey)
+            ) : (
+              infoRow('Public key', <span className={styles.valMuted}>Not yet known</span>)
+            )}
+            {infoRow('Endpoint', <span className={styles.valMono} title={conn.url}>{conn.url}</span>, 'url', conn.url)}
+            {conn.name && conn.name !== hostOf(conn.url) && (
+              infoRow('Operator', conn.name)
+            )}
           </div>
 
-          <div>
-            <div className={styles.valSection}>
-              <span>Reported status</span>
-              <span className={styles.valSectionLine} />
-            </div>
+          <div className={styles.valCard}>
+            <div className={styles.valSectionHeading}>Status</div>
             {status ? (
               <>
-                {statRow('Height', status.height.toLocaleString())}
-                {statRow('Epoch', status.epoch)}
-                {statRow('Validators', (
-                  <>
-                    {status.validator_set.validators.length}
-                    <span className={styles.valStatRowSub}> · quorum {validatorQuorum(status.validator_set)}</span>
-                  </>
-                ))}
-                {statRow('History', (
-                  <span className={styles.valStatRowValCol}>
-                    <span>{formatBytes(status.logical_bytes)}</span>
-                    <span className={styles.valStatRowSub}>{status.logical_bytes.toLocaleString()} bytes</span>
-                  </span>
-                ))}
-                {statRow('Chain ID', (
-                  <>
-                    <span style={{ ...truncStyle, minWidth: 0 }} title={status.chain_id}>
-                      {truncateId(status.chain_id, 12)}
-                    </span>
-                    <button
-                      className={`${styles.profileCopyBtn} ${styles.valStatCopy}`}
-                      onClick={() => copy('chain', status.chain_id)}
-                    >
-                      {copied === 'chain' ? 'Copied' : 'Copy'}
-                    </button>
-                  </>
-                ))}
+                {infoRow('Height', status.height.toLocaleString())}
+                {infoRow('Epoch', status.epoch)}
+                {infoRow('Validators', <>{status.validator_set.validators.length}<span className={styles.valSub}> · quorum {validatorQuorum(status.validator_set)}</span></>)}
+                {infoRow('History', <>{formatBytes(status.logical_bytes)}<span className={styles.valSub}> · {status.logical_bytes.toLocaleString()} bytes</span></>)}
+                {infoRow('Chain ID', <span className={styles.valMono}>{truncateId(status.chain_id, 16)}</span>, 'chain', status.chain_id)}
                 {stale && (
-                  <div className={`${styles.valNote} ${styles.valNoteWarn}`} style={{ marginTop: 10 }}>
-                    Showing the last known status — the validator could not be reached just now.
-                  </div>
+                  <div className={styles.valNoteWarn}>Showing last known status — validator unreachable.</div>
                 )}
               </>
             ) : (
-              <div className={`${styles.valNote} ${styles.valNoteMuted}`}>
-                {loading
-                  ? 'Fetching the latest signed status…'
-                  : 'No signed status available — this validator is unreachable or does not host the group yet.'}
+              <div className={styles.valNoteMuted}>
+                {loading ? 'Fetching signed status…' : 'No signed status available.'}
               </div>
             )}
           </div>
 
           {status && (
-            <div>
-              <div className={styles.valSection}>
-                <span>Signed roots</span>
-                <span className={styles.valSectionLine} />
-              </div>
-              <div>
-                {rootRow('Block', 'block', status.block_hash)}
-                {rootRow('History', 'hist', status.history_root)}
-                {rootRow('State', 'state', status.state_root)}
-              </div>
+            <div className={styles.valCard}>
+              <div className={styles.valSectionHeading}>Roots</div>
+              {infoRow('Block', <span className={styles.valMono}>{truncateId(status.block_hash, 16)}</span>, 'block', status.block_hash)}
+              {infoRow('History', <span className={styles.valMono}>{truncateId(status.history_root, 16)}</span>, 'hist', status.history_root)}
+              {infoRow('State', <span className={styles.valMono}>{truncateId(status.state_root, 16)}</span>, 'state', status.state_root)}
             </div>
           )}
         </div>

@@ -13,7 +13,7 @@ import {
 import type { FernEvent } from '../fern/events'
 import { buildEvent, canonicalJson, toWireEvent, verifyEvent } from '../fern/events'
 import { log, shortId } from '../fern/logger'
-import type { IngressReceipt, ValidatorStatus } from '../fern/validator'
+import type { ValidatorStatus } from '../fern/validator'
 import {
   ValidatorClient, parseGroupAddress, validatorReconnectDelay, verifyIngressReceipt,
 } from '../fern/validator'
@@ -42,6 +42,14 @@ export interface MessageDelivery {
   ok: number
   total: number
   error?: string
+  majorityRejected?: boolean
+}
+
+export interface PublishResult {
+  ok: number
+  total: number
+  error?: string
+  majorityRejected: boolean
 }
 
 interface LocalHead {
@@ -370,6 +378,9 @@ export function useBracken() {
   }, [])
 
   useEffect(() => {
+    // Intentional synchronous reset: clearing derived state when no group is
+    // active terminates in one extra render and cannot cascade further.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!activeGroup) { setEvents([]); setState(null); return }
     const entry = groups.find((group) => group.pubkey === activeGroup)
     if (!entry) return
@@ -596,11 +607,13 @@ export function useBracken() {
       } finally { if (ephemeral) await client?.close() }
     }))
     if (ok > 0) await putPendingEvent(event)
+    const total = entry.validators.length
+    const majorityRejected = ok > 0 && ok * 2 < total
     setMessageDeliveries((current) => ({
       ...current,
       [event.id]: ok > 0
-        ? { state: 'sending', ok, total: entry.validators.length }
-        : { state: 'failed', ok, total: entry.validators.length, error },
+        ? { state: 'sending', ok, total, error: majorityRejected ? error : undefined, majorityRejected }
+        : { state: 'failed', ok, total, error },
     }))
     await refresh(event.group)
     log.info('ingress', 'event publication complete', {
@@ -608,7 +621,7 @@ export function useBracken() {
       validators: entry.validators.length, propagationConfirmed:
         ok >= localState.validatorSet.fault_tolerance + 1,
     })
-    return { ok, total: entry.validators.length, error: error || undefined }
+    return { ok, total, error: error || undefined, majorityRejected }
   }, [refresh])
 
   const nextSequence = useCallback((author: string): number | null => {
@@ -652,12 +665,12 @@ export function useBracken() {
     if (!entry || seq === null) return
     const content = { ...extra }
     if (type === 'invite') { content['invitee'] = target; content['role'] = 'member' }
-    else if (!['metadata_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'].includes(type)) content['target'] = target
+    else if (['kick', 'ban', 'unban', 'admin_add', 'admin_remove'].includes(type)) content['target'] = target
     const event = await buildEvent({
       type, group: activeGroup, author: identity.publicKey, seq, content,
       ts: Math.floor(Date.now() / 1000), tags: [],
     }, identity)
-    await publish(event, entry)
+    return await publish(event, entry)
   }, [identity, activeGroup, groups, nextSequence, publish])
 
   const createGroup = useCallback(async (
@@ -768,7 +781,7 @@ export function useBracken() {
 
   const setNickname = useCallback(async (name: string) => {
     await setDefaultNickname(name)
-    await adminAction('chat.nickname_set', '', { nickname: name })
+    return await adminAction('chat.nickname_set', '', { nickname: name })
   }, [adminAction, setDefaultNickname])
 
   const updateValidatorSet = useCallback(async (

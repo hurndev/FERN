@@ -32,6 +32,7 @@ interface MessageDelivery {
   ok: number
   total: number
   error?: string
+  majorityRejected?: boolean
 }
 
 const ADMIN_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'admin_add', 'admin_remove', 'join', 'leave', 'genesis', 'metadata_update', 'validator_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'])
@@ -294,6 +295,14 @@ export function MessageList({
                     Retry
                   </button>
                 )}
+              </div>
+            )}
+            {delivery && delivery.majorityRejected && (
+              <div className={`${styles.deliveryStatus} ${styles.deliveryStatusRejected}`}>
+                <span>
+                  Rejected by {delivery.total - delivery.ok} of {delivery.total} validators
+                  {delivery.error ? `: ${delivery.error}` : ''}
+                </span>
               </div>
             )}
           </div>

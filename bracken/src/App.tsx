@@ -1,5 +1,5 @@
 import { Suspense, lazy, useState, useMemo, useEffect, useCallback } from 'react'
-import { useBracken } from './hooks/useBracken'
+import { useBracken, type PublishResult } from './hooks/useBracken'
 import { IdentitySetup } from './components/IdentitySetup'
 import { InvitePreview, type PendingJoin } from './components/InvitePreview'
 import { Sidebar } from './components/Sidebar'
@@ -11,7 +11,7 @@ import { MemberDrawer, ValidatorDrawer } from './components/Drawers'
 import { FernLogo } from './components/FernLogo'
 import { SettingsModal } from './components/SettingsModal'
 import { GroupInfoModal } from './components/GroupInfoModal'
-import { deriveGroupState } from './fern/state'
+import { deriveGroupState, type Channel } from './fern/state'
 import { validatorQuorum as quorumFor } from './fern/bft'
 import type { FernEvent } from './fern/events'
 import { isValidPubkey } from './fern/utils'
@@ -97,6 +97,19 @@ const ADMIN_COMMANDS: SlashCommand[] = [
 
 function firstArg(args: string): string {
   return args.trim().split(/\s+/, 1)[0] ?? ''
+}
+
+function assertPublished(result: PublishResult | undefined) {
+  if (!result || result.total === 0)
+    throw new Error('The event was not published: no verified group state or reachable validators.')
+  if (result.ok === 0)
+    throw new Error(
+      `Rejected by all ${result.total} validators${result.error ? `: ${result.error}` : '.'}`,
+    )
+  if (result.majorityRejected)
+    throw new Error(
+      `Rejected by ${result.total - result.ok} of ${result.total} validators${result.error ? `: ${result.error}` : '.'}`,
+    )
 }
 
 function pendingJoinFromLocation(): PendingJoin | null {
@@ -211,7 +224,7 @@ export default function App() {
     : ''
 
   const channels = useMemo(() => {
-    if (!bracken.state) return [] as { id: string; name: string; description: string; number: number }[]
+    if (!bracken.state) return [] as Channel[]
     return [...bracken.state.channels.values()].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
   }, [bracken.state])
   const defaultChannel = bracken.state?.chatSettings.default_channel ?? ''
@@ -411,7 +424,9 @@ export default function App() {
               channelNames={channelNames}
               viewerPubkey={userPubkey}
               selectedChannel={selectedChannel}
-              onAdminAction={bracken.adminAction}
+              onAdminAction={async (type, target, extra) => {
+                assertPublished(await bracken.adminAction(type, target, extra))
+              }}
               onRetryMessage={bracken.retryMessage}
             />
 
@@ -429,38 +444,39 @@ export default function App() {
               onSend={bracken.sendMessage}
               onCommand={async (cmd, args) => {
                 if (cmd === '/nickname' && args) {
-                  await bracken.setNickname(args)
+                  assertPublished(await bracken.setNickname(args))
                 } else if (isViewerAdmin && cmd === '/kick') {
-                  await bracken.adminAction('kick', firstArg(args))
+                  assertPublished(await bracken.adminAction('kick', firstArg(args)))
                 } else if (isViewerAdmin && cmd === '/ban') {
                   const target = firstArg(args)
                   const reason = args.trim().slice(target.length).trim()
-                  await bracken.adminAction('ban', target, { reason, until: null })
+                  assertPublished(await bracken.adminAction('ban', target, { reason, until: null }))
                 } else if (isViewerAdmin && cmd === '/unban') {
-                  await bracken.adminAction('unban', firstArg(args))
+                  assertPublished(await bracken.adminAction('unban', firstArg(args)))
                 } else if (isViewerAdmin && cmd === '/invite') {
-                  await bracken.adminAction('invite', firstArg(args))
+                  assertPublished(await bracken.adminAction('invite', firstArg(args)))
                 } else if (isViewerAdmin && cmd === '/promote') {
-                  await bracken.adminAction('admin_add', firstArg(args))
+                  assertPublished(await bracken.adminAction('admin_add', firstArg(args)))
                 } else if (isViewerAdmin && cmd === '/demote') {
-                  await bracken.adminAction('admin_remove', firstArg(args))
+                  assertPublished(await bracken.adminAction('admin_remove', firstArg(args)))
                 } else if (isViewerAdmin && cmd === '/name' && args.trim()) {
-                  await bracken.adminAction('metadata_update', '', { name: args.trim() })
+                  assertPublished(await bracken.adminAction('metadata_update', '', { name: args.trim() }))
                 } else if (isViewerAdmin && cmd === '/description') {
-                  await bracken.adminAction('metadata_update', '', { description: args.trim() })
+                  assertPublished(await bracken.adminAction('metadata_update', '', { description: args.trim() }))
                 } else if (isViewerAdmin && cmd === '/channel-create' && args.trim()) {
-                  await bracken.adminAction('chat.channel_create', '', { id: randomHexId(), name: args.trim() })
+                  assertPublished(await bracken.adminAction('chat.channel_create', '', { id: randomHexId(), name: args.trim() }))
                 } else if (isViewerAdmin && cmd === '/channel-delete' && args.trim()) {
                   const channel = [...(bracken.state?.channels.values() ?? [])].find((ch) => ch.name === args.trim() || ch.id === args.trim())
-                  if (channel) await bracken.adminAction('chat.channel_delete', '', { id: channel.id, name: channel.name })
+                  if (channel) assertPublished(await bracken.adminAction('chat.channel_delete', '', { id: channel.id, name: channel.name }))
                 } else if (isViewerAdmin && cmd === '/validator-add') {
                   const url = firstArg(args)
                   const readinessJson = args.trim().slice(url.length).trim()
-                  if (!url || !readinessJson) return
+                  if (!url) throw new Error('Usage: /validator-add <url> <sync-ready JSON>')
+                  if (!readinessJson) throw new Error('Missing sync-ready proof. The validator-to-add must provide a SyncReady JSON.')
                   await bracken.addValidatorByUrl(url, readinessJson)
                 } else if (isViewerAdmin && cmd === '/validator-remove') {
                   const url = firstArg(args)
-                  if (!url) return
+                  if (!url) throw new Error('Usage: /validator-remove <url>')
                   await bracken.removeValidatorByUrl(url)
                 }
               }}
@@ -496,7 +512,9 @@ export default function App() {
           nicknames={nicknames}
           viewerPubkey={userPubkey}
           onClose={() => setShowMembers(false)}
-          onAdminAction={bracken.adminAction}
+          onAdminAction={async (type, target, extra) => {
+            assertPublished(await bracken.adminAction(type, target, extra))
+          }}
         />
       )}
       {showValidators && (
@@ -531,7 +549,9 @@ export default function App() {
           privateKey={bracken.identity.seed}
           currentNickname={bracken.defaultNickname ?? nicknames.get(bracken.identity.publicKey) ?? null}
           onClose={() => setShowSettings(false)}
-          onSetNickname={bracken.setNickname}
+          onSetNickname={async (name) => {
+            assertPublished(await bracken.setNickname(name))
+          }}
           onLogout={bracken.logout}
         />
       )}

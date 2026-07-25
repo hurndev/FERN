@@ -24,6 +24,7 @@ export function ProfilePopup({
   const overlayHandlers = useDefiniteOverlayClick(onClose)
   const [copied, setCopied] = useState(false)
   const [acting, setActing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const isSelf = viewerPubkey === pubkey
 
@@ -44,9 +45,12 @@ export function ProfilePopup({
   const handleAction = async (type: string) => {
     if (!onAdminAction) return
     setActing(true)
+    setError(null)
     try {
       await onAdminAction(type, pubkey)
       onClose()
+    } catch (err) {
+      setError(String(err))
     } finally {
       setActing(false)
     }
@@ -134,6 +138,7 @@ export function ProfilePopup({
                 </button>
               )}
             </div>
+            {error && <div className={styles.formError}>{error}</div>}
           </div>
         )}
       </div>
