@@ -1,4 +1,4 @@
-import type { Commit, ValidatorSet } from './bft'
+import type { Commit, SyncReady, ValidatorSet } from './bft'
 import type { FernEvent } from './events'
 import { PROTOCOL_VERSION, canonicalJson, toWireEvent } from './events'
 import { verifySignature } from './crypto'
@@ -173,7 +173,7 @@ export class ValidatorClient {
     this.resolver?.(message)
   }
 
-  private async request<T>(action: string, extra: Record<string, unknown>, expected: string[]): Promise<T> {
+  private async request<T>(action: string, extra: Record<string, unknown>, expected: string[], timeoutMs = 15000): Promise<T> {
     let release!: () => void
     const previous = this.requestChain
     this.requestChain = new Promise<void>((resolve) => { release = resolve })
@@ -186,7 +186,7 @@ export class ValidatorClient {
           this.resolver = null
           log.warn('transport', 'validator request timed out', { url: this.url, action })
           reject(new Error(`Timeout waiting for ${expected.join('/')}`))
-        }, 15000)
+        }, timeoutMs)
         this.resolver = (message) => {
           const type = String(message['type'] ?? '')
           if (!expected.includes(type) && type !== 'error') return
@@ -257,6 +257,24 @@ export class ValidatorClient {
       'get_pending', { group }, ['pending_events'],
     )
     return response.events
+  }
+
+  async requestReadiness(group: string, sources: string[]): Promise<SyncReady> {
+    log.info('group', 'requesting remote readiness preparation', {
+      group: shortId(group), url: this.url, sources: sources.length,
+    })
+    const response = await this.request<{ readiness: SyncReady }>(
+      'request_readiness', { group, sources }, ['readiness'], 300000,
+    )
+    const readiness = response.readiness
+    if (!readiness || readiness.type !== 'sync_ready' || readiness.group !== group ||
+      !isValidPubkey(readiness.validator) || !isValidSig(readiness.sig))
+      throw new Error('Validator returned an invalid readiness proof')
+    log.debug('group', 'remote readiness received', {
+      group: shortId(group), url: this.url, validator: shortId(readiness.validator),
+      checkpoint: readiness.checkpoint_height, epoch: readiness.from_epoch,
+    })
+    return readiness
   }
 
   async subscribe(group: string): Promise<void> {

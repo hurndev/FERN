@@ -690,7 +690,7 @@ export function useBracken() {
       } finally { await client.close() }
     }
     discovered.sort((a, b) => a.pubkey.localeCompare(b.pubkey))
-    const faultTolerance = discovered.length === 1 ? 0 : Math.floor((discovered.length - 1) / 3)
+    const faultTolerance = Math.floor((discovered.length - 1) / 3)
     const validatorSet: ValidatorSet = { epoch: 0, fault_tolerance: faultTolerance, validators: discovered }
     validateValidatorSet(validatorSet)
     const groupKeypair = generateKeypair()
@@ -787,15 +787,16 @@ export function useBracken() {
   const updateValidatorSet = useCallback(async (
     newValidators: Validator[],
     readiness: SyncReady[],
-  ) => {
-    if (!identity || !activeGroup) return
+  ): Promise<PublishResult> => {
+    if (!identity || !activeGroup)
+      throw new Error('Cannot update validators without an identity and active group')
     const entry = groups.find((group) => group.pubkey === activeGroup)
-    if (!entry) return
+    if (!entry) throw new Error('No verified group state available')
     const localState = deriveGroupState(await getGroupEvents(activeGroup)).state
     if (!localState) throw new Error('Cannot update validators without verified group state')
     const head = await getMeta<LocalHead>(`bft-head:${activeGroup}`)
     if (!head) throw new Error('Cannot update validators without a verified checkpoint')
-    const faultTolerance = newValidators.length < 4 ? 0 : Math.floor((newValidators.length - 1) / 3)
+    const faultTolerance = Math.floor((newValidators.length - 1) / 3)
     const nextSet: ValidatorSet = {
       epoch: localState.validatorSet.epoch + 1,
       fault_tolerance: faultTolerance,
@@ -803,7 +804,7 @@ export function useBracken() {
     }
     validateValidatorSet(nextSet)
     const seq = nextSequence(identity.publicKey)
-    if (seq === null) return
+    if (seq === null) throw new Error('Cannot allocate a sequence without verified group state')
     const event = await buildEvent({
       type: 'validator_update', group: activeGroup, author: identity.publicKey, seq,
       content: {
@@ -818,36 +819,72 @@ export function useBracken() {
       event, localState.validatorSet, activeGroup, localState.chainId,
       head.height, head.blockHash, head.historyRoot, head.logicalBytes,
     )
-    await publish(event, entry)
+    return await publish(event, entry)
   }, [identity, activeGroup, groups, nextSequence, publish])
 
-  const addValidatorByUrl = useCallback(async (url: string, readinessJson: string) => {
+  const addValidatorByUrl = useCallback(async (url: string): Promise<PublishResult> => {
     const current = state?.validatorSet
     if (!current) throw new Error('No verified validator set available')
+    if (!activeGroup) throw new Error('No active group')
+    const entry = groups.find((group) => group.pubkey === activeGroup)
+    if (!entry) throw new Error('No verified group state available')
     const client = new ValidatorClient(url)
     try {
       await client.connect()
       const metadata = await client.fetchMetadata()
       if (current.validators.some((v) => v.pubkey === metadata.pubkey))
         throw new Error('That validator is already in the set')
-      let readiness: SyncReady
-      try { readiness = JSON.parse(readinessJson) as SyncReady }
-      catch { throw new Error('Readiness argument is not valid JSON') }
-      await updateValidatorSet(
-        [...current.validators, { pubkey: metadata.pubkey, url, operator: metadata.name || url }],
-        [readiness],
-      )
+      const newValidator: Validator = {
+        pubkey: metadata.pubkey, url: client.url, operator: metadata.name || url,
+      }
+      const sources = current.validators.map((v) => v.url)
+      let lastError = 'Validator update failed'
+      for (let attempt = 0; attempt < 2; attempt++) {
+        // The prospective validator applies its own WoT admission policy,
+        // verifies the full history, and signs readiness for the exact
+        // checkpoint. It refuses unless enough locally trusted current
+        // validators already host the group.
+        const readiness = await client.requestReadiness(activeGroup, sources)
+        let result: PublishResult | undefined
+        try {
+          result = await updateValidatorSet([...current.validators, newValidator], [readiness])
+        } catch (err) {
+          lastError = String(err)
+          // Readiness is bound to the exact pre-transition checkpoint. If the
+          // group advanced while preparing, refresh and retry once.
+          if (attempt === 0 && /readiness|checkpoint/i.test(lastError)) {
+            log.warn('group', 'validator update stale, retrying with fresh readiness', {
+              group: shortId(activeGroup), reason: lastError,
+            })
+            await refresh(activeGroup)
+            continue
+          }
+          throw err
+        }
+        if (result.ok > 0 && !result.majorityRejected) return result
+        lastError = result.error
+          ?? `Rejected by ${result.total - result.ok} of ${result.total} validators`
+        if (attempt === 0 && /readiness|checkpoint/i.test(lastError)) {
+          log.warn('group', 'validator update rejected as stale, retrying', {
+            group: shortId(activeGroup), reason: lastError,
+          })
+          await refresh(activeGroup)
+          continue
+        }
+        throw new Error(lastError)
+      }
+      throw new Error(lastError)
     } finally { await client.close() }
-  }, [state, updateValidatorSet])
+  }, [state, activeGroup, groups, updateValidatorSet, refresh])
 
-  const removeValidatorByUrl = useCallback(async (url: string) => {
+  const removeValidatorByUrl = useCallback(async (url: string): Promise<PublishResult> => {
     const current = state?.validatorSet
     if (!current) throw new Error('No verified validator set available')
     const remaining = current.validators.filter((v) => v.url !== url)
     if (remaining.length === current.validators.length)
       throw new Error(`No validator with URL ${url} in the current set`)
     if (remaining.length === 0) throw new Error('Cannot remove the last validator')
-    await updateValidatorSet(remaining, [])
+    return await updateValidatorSet(remaining, [])
   }, [state, updateValidatorSet])
 
   const fetchValidatorStatus = useCallback(async (url: string): Promise<ValidatorStatus | null> => {

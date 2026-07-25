@@ -170,13 +170,15 @@ compatible whenever an object schema changes.
 
 `Validator` validates a public key, `ws://` or `wss://` URL, and bounded
 operator label. `ValidatorSet` enforces sorted distinct keys and URLs, the
-maximum of 100 validators, and one of two membership rules: unanimous
-`f=0,q=n` for one to three validators, or exact `n=3f+1,q=2f+1` membership for
-standard sets of four or more validators.
+maximum of 100 validators, and requires the committed `fault_tolerance` to
+equal the count-derived `f = (n-1)//3`. The quorum is `floor(2n/3) + 1`,
+which equals `n` (unanimous) for one to three validators and `2f+1` for
+sizes `3f+1`.
 
-It exposes the mode-dependent `quorum`, ingress `propagation_threshold = f+1`,
-and `round_catchup_threshold = f+1`. In unanimous small-set mode the declared
-fault count is zero, so one authenticated future-round sender can resynchronize
+It exposes the derived `quorum`, ingress `propagation_threshold = f+1`, and
+`round_catchup_threshold = f+1` (both computed as `n - q + 1`). In unanimous
+small-set mode the derived fault count is zero, so one authenticated
+future-round sender can resynchronize
 a restarted validator. It also provides membership checks and deterministic
 proposer selection. Validator-set construction sorts by public key so input
 order cannot change the proposer schedule. The CLI and Bracken surface a
@@ -312,9 +314,14 @@ if that commit activates its key.
 
 `ValidatorServer` adapts a `ValidatorNode` to the WebSocket JSON API. It handles
 metadata, genesis bootstrap, peer messages, event submission, status and
-history queries, manifests, hosting attestations, pending lookup, and
-subscriptions. It pushes pending events and commits to subscribed clients and
-enforces message-size and per-action rate limits.
+history queries, manifests, hosting attestations, pending lookup, remote
+validator preparation, and subscriptions. It pushes pending events and commits
+to subscribed clients and enforces message-size and per-action rate limits.
+The `request_readiness` action runs the same policy-gated admission path as
+the CLI `prepare` command (trusted-host threshold, byte budget, never
+`manual`) under the node's per-group lock, so the periodic catch-up path
+cannot race the admission sync; it is rate-limited more strictly than
+ordinary queries because it triggers a full verified history download.
 
 `PeerBroadcaster` sends signed node messages to the active set's configured
 URLs. `BFTWebSocketClient` is the low-level request helper used by the CLI,
@@ -351,7 +358,9 @@ matching manifest and hosting evidence using local trust configuration,
 downloads and verifies the fixed history, persists the admission decision, and
 returns a signed `SyncReady` for the exact checkpoint. Manual preparation is an
 explicit local resource-policy override; it never bypasses chain verification
-or on-chain readiness validation.
+or on-chain readiness validation. The function is invoked both by the CLI
+`prepare` command and by the server's `request_readiness` action, so local and
+remote preparation share one implementation and one policy gate.
 
 ## 6. CLI architecture
 

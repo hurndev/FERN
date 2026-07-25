@@ -51,13 +51,14 @@ class ValidatorSet:
         validator_count = len(self.validators)
         if validator_count == 0:
             raise ValueError("validator set cannot be empty")
-        if validator_count < STANDARD_BFT_MIN_VALIDATORS:
-            if self.fault_tolerance != 0:
-                raise ValueError(
-                    "validator sets with fewer than 4 validators require fault_tolerance=0"
-                )
-        elif validator_count != 3 * self.fault_tolerance + 1:
-            raise ValueError("standard validator set must contain exactly 3f+1 validators")
+        # floor((n-1)/3) yields 0 for fewer than 4 validators, matching the
+        # unanimous small-set mode.
+        expected_f = (validator_count - 1) // 3
+        if self.fault_tolerance != expected_f:
+            raise ValueError(
+                f"{validator_count} validators require fault_tolerance={expected_f},"
+                f" not {self.fault_tolerance}"
+            )
         if validator_count > MAX_VALIDATORS:
             raise ValueError("validator set exceeds protocol maximum")
         pubkeys = [validator.pubkey for validator in self.validators]
@@ -73,7 +74,7 @@ class ValidatorSet:
     def quorum(self) -> int:
         if self.is_small_unanimous:
             return len(self.validators)
-        return 2 * self.fault_tolerance + 1
+        return (2 * len(self.validators)) // 3 + 1
 
     @property
     def is_small_unanimous(self) -> bool:
@@ -81,17 +82,19 @@ class ValidatorSet:
 
     @property
     def propagation_threshold(self) -> int:
-        return self.fault_tolerance + 1
+        # f+1 receipts guarantee at least one honest validator accepted the
+        # event under the derived fault model.
+        return len(self.validators) - self.quorum + 1
 
     @property
     def round_catchup_threshold(self) -> int:
-        # This is the Tendermint f+1 rule: at least one of the senders is
-        # honest under the validator set's declared fault model.  Small
-        # unanimous sets explicitly declare f=0, so one authenticated sender
-        # is sufficient.  Requiring n-1 here prevents validators that restart
-        # at an old round from ever catching a lone survivor that advanced
-        # while quorum was unavailable.
-        return self.fault_tolerance + 1
+        # Tendermint f+1 rule (n - q + 1): at least one sender is honest
+        # under the derived fault model. BFT-NOTES.md records why f+1 rather
+        # than n-1: restarted peers must be able to rejoin a survivor that
+        # advanced while quorum was unavailable without replaying every
+        # round, while a single Byzantine sender cannot force round
+        # advancement in standard mode.
+        return len(self.validators) - self.quorum + 1
 
     @property
     def pubkeys(self) -> frozenset[str]:

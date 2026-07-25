@@ -12,10 +12,12 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
+from urllib.parse import urlparse
+
 from fern.bft.blocks import Commit
 from fern.bft.canonical import sign_payload, verify_payload_signature
 from fern.bft.canonical import strict_int
-from fern.bft.certificates import IngressReceipt
+from fern.bft.certificates import IngressReceipt, SyncReady, verify_sync_ready
 from fern.bft.constants import MAX_BLOCK_BYTES, PROTOCOL_VERSION
 from fern.bft.manifest import (
     HistoryManifest,
@@ -139,6 +141,9 @@ class ValidatorServer:
         maximum_message_bytes: int = MAX_BLOCK_BYTES * 2,
         catchup_interval: float = 2.0,
         catchup_timeout: float = 1.0,
+        trusted_operators: dict[str, str] | None = None,
+        minimum_trusted_operators: int = 2,
+        maximum_group_logical_bytes: int | None = None,
     ) -> None:
         self.node = node
         self.store = node.store
@@ -151,6 +156,9 @@ class ValidatorServer:
         self.maximum_message_bytes = maximum_message_bytes
         self.catchup_interval = catchup_interval
         self.catchup_timeout = catchup_timeout
+        self.trusted_operators = dict(trusted_operators or {})
+        self.minimum_trusted_operators = minimum_trusted_operators
+        self.maximum_group_logical_bytes = maximum_group_logical_bytes
         self._rate_limiter = RateLimiter()
         self._subscriptions: dict[str, set[ServerConnection]] = {}
         self._attached_engines: dict[str, int] = {}
@@ -231,6 +239,8 @@ class ValidatorServer:
         key = str(remote[0]) if isinstance(remote, tuple) and remote else "unknown"
         if action == "submit_event":
             maximum, window = self.ingress_limit, self.ingress_window_seconds
+        elif action == "request_readiness":
+            maximum, window = 10, 60
         elif action in {"bootstrap", "history_manifest", "hosting_attestation"}:
             maximum, window = 30, 60
         elif action == "peer":
@@ -369,6 +379,24 @@ class ValidatorServer:
                 "type": "hosting_attestation",
                 "hosting_attestation": attestation.to_dict(),
             }
+        if action == "request_readiness":
+            group = str(request.get("group", ""))
+            if not is_valid_pubkey_hex(group):
+                raise ValueError("group must be a valid group public key")
+            raw_sources = request.get("sources")
+            if not isinstance(raw_sources, list) or not all(
+                isinstance(item, str) for item in raw_sources
+            ):
+                raise ValueError("sources must be an array of validator URLs")
+            sources = [item.strip() for item in raw_sources if item.strip()]
+            if not sources:
+                raise ValueError("sources must name at least one current validator URL")
+            for source in sources:
+                parsed = urlparse(source)
+                if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+                    raise ValueError("source URLs must use ws:// or wss://")
+            readiness = await self._request_readiness(group, sources)
+            return {"type": "readiness", "readiness": readiness.to_dict()}
         if action == "get_commits":
             group = str(request.get("group", ""))
             from_height = max(1, strict_int(request.get("from_height", 1), "from_height"))
@@ -424,6 +452,45 @@ class ValidatorServer:
             )
             return {"type": "unsubscribed", "group": group}
         raise ValueError(f"unknown action: {action}")
+
+    async def _request_readiness(self, group: str, sources: list[str]) -> SyncReady:
+        """Apply local admission policy, verify full history, sign readiness.
+
+        Remote preparation is policy-gated exactly like operator-initiated
+        preparation: the trusted-host threshold and byte budget decide whether
+        this validator spends permanent storage on the group. It is never a
+        ``manual`` override.
+        """
+
+        # Imported lazily to avoid the admission/websocket module cycle.
+        from fern.bft.admission import PreparedHistory, prepare_validator_history
+
+        if group in self.store.hosted_groups():
+            head = self.store.get_chain_head(group)
+            if self.node.keypair.pubkey_hex in head.state.validator_set.pubkeys:
+                raise ValueError("this validator is already active in the group")
+
+        async def prepare() -> PreparedHistory:
+            return await prepare_validator_history(
+                group=group,
+                urls=sources,
+                store=self.store,
+                keypair=self.node.keypair,
+                trusted_operators=self.trusted_operators,
+                minimum_operators=self.minimum_trusted_operators,
+                maximum_logical_bytes=self.maximum_group_logical_bytes,
+                manual=False,
+            )
+
+        prepared = await self.node.prepare_group_admission(group, prepare)
+        readiness = prepared.readiness
+        logger.info(
+            "remote readiness prepared group=%s checkpoint=%d epoch=%d",
+            group[:12],
+            readiness.checkpoint_height,
+            readiness.from_epoch,
+        )
+        return readiness
 
     async def _catch_up_group(self, group: str) -> None:
         """Synchronize a lagging hosted group from its verified validator endpoints."""
@@ -638,15 +705,18 @@ class BFTWebSocketClient:
         self.url = url
         self.timeout = timeout
 
-    async def _request(self, request: dict[str, object]) -> dict[str, object]:
+    async def _request(
+        self, request: dict[str, object], *, timeout: float | None = None
+    ) -> dict[str, object]:
+        effective = self.timeout if timeout is None else timeout
         async with connect(
             self.url,
-            open_timeout=self.timeout,
-            close_timeout=self.timeout,
+            open_timeout=effective,
+            close_timeout=effective,
             max_size=MAX_BLOCK_BYTES * 2,
         ) as websocket:
             await websocket.send(_encode(request))
-            raw = await asyncio.wait_for(websocket.recv(), timeout=self.timeout)
+            raw = await asyncio.wait_for(websocket.recv(), timeout=effective)
         if not isinstance(raw, str):
             raise ValueError("validator returned a binary response")
         response = json.loads(raw)
@@ -712,6 +782,18 @@ class BFTWebSocketClient:
         return HostingAttestation.from_dict(
             _object(response.get("hosting_attestation"), "hosting_attestation")
         )
+
+    async def request_readiness(
+        self, group: str, sources: list[str], *, timeout: float = 300.0
+    ) -> SyncReady:
+        response = await self._request(
+            {"action": "request_readiness", "group": group, "sources": sources},
+            timeout=timeout,
+        )
+        readiness = SyncReady.from_dict(_object(response.get("readiness"), "readiness"))
+        if readiness.group != group or not verify_sync_ready(readiness):
+            raise ValueError("validator returned an invalid readiness proof")
+        return readiness
 
     async def get_pending(self, group: str) -> tuple[Event, ...]:
         response = await self._request({"action": "get_pending", "group": group})

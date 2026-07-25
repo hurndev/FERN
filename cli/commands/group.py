@@ -102,7 +102,7 @@ def command() -> None:
     "--validator",
     "validators",
     multiple=True,
-    help="Validator URL; use 1-3 unanimous test validators or exactly 3f+1 standard validators.",
+    help="Validator URL; use 1-3 unanimous validators or 4+ standard validators (4, 7, 10 tolerate 1, 2, 3 faults).",
 )
 @click.option("--faults", type=int, default=None, help="Byzantine validators to tolerate.")
 def create(

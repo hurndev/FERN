@@ -73,6 +73,9 @@ async def run_validator(config: ValidatorConfig) -> None:
         ingress_limit=config.ingress_limit,
         ingress_window_seconds=config.ingress_window_seconds,
         maximum_message_bytes=config.maximum_message_bytes,
+        trusted_operators={host.pubkey: host.operator for host in config.trusted_hosts},
+        minimum_trusted_operators=config.minimum_trusted_operators,
+        maximum_group_logical_bytes=config.maximum_group_logical_bytes,
     )
     shutdown = asyncio.Event()
     loop = asyncio.get_running_loop()

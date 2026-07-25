@@ -55,7 +55,8 @@ alter another group's consensus state.
 The current architecture aims to provide:
 
 - permanent, independently verifiable final order;
-- safety with at most `f` Byzantine validators in a `3f+1` set;
+- safety while at most `2q - n - 1` validators are Byzantine and liveness
+  while at most `n - q` are unavailable, for a validator set of any size;
 - deterministic authorization and state transitions;
 - crash-safe vote and lock behavior;
 - signed evidence for ingress, checkpoints, history hosting, and validator
@@ -159,10 +160,21 @@ same block.
 ## 6. Validator sets and epochs
 
 Validators are equal-weight, unique by key and URL, and sorted by public key.
-There are two permitted validator-set modes, both with at most 100 validators:
+A set may contain any number of validators from 1 to 100; the fault count and
+quorum are derived from the validator count `n`:
 
-- Standard BFT mode has `n=3f+1`, `n>=4`, and quorum `q=2f+1`.
-- Unanimous small-set mode has `1<=n<4`, declares `f=0`, and uses `q=n`.
+```text
+f = floor((n-1)/3)      quorum q = floor(2n/3) + 1
+```
+
+- Standard mode (`n >= 4`) commits with quorum `q`: the group tolerates
+  `n - q` unavailable or Byzantine validators and stays fork-safe while at
+  most `2q - n - 1` are Byzantine, halting rather than forking between those
+  bounds. Sizes `4, 7, 10, …` (`3f+1`) have `q = 2f+1` with equal liveness
+  and safety budgets; intermediate sizes add fork-safety margin without
+  extra liveness.
+- Unanimous small-set mode (`1 <= n < 4`) falls out of the same formula with
+  `f = 0` and `q = n`: every validator must participate in every certificate.
 
 Both modes use:
 
@@ -172,12 +184,12 @@ round catch-up threshold = f + 1
 proposer index           = (height + round - 1) mod n
 ```
 
-In standard mode any two quorums intersect in at least `f+1` validators, so
-under the fault assumption their intersection contains an honest validator.
-Small-set mode is a development and testing accommodation, not a claim that
-one to three validators meet the standard Byzantine fault model. Every
-validator must participate in every certificate, it offers no unavailable-
-validator tolerance, and CLI and Bracken clients display a persistent warning.
+Any two quorums intersect in at least `2q - n` validators, so under the
+safety bound their intersection contains an honest validator. Small-set mode
+is a development and testing accommodation, not a claim that one to three
+validators meet the standard Byzantine fault model; it offers no
+unavailable-validator tolerance, and CLI and Bracken clients display a
+persistent warning.
 
 A `validator_update` is an administrator-signed governance event. The old
 validator set validates and commits the transition block. The new set becomes
@@ -328,6 +340,15 @@ can be added. Admission proceeds as follows:
 5. The old set commits the transition. The prospective validator verifies that
    commit and starts an engine only if the resulting set activates its key.
 
+Steps 1–3 may be initiated by operator action on the prospective validator
+(`fern-validator prepare`) or remotely through the `request_readiness`
+WebSocket action, which a client can invoke directly (Bracken's
+`/validator-add <url>` does exactly this). Both paths apply the same local
+admission policy; remote preparation is never a `manual` override. Clients
+should retry once with fresh readiness if the group advances between
+preparation and the update, because readiness is bound to the exact
+pre-transition checkpoint.
+
 Readiness must describe the block immediately before the transition. If the
 chain advances before the update is proposed, preparation must be repeated.
 This is intentionally strict: stale or approximate readiness cannot authorize
@@ -342,6 +363,7 @@ Current actions are:
 - `submit_event`, `get_event`, and `get_pending`;
 - `status`, `get_commits`, and `subscribe`/`unsubscribe`;
 - `history_manifest` and `hosting_attestation`;
+- `request_readiness` for policy-gated remote validator preparation;
 - `peer` for signed consensus and gossip messages.
 
 Subscriptions push `pending_event` and `commit` messages. Request size and

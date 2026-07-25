@@ -11,11 +11,26 @@ implementation chooses one side of an open design question.
 - `ts` remains in a user event only for UI provenance. Certified observation
   time and block position are authoritative.
 - Per-author sequence numbers replace DAG parents for replay protection.
-- The validator set is equal-weight. Standard sets contain exactly `3f+1` keys
-  with `n>=4`. As an explicit deviation for development and testing, sets of
-  one to three validators declare `f=0` and require unanimous certificates.
-  They have no claimed Byzantine fault tolerance, any unavailable validator
+- The validator set is equal-weight and may contain any number of
+  validators from 1 to 100. The fault count and quorum are derived from the
+  validator count: `f = floor((n-1)/3)` and `q = floor(2n/3) + 1` (a
+  CometBFT-style more-than-two-thirds quorum). Sizes `3f+1` (4, 7, 10, …)
+  have `q = 2f+1` with equal liveness and safety budgets; intermediate
+  sizes keep the same liveness budget and add fork-safety margin (the group
+  halts rather than forks beyond `f`). Sets of one to three validators fall
+  out of the same formula with `f=0` and `q=n` (unanimous certificates);
+  they have no claimed Byzantine fault tolerance, any unavailable validator
   halts consensus, and the CLI and Bracken always display a warning.
+- The quorum rule was originally exact `n=3f+1` with `q=2f+1`, which made
+  5- and 6-validator groups unrepresentable even though they are valid BFT
+  configurations (same liveness as 4 validators, with extra fork-safety
+  margin). Deriving the quorum from the set size removes the forbidden
+  counts, subsumes the old `f=0` small-set special case, and matches
+  deployed practice (CometBFT, Ethereum). The change is backward
+  compatible: both rules agree on every previously valid set (1–3
+  unanimous and `3f+1` sizes), so all existing history verifies identically
+  and no protocol-version bump was needed. `validator-set-sizes.md` is the
+  reference table for sizes, quorums, and fault budgets.
 - Validator ordering is lexicographic by public key. Proposer selection rotates
   over that order by `(height + round - 1) mod n`.
 - Consensus servers are called validators throughout the active implementation,
@@ -56,6 +71,18 @@ implementation chooses one side of an open design question.
 - Every newly added validator must sign readiness for the checkpoint directly
   before the transition block. This is stricter and simpler than accepting a
   loosely bounded historical checkpoint plus an unspecified tail protocol.
+- Readiness preparation can be initiated remotely through the
+  `request_readiness` WebSocket action as well as locally through
+  `fern-validator prepare`. Remote preparation runs the identical policy-gated
+  admission path (trusted-host threshold, byte budget, verified full-history
+  sync) and is never a `manual` override; the WoT threshold is what prevents
+  remote requests from conscripting a validator into storing arbitrary
+  attacker-created history. Bracken's `/validator-add <url>` uses it to add a
+  validator in one step and retries once with fresh readiness when the group
+  advances between preparation and the update (exact-checkpoint binding makes
+  the stale case detectable rather than dangerous). The action is
+  rate-limited at 10 requests per IP per minute because it triggers a full
+  verified history download.
 - The group freezes if the active epoch loses quorum. Catastrophic owner or
   admin recovery is not implemented because it would weaken finalized safety.
 - Logical history size is the exact cumulative UTF-8 canonical byte count of

@@ -29,6 +29,9 @@ class LiveValidator:
     timing: ConsensusTiming
     ingress_limit: int = 10_000
     ingress_window_seconds: int = 60
+    trusted_operators: dict[str, str] | None = None
+    minimum_trusted_operators: int = 2
+    maximum_group_logical_bytes: int | None = None
     store: BFTStore | None = None
     node: ValidatorNode | None = None
     server: ValidatorServer | None = None
@@ -62,6 +65,9 @@ class LiveValidator:
             port=port,
             ingress_limit=self.ingress_limit,
             ingress_window_seconds=self.ingress_window_seconds,
+            trusted_operators=self.trusted_operators,
+            minimum_trusted_operators=self.minimum_trusted_operators,
+            maximum_group_logical_bytes=self.maximum_group_logical_bytes,
         )
         self.shutdown = asyncio.Event()
         self.task = asyncio.create_task(

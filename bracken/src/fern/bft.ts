@@ -110,7 +110,7 @@ const STANDARD_BFT_MIN_VALIDATORS = 4
 
 export function validatorQuorum(set: ValidatorSet): number {
   if (set.validators.length < STANDARD_BFT_MIN_VALIDATORS) return set.validators.length
-  return 2 * set.fault_tolerance + 1
+  return Math.floor((2 * set.validators.length) / 3) + 1
 }
 
 export function isSmallUnanimousValidatorSet(set: ValidatorSet): boolean {
@@ -122,12 +122,13 @@ export function validateValidatorSet(set: ValidatorSet): void {
   if (!Number.isInteger(set.fault_tolerance) || set.fault_tolerance < 0)
     throw new Error('invalid fault tolerance')
   if (set.validators.length === 0) throw new Error('validator set cannot be empty')
-  if (set.validators.length < STANDARD_BFT_MIN_VALIDATORS) {
-    if (set.fault_tolerance !== 0)
-      throw new Error('validator sets with fewer than 4 validators require fault_tolerance=0')
-  } else if (set.validators.length !== 3 * set.fault_tolerance + 1) {
-    throw new Error('standard validator set must contain exactly 3f+1 validators')
-  }
+  // floor((n-1)/3) yields 0 for fewer than 4 validators (unanimous mode).
+  const expectedF = Math.floor((set.validators.length - 1) / 3)
+  if (set.fault_tolerance !== expectedF)
+    throw new Error(
+      `${set.validators.length} validators require fault_tolerance=${expectedF}, ` +
+      `not ${set.fault_tolerance}`,
+    )
   if (set.validators.length > MAX_VALIDATORS) throw new Error('too many validators')
   const keys = set.validators.map((validator) => validator.pubkey)
   if (new Set(keys).size !== keys.length || keys.some((key) => !isValidPubkey(key)))

@@ -93,16 +93,31 @@ Genesis uses `seq = 0` and contains at least:
 }
 ```
 
-Validators are equal-weight and sorted by public key. The derived quorum `q`
-is defined by the validator count:
+Validators are equal-weight and sorted by public key. A set may contain any
+number of validators from 1 to 100. The fault count `f` and quorum `q` are
+derived from the validator count `n`:
 
-- standard mode: `n>=4`, exact `n=3f+1`, and `q=2f+1`;
-- unanimous small-set mode: `1<=n<4`, required `f=0`, and `q=n`.
+```text
+f = floor((n-1)/3)
+q = floor(2n/3) + 1
+```
 
-Small-set mode is permitted for development and testing but provides no
-claimed Byzantine fault tolerance and no tolerance for an unavailable
-validator. Validator URLs and operator labels are committed state; operator
-labels are informational and do not cryptographically prove independence.
+The committed `fault_tolerance` field must equal the derived `f`. For
+`n >= 4` (standard mode) the group keeps committing while at least `q`
+validators are online and honest — tolerating `n - q` unavailable or
+Byzantine validators — and finalized history cannot fork while at most
+`2q - n - 1` validators are Byzantine. Between those bounds the group halts
+rather than forks. Sizes `n = 3f+1` (4, 7, 10, …) have `q = 2f+1` and equal
+liveness and safety budgets `f`; the intermediate sizes `3f+2` and `3f+3`
+keep the same liveness budget and add fork-safety margin.
+
+For `1 <= n < 4` the formula gives `f = 0` and `q = n` (unanimous small-set
+mode): every validator must participate in every certificate, so the group
+has no claimed Byzantine fault tolerance and no tolerance for an unavailable
+validator. It is permitted for development and small tests; CLI and Bracken
+display a persistent warning while participating in such a group. Validator
+URLs and operator labels are committed state; operator labels are
+informational and do not cryptographically prove independence.
 
 Height zero is the genesis checkpoint:
 
@@ -220,7 +235,7 @@ transition.
 
 Seeing signed messages for a future round from at least `f+1` distinct active
 validators moves a validator to that round. This is also the rule in unanimous
-small-set mode: those sets explicitly declare `f=0`, so one authenticated
+small-set mode: those sets have derived `f=0`, so one authenticated
 future-round sender is sufficient. Without this rule, validators restarting at
 round 0 can remain permanently phase-offset from a survivor that advanced while
 quorum was unavailable. A malicious validator can exploit the zero-fault mode
@@ -294,6 +309,17 @@ manifest. This web of trust does not affect consensus truth. Genesis hosting
 requires an explicit offer, configured open-development policy or operator
 approval.
 
+A prospective validator may prepare locally through operator action or
+remotely through the `request_readiness` action, which names the group and
+candidate source endpoints. Remote preparation applies the same local
+admission policy: the validator refuses unless the configured number of
+locally trusted, independently labelled active validators sign matching
+hosting attestations for one manifest and the history fits the local byte
+budget. It is never a `manual` override. On acceptance the validator
+synchronizes and verifies the fixed history, persists it, and returns the
+signed `SyncReady`. Local and remote preparation are equivalent: both produce
+the same exact-checkpoint readiness and record the same admission evidence.
+
 An active validator retains the complete history. It may refuse activation
 before signing `SyncReady`; it may not silently prune committed history after
 joining an epoch.
@@ -324,11 +350,13 @@ reachable checkpoint that conflicts with the locally verified chain.
 
 ## 12. Safety boundary
 
-In standard mode, with at most `f` Byzantine validators in an epoch, two
-conflicting blocks cannot both obtain valid commits. Small-set groups declare
-`f=0`; their unanimous certificates favor safety and simple testing but carry
-no Byzantine fault-tolerance claim. More than `f` Byzantine validators, obsolete
-validator-key compromise, a bad freshness anchor, or a faulty implementation
-can violate assumptions. A quorum outage halts progress. User signatures still
-prevent validators from forging user or admin actions even outside the normal
-fault assumption.
+In standard mode, while at most `2q - n - 1` validators in an epoch are
+Byzantine, two conflicting blocks cannot both obtain valid commits, and while
+at most `n - q` are unavailable or Byzantine the group keeps committing.
+Between those bounds a group halts rather than forks. Unanimous small sets
+(`n < 4`, `q = n`) halt whenever any validator is unavailable and carry no
+Byzantine fault-tolerance claim. More Byzantine validators than the safety
+bound, obsolete validator-key compromise, a bad freshness anchor, or a faulty
+implementation can violate assumptions. A quorum outage halts progress.
+User signatures still prevent validators from forging user or admin actions
+even outside the normal fault assumption.

@@ -91,7 +91,7 @@ const ADMIN_COMMANDS: SlashCommand[] = [
   { cmd: '/description', desc: 'Set group description' },
   { cmd: '/channel-create', desc: 'Create a new channel' },
   { cmd: '/channel-delete', desc: 'Delete a channel' },
-  { cmd: '/validator-add', desc: 'Add a validator: /validator-add <url> <SyncReady JSON>' },
+  { cmd: '/validator-add', desc: 'Add a validator: /validator-add <url> (it prepares its own proof)' },
   { cmd: '/validator-remove', desc: 'Remove a validator by URL' },
 ]
 
@@ -470,14 +470,23 @@ export default function App() {
                   if (channel) assertPublished(await bracken.adminAction('chat.channel_delete', '', { id: channel.id, name: channel.name }))
                 } else if (isViewerAdmin && cmd === '/validator-add') {
                   const url = firstArg(args)
-                  const readinessJson = args.trim().slice(url.length).trim()
-                  if (!url) throw new Error('Usage: /validator-add <url> <sync-ready JSON>')
-                  if (!readinessJson) throw new Error('Missing sync-ready proof. The validator-to-add must provide a SyncReady JSON.')
-                  await bracken.addValidatorByUrl(url, readinessJson)
+                  if (!url)
+                    throw new Error('Usage: /validator-add <validator-url> — the validator syncs its own history and signs its own readiness proof.')
+                  assertPublished(await bracken.addValidatorByUrl(url))
                 } else if (isViewerAdmin && cmd === '/validator-remove') {
                   const url = firstArg(args)
-                  if (!url) throw new Error('Usage: /validator-remove <url>')
-                  await bracken.removeValidatorByUrl(url)
+                  if (!url) throw new Error('Usage: /validator-remove <validator-url>')
+                  assertPublished(await bracken.removeValidatorByUrl(url))
+                } else if (cmd === '/nickname') {
+                  throw new Error('Usage: /nickname <name>')
+                } else if (!isViewerAdmin) {
+                  throw new Error(`Only group admins can use ${cmd}.`)
+                } else if (cmd === '/channel-delete') {
+                  throw args.trim()
+                    ? new Error(`No channel named "${args.trim()}" exists in this group.`)
+                    : new Error('Usage: /channel-delete <channel-name>')
+                } else {
+                  throw new Error(`Missing arguments for ${cmd}.`)
                 }
               }}
               commands={slashCommands}

@@ -88,9 +88,7 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
   }
 
   const parsedValidators = parseValidators(validators)
-  const validValidatorCount = parsedValidators.length > 0 && (
-    parsedValidators.length < 4 || (parsedValidators.length - 1) % 3 === 0
-  )
+  const validValidatorCount = parsedValidators.length > 0
   const canCreate = name.trim().length > 0 && validValidatorCount && !createBusy
   const canJoin = address.trim().length > 0 && !joinBusy
 
@@ -218,7 +216,7 @@ export function AddGroupModal({ onJoin, onCreate, onClose, initialAddress, initi
                 spellCheck={false}
               />
               <span className={styles.modalHint}>
-                Use 1–3 unanimous test validators, or exactly 3f+1 standard validators.
+                Use 1–3 validators for unanimous mode, or 4+ for standard BFT.
                 Four validators tolerate one Byzantine fault without sacrificing liveness.
               </span>
               {parsedValidators.length > 0 && parsedValidators.length < 4 && (

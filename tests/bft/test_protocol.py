@@ -144,12 +144,56 @@ def test_lock_survives_round_and_rejects_unproven_conflict() -> None:
 
 
 def test_quorums_intersect_in_at_least_f_plus_one_validators() -> None:
-    for faults in range(1, 6):
-        n = 3 * faults + 1
-        quorum = 2 * faults + 1
+    for count in range(4, 17):
+        _keys, validator_set = validator_fixture(
+            faults=(count - 1) // 3, validator_count=count
+        )
+        quorum = validator_set.quorum
         first = set(range(quorum))
-        second = set(range(n - quorum, n))
-        assert len(first & second) >= faults + 1
+        second = set(range(count - quorum, count))
+        assert len(first & second) >= 2 * quorum - count
+        assert len(first & second) >= validator_set.fault_tolerance + 1
+
+
+@pytest.mark.parametrize(
+    ("count", "quorum", "liveness_budget", "safety_budget"),
+    [
+        (1, 1, 0, 0),
+        (2, 2, 0, 1),
+        (3, 3, 0, 2),
+        (4, 3, 1, 1),
+        (5, 4, 1, 2),
+        (6, 5, 1, 3),
+        (7, 5, 2, 2),
+        (8, 6, 2, 3),
+        (9, 7, 2, 4),
+        (10, 7, 3, 3),
+        (11, 8, 3, 4),
+        (12, 9, 3, 5),
+        (13, 9, 4, 4),
+    ],
+)
+def test_quorum_and_fault_budgets_for_every_set_size(
+    count: int, quorum: int, liveness_budget: int, safety_budget: int
+) -> None:
+    _keys, validator_set = validator_fixture(
+        faults=(count - 1) // 3, validator_count=count
+    )
+    assert validator_set.fault_tolerance == (count - 1) // 3
+    assert validator_set.quorum == quorum
+    assert count - validator_set.quorum == liveness_budget
+    assert 2 * validator_set.quorum - count - 1 == safety_budget
+
+
+@pytest.mark.parametrize("count", [4, 5, 6, 7, 8, 9, 10])
+def test_declared_fault_tolerance_must_match_validator_count(count: int) -> None:
+    expected = (count - 1) // 3
+    _keys, validator_set = validator_fixture(faults=expected, validator_count=count)
+    for wrong in {expected - 1, expected + 1}:
+        if wrong < 0:
+            continue
+        with pytest.raises(ValueError, match=f"require fault_tolerance={expected}"):
+            replace(validator_set, fault_tolerance=wrong)
 
 
 @pytest.mark.parametrize("validator_count", [1, 2, 3])
@@ -184,7 +228,7 @@ def test_small_validator_sets_require_zero_declared_faults(
 ) -> None:
     _keys, validator_set = validator_fixture(faults=0, validator_count=validator_count)
 
-    with pytest.raises(ValueError, match="fewer than 4"):
+    with pytest.raises(ValueError, match="require fault_tolerance=0"):
         replace(validator_set, fault_tolerance=1)
 
 

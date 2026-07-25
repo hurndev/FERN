@@ -805,6 +805,154 @@ async def test_live_validator_epoch_migration_and_new_committee(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_live_validator_joins_via_remote_readiness_request(tmp_path: Path) -> None:
+    cluster = LiveCluster(tmp_path / "remote-readiness")
+    replacement: LiveValidator | None = None
+    try:
+        await cluster.start()
+        initial_message = _event(
+            cluster,
+            author=cluster.founder,
+            event_type="chat.message",
+            content={"text": "before admission", "channel": cluster.channel_id, "reply_to": None},
+        )
+        _assert_accepted(await cluster.submit(initial_message))
+        await cluster.wait_for_height(1)
+
+        replacement_key = Keypair.generate()
+        replacement_port = _unused_port()
+        replacement_url = f"ws://127.0.0.1:{replacement_port}"
+        replacement = LiveValidator(
+            index=4,
+            keypair=replacement_key,
+            url=replacement_url,
+            store_path=tmp_path / "remote-readiness" / "replacement.sqlite",
+            timing=cluster.timing,
+            trusted_operators={
+                validator.keypair.pubkey_hex: f"operator-{validator.index}"
+                for validator in cluster.validators
+            },
+            minimum_trusted_operators=2,
+        )
+        await replacement.start()
+
+        # The prospective validator applies its own WoT admission policy,
+        # verifies the full history, and signs readiness remotely.
+        readiness = await BFTWebSocketClient(replacement_url, timeout=30).request_readiness(
+            cluster.group, cluster.urls
+        )
+        assert readiness.validator == replacement_key.pubkey_hex
+        assert readiness.checkpoint_height == 1
+        assert readiness.from_epoch == 0 and readiness.to_epoch == 1
+
+        retained = [
+            Validator(
+                pubkey=validator.keypair.pubkey_hex,
+                url=validator.url,
+                operator=f"operator-{validator.index}",
+            )
+            for validator in cluster.validators[:3]
+        ]
+        next_set = make_validator_set(
+            [
+                *retained,
+                Validator(
+                    pubkey=replacement_key.pubkey_hex,
+                    url=replacement_url,
+                    operator="operator-4",
+                ),
+            ],
+            epoch=1,
+            fault_tolerance=1,
+        )
+        transition = _event(
+            cluster,
+            author=cluster.founder,
+            event_type="validator_update",
+            content={
+                "validators": [validator.to_dict() for validator in next_set.validators],
+                "fault_tolerance": 1,
+                "readiness": [readiness.to_dict()],
+            },
+        )
+        _assert_accepted(await cluster.submit(transition))
+        await cluster.wait_for_height(2, indices=(0, 1, 2))
+
+        # The new validator picks up the transition commit through verified
+        # catch-up and starts an engine because the new set activates its key.
+        for _ in range(200):
+            assert replacement.store is not None
+            if replacement.store.get_chain_head(cluster.group).height >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert replacement.store is not None
+        replacement_head = replacement.store.get_chain_head(cluster.group)
+        assert replacement_head.height == 2
+        assert replacement_head.state.validator_set.epoch == 1
+        assert cluster.group in (replacement.node.engines if replacement.node else {})
+
+        post_transition = _event(
+            cluster,
+            author=cluster.founder,
+            event_type="chat.message",
+            content={"text": "after admission", "channel": cluster.channel_id, "reply_to": None},
+        )
+        current_urls = [*cluster.urls[:3], replacement_url]
+        results = await asyncio.gather(
+            *(BFTWebSocketClient(url).submit_event(post_transition) for url in current_urls),
+            return_exceptions=True,
+        )
+        assert not [result for result in results if isinstance(result, BaseException)]
+        await cluster.wait_for_height(3, indices=(0, 1, 2))
+        for _ in range(200):
+            if replacement.store.get_chain_head(cluster.group).height >= 3:
+                break
+            await asyncio.sleep(0.02)
+        assert replacement.store.get_chain_head(cluster.group).height == 3
+    finally:
+        if replacement is not None and replacement.online:
+            await replacement.stop()
+        await cluster.close()
+
+
+@pytest.mark.asyncio
+async def test_five_validator_set_commits_and_tolerates_one_offline_validator(
+    tmp_path: Path,
+) -> None:
+    cluster = LiveCluster(tmp_path / "five-set", validator_count=5, faults=1)
+    try:
+        await cluster.start()
+        assert cluster.validator_set.quorum == 4
+
+        first = _event(
+            cluster,
+            author=cluster.founder,
+            event_type="chat.message",
+            content={"text": "five validators", "channel": cluster.channel_id, "reply_to": None},
+        )
+        _assert_accepted(await cluster.submit(first))
+        await cluster.wait_for_height(1)
+
+        # One unavailable validator: quorum 4 of 5 is still reachable, so the
+        # group keeps committing.
+        await cluster.validators[4].stop()
+        second = _event(
+            cluster,
+            author=cluster.founder,
+            event_type="chat.message",
+            content={"text": "one down", "channel": cluster.channel_id, "reply_to": None},
+        )
+        _assert_accepted(await cluster.submit(second, indices=(0, 1, 2, 3)))
+        await cluster.wait_for_height(2, indices=(0, 1, 2, 3))
+        for index in (0, 1, 2, 3):
+            head = _head(cluster, index)
+            assert head.height == 2
+            assert head.state.validator_set.quorum == 4
+    finally:
+        await cluster.close()
+
+
+@pytest.mark.asyncio
 async def test_client_syncs_full_live_history_after_multiple_blocks(tmp_path: Path) -> None:
     cluster = LiveCluster(tmp_path / "client-sync")
     client_store = BFTStore(tmp_path / "client.sqlite")

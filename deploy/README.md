@@ -2,7 +2,9 @@
 
 This directory contains Docker Compose projects for a FERN-BFT validator and
 the Bracken web client. They can be deployed independently. A production group
-normally uses `3f+1` validators on independently administered hosts; this stack
+normally uses four or more validators on independently administered hosts
+(4, 7, 10, … tolerate 1, 2, 3 faults; any size is accepted, with the fault
+count and quorum derived from the set size); this stack
 runs one validator identity per `deploy/validator` deployment. One to three
 validators are accepted only as unanimous `f=0` development/test groups; all
 clients warn because every validator is required for progress.
@@ -93,7 +95,8 @@ Initialization creates:
 Back up `validator.key` immediately and never replace it for an active validator.
 The public key is committed into every group's validator set. Losing it can
 remove that validator's vote and freeze any group that can no longer reach its
-derived quorum (all validators for a small set, or `2f+1` in standard mode).
+derived quorum (all validators for a small set, or more than two thirds of
+the set in standard mode).
 Copy the SQLite database consistently as well;
 it contains the durable vote and lock journal that prevents double signing
 after restart.
@@ -193,7 +196,9 @@ metadata endpoint through the CLI before creating a group:
 fern validator info wss://validator-a.example.com
 ```
 
-For production, create the group with exactly `3f+1` endpoints. For `f=1`:
+For production, create the group with four or more endpoints; the fault
+tolerance is derived from the count (4 tolerates 1, 7 tolerates 2). For a
+one-fault group:
 
 ```bash
 fern group create --name "My Group" --faults 1 \
@@ -249,7 +254,13 @@ fern group validator-update <group-key> \
   --faults 1 --readiness sync-ready.json
 ```
 
-If the group advances after preparation, generate readiness again. The
+Bracken administrators can skip the file handoff: `/validator-add
+wss://new-validator.example.com` asks the new validator to prepare remotely
+through the policy-gated `request_readiness` action and submits the update
+itself. The validator's configured trusted-host threshold still decides
+whether it accepts hosting; a validator with no matching trusted witnesses
+refuses the request. Either way,
+if the group advances after preparation, generate readiness again. The
 transition is invalid unless readiness covers exactly every newly added
 validator and the block immediately before the transition.
 

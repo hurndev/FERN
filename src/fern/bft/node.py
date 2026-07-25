@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from fern.bft.application import (
     ApplicationError,
@@ -58,6 +59,7 @@ Broadcast = Callable[[dict[str, object], ValidatorSet], Awaitable[None]]
 CommitListener = Callable[[Commit], Awaitable[None]]
 PendingListener = Callable[[Event, IngressReceipt], Awaitable[None]]
 Synchronize = Callable[[], Awaitable[object]]
+_AdmissionResult = TypeVar("_AdmissionResult")
 
 
 def _short(value: str, length: int = 12) -> str:
@@ -1186,6 +1188,18 @@ class ValidatorNode:
                 return await synchronize()
             finally:
                 self._start_group(group)
+
+    async def prepare_group_admission(
+        self, group: str, prepare: Callable[[], Awaitable[_AdmissionResult]]
+    ) -> _AdmissionResult:
+        """Serialize prospective-validator history preparation for one group.
+
+        Holding the group lock keeps the periodic catch-up path from racing
+        the admission sync while the group first appears in the store.
+        """
+
+        async with self._group_lock(group):
+            return await prepare()
 
     async def stop(self) -> None:
         await asyncio.gather(*(engine.stop() for engine in self.engines.values()))

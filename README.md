@@ -21,6 +21,8 @@ lost instead of choosing a recovery path that could fork finalized history.
   contract.
 - [architecture.md](architecture.md) describes the current system, consensus
   flow, trust boundaries and failure behavior.
+- [validator-hosting.md](validator-hosting.md) explains how validators host
+  new groups and how new validators are admitted to existing ones.
 - [python-architecture.md](python-architecture.md) maps those rules to the
   Python packages, validator runtime, CLI and Bracken boundary.
 - [tendermint-design.md](tendermint-design.md) is the architectural plan behind
@@ -44,13 +46,17 @@ lost instead of choosing a recovery path that could fork finalized history.
 - exact-checkpoint `SyncReady` admission for new validator epochs
 - Python CLI workflows and a browser-only Bracken client
 
-A standard validator set tolerating `f` Byzantine validators contains exactly
-`3f+1` validators and commits with `2f+1` votes. Groups may instead use one,
-two, or three validators in nonstandard unanimous mode: they declare `f=0` and
-require every validator's vote. CLI and Bracken users are always warned while
-participating in such a group. This mode is intended for development and small
-tests, has no claimed Byzantine fault tolerance, and halts when any validator
-is unavailable.
+A validator set may contain any number of validators from 1 to 100; the
+fault count `f` and quorum `q` are derived from the validator count `n`
+(`f = floor((n-1)/3)`, `q = floor(2n/3) + 1`). A four-validator group
+tolerates one unavailable or Byzantine validator and commits with three
+votes; seven validators tolerate two, ten tolerate three. Sizes between
+those steps (5, 6, 8, 9, …) keep the same fault tolerance and add
+fork-safety margin — see [validator-set-sizes.md](validator-set-sizes.md).
+Groups of one to three validators run in unanimous mode (`f=0`, `q=n`):
+every validator's vote is required, so they halt when any validator is
+unavailable and carry no claimed Byzantine fault tolerance. CLI and Bracken
+users are always warned while participating in such a group.
 
 ## Install
 
@@ -131,13 +137,22 @@ alias and prints a rename warning.
 
 ## Multi-validator groups
 
-Start one independently keyed validator process per endpoint. You may pass one
-to three `--validator` options for unanimous `f=0` testing, or exactly `3f+1`
-endpoints for standard BFT operation. For example, an `f=1` group uses four
-validators and commits with three. Small-set groups warn in both the CLI and
-Bracken because every configured validator is required for progress.
+Start one independently keyed validator process per endpoint. Any number of
+endpoints is accepted: one to three create a unanimous `f=0` test group, and
+four or more create a standard BFT group whose fault tolerance is derived
+from its size (4 tolerates 1, 7 tolerates 2, 10 tolerates 3; sizes in
+between add fork-safety margin rather than extra tolerance). For example, a
+four-validator group commits with three votes. Small-set groups warn in both
+the CLI and Bracken because every configured validator is required for
+progress.
 
-Adding a new validator is a two-step, exact-checkpoint workflow. On the new
+Adding a new validator is an exact-checkpoint workflow. From Bracken it is
+one step: a group admin runs `/validator-add <new-validator-url>`. The new
+validator applies its own admission policy (it refuses unless enough locally
+trusted current validators already host the group), downloads and verifies
+the full history, signs its `SyncReady` proof, and the client submits the
+validator-set update — retrying once with fresh readiness if the group
+advanced in between. The equivalent CLI workflow is two steps. On the new
 validator:
 
 ```bash
