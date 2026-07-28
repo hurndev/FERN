@@ -97,7 +97,7 @@ export function SettingsModal({
           <span className={styles.profileLabel}>Private Key</span>
           <div className={styles.profileValue}>
             <span className={styles.privateKeyValue}>
-              {showPrivateKey ? privateKey : '********************************'}
+              {showPrivateKey ? privateKey : '*'.repeat(64)}
             </span>
             <button
               className={styles.iconBtn}

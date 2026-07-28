@@ -1,8 +1,8 @@
 import { useState } from 'react'
+import { Avatar } from './Avatar'
 import { FernLogo } from './FernLogo'
 import { truncateId } from '../fern/utils'
 import type { GroupEntry, ValidatorConnection } from '../hooks/useBracken'
-import type { OperatorNotice } from '../fern/validator'
 import type { Channel } from '../fern/state'
 import styles from '../styles/components.module.css'
 
@@ -11,7 +11,6 @@ interface Props {
   activeGroup: string | null
   identityPubkey: string
   validatorConns: ValidatorConnection[]
-  peerNotices: Record<string, OperatorNotice>
   channels: Channel[]
   selectedChannel: string
   onSelectGroup: (pubkey: string) => void
@@ -27,7 +26,6 @@ export function Sidebar({
   activeGroup,
   identityPubkey,
   validatorConns,
-  peerNotices,
   channels,
   selectedChannel,
   onSelectGroup,
@@ -49,15 +47,6 @@ export function Sidebar({
       return next
     })
   }
-
-  const connectedCount = validatorConns.filter((connection) => connection.connected).length
-  const totalValidators = validatorConns.length
-  const dotClass =
-    connectedCount === totalValidators && totalValidators > 0
-      ? styles.connDotGreen
-      : connectedCount > 0
-        ? styles.connDotAmber
-        : styles.connDotRed
 
   return (
     <div className={styles.sidebar}>
@@ -126,7 +115,7 @@ export function Sidebar({
 
       <div className={styles.sidebarFooter}>
         <div className={styles.identityRow} onClick={onIdentityClick}>
-          <div className={`${styles.connDot} ${dotClass}`} />
+          <Avatar value={identityPubkey} size={18} />
           <span className="mono">{truncateId(identityPubkey)}</span>
         </div>
         <button className={styles.helpBtn} onClick={onHelpClick} title="Help">

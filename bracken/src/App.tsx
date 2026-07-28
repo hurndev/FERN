@@ -341,7 +341,6 @@ export default function App() {
           activeGroup={bracken.activeGroup}
           identityPubkey={bracken.identity.publicKey}
           validatorConns={bracken.validatorConns}
-          peerNotices={bracken.peerNotices}
           channels={channels}
           selectedChannel={selectedChannel}
           onSelectGroup={(pk) => {
