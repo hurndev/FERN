@@ -465,6 +465,9 @@ The React layer consumes derived pending/finalized events and chain metadata.
 For the active group, one abortable supervisor per validator maintains the
 WebSocket subscription. Reconnect uses bounded exponential backoff and performs
 a verified catch-up sync before changing the endpoint back to connected.
+A "Minimum required connections" setting limits publishing to a random `f+1`
+subset while keeping passive connections to the rest for status monitoring;
+if an active validator disconnects a replacement is picked automatically.
 `ChainViewer.tsx` replaces the old graph visualization. IndexedDB upgrading to
 v3 clears legacy event objects because DAG event IDs and state are incompatible
 with `fern-bft-1`.

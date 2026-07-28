@@ -7,8 +7,10 @@ interface Props {
   pubkey: string
   privateKey: string
   currentNickname: string | null
+  fPlusOneMode: boolean
   onClose: () => void
   onSetNickname?: (name: string) => Promise<void>
+  onSetFPlusOneMode?: (value: boolean) => Promise<void>
   onLogout?: () => Promise<void>
 }
 
@@ -16,8 +18,10 @@ export function SettingsModal({
   pubkey,
   privateKey,
   currentNickname,
+  fPlusOneMode,
   onClose,
   onSetNickname,
+  onSetFPlusOneMode,
   onLogout,
 }: Props) {
   const overlayHandlers = useDefiniteOverlayClick(onClose)
@@ -136,6 +140,18 @@ export function SettingsModal({
             </button>
           </div>
           {nicknameError && <div className={styles.formError}>{nicknameError}</div>}
+        </div>
+        <div className={styles.profileField}>
+          <label className={styles.settingToggle}>
+            <input
+              type="checkbox"
+              checked={fPlusOneMode}
+              onChange={(e) => onSetFPlusOneMode?.(e.target.checked)}
+            />
+            <span className={styles.settingToggleLabel}>
+              Only connect to f+1 validators for faster connections and lower bandwidth.
+            </span>
+          </label>
         </div>
         <div className={styles.logoutSection}>
           <button className={styles.dangerBtn} onClick={handleLogout} disabled={busy}>

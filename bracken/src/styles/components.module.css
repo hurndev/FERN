@@ -1947,6 +1947,34 @@
   background: var(--text-ghost);
 }
 
+.settingToggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.settingToggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.settingToggleLabel {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.settingDesc {
+  font-size: var(--text-xs);
+  color: var(--text-ghost);
+  line-height: 1.4;
+  margin-top: 2px;
+  padding-left: 26px;
+}
+
 .logoutSection {
   padding-top: 8px;
   border-top: 1px solid var(--border);

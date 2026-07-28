@@ -110,14 +110,15 @@ interface ValidatorDrawerProps {
   validatorConns: ValidatorConnection[]
   validatorSet?: ValidatorSet | null
   peerNotices?: Record<string, OperatorNotice>
+  activeUrls?: Set<string>
   onFetchStatus?: (url: string) => Promise<ValidatorStatus | null>
   onFetchNotice?: (url: string) => Promise<OperatorNotice | null>
   onClose: () => void
 }
 
 function FaultTolerancePanel({
-  validatorSet, validatorConns, connected,
-}: { validatorSet: ValidatorSet | null; validatorConns: ValidatorConnection[]; connected: number }) {
+  validatorSet, validatorConns, connected, onlineCount,
+}: { validatorSet: ValidatorSet | null; validatorConns: ValidatorConnection[]; connected: number; onlineCount?: number }) {
   if (!validatorSet) {
     return (
       <div className={`${styles.ftPanel} ${styles.ftSync}`}>
@@ -133,12 +134,13 @@ function FaultTolerancePanel({
   const f = validatorSet.fault_tolerance
   const quorum = validatorQuorum(validatorSet)
   const small = isSmallUnanimousValidatorSet(validatorSet)
-  const halted = connected < quorum
-  const degraded = !halted && connected < n
+  const live = onlineCount ?? connected
+  const halted = live < quorum
+  const degraded = !halted && live < n
   const variant = halted ? styles.ftHalted : degraded ? styles.ftDegraded : styles.ftOk
   const word = halted ? 'Halted' : degraded ? 'Degraded' : 'Operational'
-  const down = n - connected
-  const headroom = Math.max(0, connected - quorum)
+  const down = n - live
+  const headroom = Math.max(0, live - quorum)
 
   let note: ReactNode
   if (halted) {
@@ -343,9 +345,10 @@ function ValidatorInfoPopup({
 }
 
 export function ValidatorDrawer({
-  validatorConns, validatorSet = null, peerNotices, onFetchStatus, onFetchNotice, onClose,
+  validatorConns, validatorSet = null, peerNotices, activeUrls, onFetchStatus, onFetchNotice, onClose,
 }: ValidatorDrawerProps) {
   const connected = validatorConns.filter((c) => c.connected).length
+  const onlineCount = connected
   const [infoUrl, setInfoUrl] = useState<string | null>(null)
   const infoConn = infoUrl ? validatorConns.find((c) => c.url === infoUrl) ?? null : null
   return (
@@ -361,6 +364,7 @@ export function ValidatorDrawer({
             validatorSet={validatorSet}
             validatorConns={validatorConns}
             connected={connected}
+            onlineCount={onlineCount}
           />
           {validatorConns.map((conn) => {
             const rowNotice = conn.notice || (conn.pubkey && peerNotices?.[conn.pubkey])
@@ -395,7 +399,10 @@ export function ValidatorDrawer({
                       : styles.valStatusOff
                 }`}
               >
-                {conn.connected ? 'connected' : conn.reconnecting ? 'reconnecting' : 'offline'}
+                {conn.connected && (!activeUrls || activeUrls.size === 0 || activeUrls.has(conn.url)) ? 'active'
+                  : conn.connected ? 'connected'
+                    : conn.reconnecting ? 'reconnecting'
+                      : 'offline'}
               </span>
             </div>
           )})}

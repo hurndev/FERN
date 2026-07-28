@@ -84,6 +84,10 @@ function sameStrings(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
+function propagationThreshold(n: number): number {
+  return Math.floor((n - 1) / 3) + 1
+}
+
 async function initialHead(genesis: FernEvent): Promise<LocalHead> {
   const result = deriveGroupState([genesis])
   if (!result.state) throw new Error('Invalid BFT genesis state')
@@ -173,8 +177,33 @@ export function useBracken() {
   const [loading, setLoading] = useState(true)
   const [messageDeliveries, setMessageDeliveries] = useState<Record<string, MessageDelivery>>({})
   const [peerNotices, setPeerNotices] = useState<Record<string, OperatorNotice>>({})
+  const [fPlusOneMode, setFPlusOneModeState] = useState(false)
   const clientsRef = useRef<Map<string, ValidatorClient>>(new Map())
   const commitQueues = useRef<Map<string, Promise<void>>>(new Map())
+  const [activeUrls, setActiveUrls] = useState<Set<string>>(new Set())
+
+  const recomputeActive = useCallback((states: ValidatorConnection[]) => {
+    if (!fPlusOneMode) return
+    const connected = states.filter((c) => c.connected).map((c) => c.url)
+    const threshold = propagationThreshold(states.length || 1)
+    setActiveUrls((current) => {
+      const next = new Set(current)
+      for (const url of [...next]) {
+        if (!connected.includes(url)) next.delete(url)
+      }
+      const pool = connected.filter((u) => !next.has(u))
+      while (next.size < threshold && pool.length > 0) {
+        const i = Math.floor(Math.random() * pool.length)
+        next.add(pool[i])
+        pool.splice(i, 1)
+      }
+      return next
+    })
+  }, [fPlusOneMode])
+
+  useEffect(() => {
+    recomputeActive(connStates)
+  }, [connStates, recomputeActive])
 
   const validatorConns = useMemo(() => {
     const entry = groups.find((group) => group.pubkey === activeGroup)
@@ -373,6 +402,7 @@ export function useBracken() {
       if (storedGroups.some((group) => !group.validators)) void setMeta('groups', savedGroups)
       setGroups(savedGroups)
       setDefaultNicknameState(await getMeta<string>('defaultNickname') ?? null)
+      setFPlusOneModeState(await getMeta<boolean>('fPlusOneMode') === true)
       setActiveGroup(savedGroups[0]?.pubkey ?? null)
       setLoading(false)
       log.info('client', 'local client state loaded', {
@@ -408,7 +438,7 @@ export function useBracken() {
       if (signal.aborted) return
       setConnStates((current) => {
         const previous = current.find((connection) => connection.url === url)
-        return [
+        const next = [
           ...current.filter((connection) => connection.url !== url),
           {
             url,
@@ -419,6 +449,7 @@ export function useBracken() {
             ...value,
           },
         ]
+        return next
       })
     }
 
@@ -560,7 +591,7 @@ export function useBracken() {
       clients.clear()
       setConnStates([])
     }
-  }, [activeGroup, groups, applyCommit, refresh, syncEntry])
+  }, [activeGroup, groups, fPlusOneMode, applyCommit, refresh, syncEntry])
 
   const importIdentity = useCallback(async (seed: string) => {
     const keypair = keypairFromSeed(seed)
@@ -579,19 +610,26 @@ export function useBracken() {
     await setMeta('defaultNickname', name)
   }, [])
 
+  const setFPlusOneMode = useCallback(async (value: boolean) => {
+    setFPlusOneModeState(value)
+    await setMeta('fPlusOneMode', value)
+  }, [])
+
   const publish = useCallback(async (event: FernEvent, entry: GroupEntry) => {
     log.info('ingress', 'publishing event', {
       group: shortId(event.group), event: shortId(event.id), type: event.type,
       author: shortId(event.author), seq: event.seq, validators: entry.validators.length,
     })
+    const picked = fPlusOneMode ? [...activeUrls] : entry.validators
+    const targets = picked.length > 0 ? picked : entry.validators
     setMessageDeliveries((current) => ({
-      ...current, [event.id]: { state: 'sending', ok: 0, total: entry.validators.length },
+      ...current, [event.id]: { state: 'sending', ok: 0, total: targets.length },
     }))
     let ok = 0
     let error = ''
     const localState = deriveGroupState(await getGroupEvents(event.group)).state
     if (!localState) throw new Error('Cannot publish without verified group state')
-    await Promise.all(entry.validators.map(async (url) => {
+    await Promise.all(targets.map(async (url) => {
       let client = clientsRef.current.get(url)
       let ephemeral = false
       try {
@@ -621,7 +659,7 @@ export function useBracken() {
       } finally { if (ephemeral) await client?.close() }
     }))
     if (ok > 0) await putPendingEvent(event)
-    const total = entry.validators.length
+    const total = targets.length
     const majorityRejected = ok > 0 && ok * 2 < total
     setMessageDeliveries((current) => ({
       ...current,
@@ -632,7 +670,7 @@ export function useBracken() {
     await refresh(event.group)
     log.info('ingress', 'event publication complete', {
       group: shortId(event.group), event: shortId(event.id), receipts: ok,
-      validators: entry.validators.length, propagationConfirmed:
+      validators: targets.length, propagationConfirmed:
         ok >= localState.validatorSet.fault_tolerance + 1,
     })
     return { ok, total, error: error || undefined, majorityRejected }
@@ -946,5 +984,6 @@ export function useBracken() {
     joinGroup, sendMessage, retryMessage, createGroup, adminAction,
     setNickname, setDefaultNickname, leaveGroup, updateValidatorSet,
     addValidatorByUrl, removeValidatorByUrl, fetchValidatorStatus, fetchValidatorNotice,
+    fPlusOneMode, setFPlusOneMode, activeUrls,
   }
 }

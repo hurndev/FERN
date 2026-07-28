@@ -311,17 +311,17 @@ export default function App() {
     )
   }
 
-  const totalValidators = bracken.validatorConns.length
+  const totalValidators = bracken.state?.validatorSet.validators.length
     || activeGroupEntry?.validators.length
     || 0
-  const connectedValidators = bracken.validatorConns.filter((connection) => connection.connected).length
+  const onlineValidators = bracken.validatorConns.filter((connection) => connection.connected).length
   const validatorQuorum = bracken.state
     ? quorumFor(bracken.state.validatorSet)
     : totalValidators
   const validatorCountClass =
-    validatorQuorum > 0 && connectedValidators > validatorQuorum
+    validatorQuorum > 0 && onlineValidators > validatorQuorum
       ? styles.validatorCountGreen
-      : validatorQuorum > 0 && connectedValidators === validatorQuorum
+      : validatorQuorum > 0 && onlineValidators === validatorQuorum
         ? styles.validatorCountAmber
         : styles.validatorCountRed
   const canPost =
@@ -398,9 +398,9 @@ export default function App() {
                 <button
                   className={`${styles.validatorCountBadge} ${validatorCountClass}`}
                   onClick={() => setShowValidators(true)}
-                  title={`${connectedValidators} of ${totalValidators} validator${totalValidators === 1 ? '' : 's'} connected`}
+                  title={`${onlineValidators} of ${totalValidators} validator${totalValidators === 1 ? '' : 's'} online`}
                 >
-                  {connectedValidators}/{totalValidators}
+                  {onlineValidators}/{totalValidators}
                 </button>
               </div>
             </div>
@@ -531,6 +531,7 @@ export default function App() {
           validatorConns={bracken.validatorConns}
           validatorSet={bracken.state?.validatorSet ?? null}
           peerNotices={bracken.peerNotices}
+          activeUrls={bracken.activeUrls}
           onFetchStatus={bracken.fetchValidatorStatus}
           onFetchNotice={bracken.fetchValidatorNotice}
           onClose={() => setShowValidators(false)}
@@ -559,10 +560,12 @@ export default function App() {
           pubkey={bracken.identity.publicKey}
           privateKey={bracken.identity.seed}
           currentNickname={bracken.defaultNickname ?? nicknames.get(bracken.identity.publicKey) ?? null}
+          fPlusOneMode={bracken.fPlusOneMode}
           onClose={() => setShowSettings(false)}
           onSetNickname={async (name) => {
             assertPublished(await bracken.setNickname(name))
           }}
+          onSetFPlusOneMode={bracken.setFPlusOneMode}
           onLogout={bracken.logout}
         />
       )}

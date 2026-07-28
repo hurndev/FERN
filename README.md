@@ -196,6 +196,9 @@ verification or consensus authorization.
 
 Bracken lives in `bracken/`. It signs in the browser, stores verified commits
 and pending events in IndexedDB, and connects directly to validator WebSockets.
+In Settings, "Minimum required connections" limits publishing to a random
+`f+1` subset of validators while keeping passive connections to the rest for
+status monitoring — useful for large groups.
 
 ```bash
 cd bracken
