@@ -348,6 +348,25 @@ hash, state/history roots, epoch, validator set and logical byte count. Clients
 reject a status whose signer is not in its claimed active set and report any
 reachable checkpoint that conflicts with the locally verified chain.
 
+Validators may also serve a signed `operator_notice` — a short
+message-of-the-day from the operator ("maintenance Tuesday", "shutting down
+in two weeks") — inside the `metadata` response:
+
+```text
+["operator_notice", validator, text, ts, expires]
+```
+
+An operator notice is a side-channel object. It is never a consensus event:
+it does not appear in a block, is not validated against group state, and
+carries no authority about the group. Clients display it only while
+`expires` is in the future and only after verifying the validator's
+signature, and attribute it to the serving validator's identity.
+
+Validators periodically fetch metadata from their consensus peers and
+include verified peer notices in their own `metadata` response under
+`peer_notices`. A client connecting to any one validator therefore sees
+every active notice across the set.
+
 ## 12. Safety boundary
 
 In standard mode, while at most `2q - n - 1` validators in an epoch are

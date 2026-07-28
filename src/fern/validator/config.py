@@ -75,6 +75,9 @@ class ValidatorConfig:
     minimum_trusted_operators: int = 2
     maximum_group_logical_bytes: int | None = 10 * 1024 * 1024 * 1024
     maximum_message_bytes: int = 4 * 1024 * 1024
+    notice_text: str = ""
+    notice_ts: int = 0
+    notice_expires: int = 0
 
 
 def default_config_path() -> Path:
@@ -208,6 +211,11 @@ def _config_to_dict(config: ValidatorConfig) -> dict[str, object]:
             ],
         },
         "maximum_message_bytes": config.maximum_message_bytes,
+        "notice": {
+            "text": config.notice_text,
+            "ts": config.notice_ts,
+            "expires": config.notice_expires,
+        },
     }
 
 
@@ -233,6 +241,9 @@ def _parse_config(data: dict[str, Any]) -> ValidatorConfig:
             )
         )
     raw_maximum = admission.get("maximum_group_logical_bytes", 10 * 1024 * 1024 * 1024)
+    notice = data.get("notice", {})
+    if not isinstance(notice, dict):
+        raise ValueError("notice must be an object")
     return ValidatorConfig(
         name=str(data.get("name", "FERN Validator")),
         description=str(data.get("description", "A FERN-BFT validator")),
@@ -257,6 +268,9 @@ def _parse_config(data: dict[str, Any]) -> ValidatorConfig:
         minimum_trusted_operators=int(admission.get("minimum_trusted_operators", 2)),
         maximum_group_logical_bytes=int(raw_maximum) if raw_maximum is not None else None,
         maximum_message_bytes=int(data.get("maximum_message_bytes", 4 * 1024 * 1024)),
+        notice_text=str(notice.get("text", "")),
+        notice_ts=int(notice.get("ts", 0)),
+        notice_expires=int(notice.get("expires", 0)),
     )
 
 

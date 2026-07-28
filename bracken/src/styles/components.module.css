@@ -1685,6 +1685,65 @@
   line-height: 1.45;
 }
 
+.valNoticeBadge {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--gap);
+  color: var(--gap);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebarNoticeBadge {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--gap);
+  color: var(--gap);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.valNotice {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--gap-bg);
+  border: 1px solid var(--gap);
+}
+
+.valNoticeHead {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--gap);
+  margin-bottom: 4px;
+}
+
+.valNoticeText {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.valNoticeMeta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-ghost);
+}
+
 .modBadge {
   display: inline-block;
   padding: 1px 6px;

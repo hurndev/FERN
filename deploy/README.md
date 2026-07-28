@@ -299,6 +299,23 @@ starting the validator. Restoring an old database while retaining a newer copy
 elsewhere risks operating from stale consensus safety state; never run two
 instances with the same validator key.
 
+## Operator notices
+
+To show a short message to clients connecting to the validator (planned
+maintenance, an upcoming shutdown), set an operator notice:
+
+```bash
+docker exec fern-validator fern-validator --config /data/config.json \
+  notice "Down for maintenance Tuesday 14:00-16:00 UTC" --expires 2d
+```
+
+The running validator serves it on its next metadata read; no restart is
+needed. Bracken displays a `!` badge on the validator and the notice in its
+info panel, and `fern validator info wss://validator.example.com` prints it.
+Clear it early with `notice --clear`. Notices are signed side-channel
+objects: they never touch consensus or group history, and stop being served
+when they expire.
+
 ## Updating and logs
 
 ```bash

@@ -4,6 +4,7 @@ import type { GroupState } from '../fern/state'
 import type { ValidatorSet } from '../fern/bft'
 import { isSmallUnanimousValidatorSet, validatorQuorum } from '../fern/bft'
 import type { ValidatorStatus } from '../fern/validator'
+import type { OperatorNotice } from '../fern/validator'
 import type { ValidatorConnection } from '../hooks/useBracken'
 import { useDefiniteOverlayClick } from '../hooks/useDefiniteOverlayClick'
 import { ProfilePopup } from './ProfilePopup'
@@ -108,7 +109,9 @@ export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onA
 interface ValidatorDrawerProps {
   validatorConns: ValidatorConnection[]
   validatorSet?: ValidatorSet | null
+  peerNotices?: Record<string, OperatorNotice>
   onFetchStatus?: (url: string) => Promise<ValidatorStatus | null>
+  onFetchNotice?: (url: string) => Promise<OperatorNotice | null>
   onClose: () => void
 }
 
@@ -194,10 +197,12 @@ function formatBytes(n: number): string {
 }
 
 function ValidatorInfoPopup({
-  conn, onFetchStatus, onClose,
+  conn, peerNotices, onFetchStatus, onFetchNotice, onClose,
 }: {
   conn: ValidatorConnection
+  peerNotices?: Record<string, OperatorNotice>
   onFetchStatus?: (url: string) => Promise<ValidatorStatus | null>
+  onFetchNotice?: (url: string) => Promise<OperatorNotice | null>
   onClose: () => void
 }) {
   const overlayHandlers = useDefiniteOverlayClick(onClose)
@@ -205,8 +210,10 @@ function ValidatorInfoPopup({
   const [loading, setLoading] = useState(() => Boolean(onFetchStatus))
   const [tried, setTried] = useState(false)
   const [copied, setCopied] = useState<string | null>(null)
+  const [freshNotice, setFreshNotice] = useState<OperatorNotice | null | undefined>(undefined)
   const status = fetched ?? conn.status
   const stale = tried && !fetched && Boolean(conn.status)
+  const notice = freshNotice !== undefined ? freshNotice : conn.notice ?? peerNotices?.[conn.pubkey] ?? null
 
   useEffect(() => {
     if (!onFetchStatus) return
@@ -219,6 +226,14 @@ function ValidatorInfoPopup({
     })
     return () => { alive = false }
   }, [conn.url, onFetchStatus])
+  useEffect(() => {
+    if (!onFetchNotice) return
+    let alive = true
+    onFetchNotice(conn.url).then((fresh) => {
+      if (alive) setFreshNotice(fresh)
+    })
+    return () => { alive = false }
+  }, [conn.url, onFetchNotice])
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', onKey)
@@ -271,6 +286,15 @@ function ValidatorInfoPopup({
         </div>
 
         <div className={styles.valModalBody}>
+          {notice && (
+            <div className={styles.valNotice}>
+              <div className={styles.valNoticeHead}>Operator notice</div>
+              <div className={styles.valNoticeText}>{notice.text}</div>
+              <div className={styles.valNoticeMeta}>
+                Until {new Date(notice.expires * 1000).toLocaleString()}
+              </div>
+            </div>
+          )}
           <div className={styles.valCard}>
             <div className={styles.valSectionHeading}>Connection</div>
             {conn.pubkey ? (
@@ -319,7 +343,7 @@ function ValidatorInfoPopup({
 }
 
 export function ValidatorDrawer({
-  validatorConns, validatorSet = null, onFetchStatus, onClose,
+  validatorConns, validatorSet = null, peerNotices, onFetchStatus, onFetchNotice, onClose,
 }: ValidatorDrawerProps) {
   const connected = validatorConns.filter((c) => c.connected).length
   const [infoUrl, setInfoUrl] = useState<string | null>(null)
@@ -338,20 +362,26 @@ export function ValidatorDrawer({
             validatorConns={validatorConns}
             connected={connected}
           />
-          {validatorConns.map((conn) => (
+          {validatorConns.map((conn) => {
+            const rowNotice = conn.notice || (conn.pubkey && peerNotices?.[conn.pubkey])
+            return (
             <div
               key={conn.url}
               className={styles.valRow}
               title={`View ${conn.url}`}
               onClick={() => setInfoUrl(conn.url)}
             >
-              <span
-                className={`${styles.valDot} ${
-                  conn.connected ? styles.valDotOn
-                    : conn.reconnecting ? styles.valDotRecon
-                      : styles.valDotOff
-                }`}
-              />
+              {rowNotice ? (
+                <span className={styles.valNoticeBadge} title="Operator notice posted">!</span>
+              ) : (
+                <span
+                  className={`${styles.valDot} ${
+                    conn.connected ? styles.valDotOn
+                      : conn.reconnecting ? styles.valDotRecon
+                        : styles.valDotOff
+                  }`}
+                />
+              )}
               <div className={styles.valMain}>
                 <span className={styles.valUrl}>{conn.url}</span>
                 {conn.pubkey && (
@@ -368,13 +398,15 @@ export function ValidatorDrawer({
                 {conn.connected ? 'connected' : conn.reconnecting ? 'reconnecting' : 'offline'}
               </span>
             </div>
-          ))}
+          )})}
         </div>
       </div>
       {infoConn && (
         <ValidatorInfoPopup
           conn={infoConn}
+          peerNotices={peerNotices}
           onFetchStatus={onFetchStatus}
+          onFetchNotice={onFetchNotice}
           onClose={() => setInfoUrl(null)}
         />
       )}

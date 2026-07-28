@@ -366,6 +366,11 @@ Current actions are:
 - `request_readiness` for policy-gated remote validator preparation;
 - `peer` for signed consensus and gossip messages.
 
+`metadata` may include an optional signed `operator_notice` from the
+validator operator and `peer_notices` — verified notices from other
+validators in the set (see bft-spec.md §11). Both are non-authoritative
+side-channel messages that never touch consensus.
+
 Subscriptions push `pending_event` and `commit` messages. Request size and
 per-action rate limits bound obvious ingress abuse. Genesis auto-hosting is a
 development convenience and can be disabled with `fern-validator init --closed`.

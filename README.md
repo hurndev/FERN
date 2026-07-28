@@ -98,6 +98,21 @@ fern-validator --verbose
 fern-validator run --verbose
 ```
 
+To show a short message to clients that connect to your validator (planned
+maintenance, an upcoming shutdown), set an operator notice:
+
+```bash
+fern-validator notice "Down for maintenance Tuesday 14:00-16:00 UTC" --expires 2d
+fern-validator notice            # show the active notice
+fern-validator notice --clear    # remove it early
+```
+
+A running validator serves it on its next metadata read, with no restart.
+Bracken shows a `!` badge on the validator and the notice in its info panel;
+`fern validator info <url>` prints it. Notices are signed side-channel
+objects: they never touch consensus or group history, and stop being served
+when they expire.
+
 In another terminal, create an identity and group:
 
 ```bash

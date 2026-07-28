@@ -83,6 +83,11 @@ implementation chooses one side of an open design question.
   the stale case detectable rather than dangerous). The action is
   rate-limited at 10 requests per IP per minute because it triggers a full
   verified history download.
+- Operator notices (message-of-the-day) are signed side-channel objects
+  served in the `metadata` response. They expire, are verified against
+  the serving validator's key, and clients display them with a badge in
+  the validator info panel. Permanent announcements go through ordinary
+  admin chat messages.
 - The group freezes if the active epoch loses quorum. Catastrophic owner or
   admin recovery is not implemented because it would weaken finalized safety.
 - Logical history size is the exact cumulative UTF-8 canonical byte count of

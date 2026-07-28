@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
+import time
 
 import pytest
 
 from fern.bft.node import ConsensusTiming, ValidatorNode
 from fern.bft.admission import prepare_validator_history
 from fern.bft.client import sync_from_validators
+from fern.bft.notices import OperatorNotice, verify_operator_notice
 from fern.bft.store import BFTStore
 from fern.bft.websocket import BFTWebSocketClient, ServerMetadata, ValidatorServer
 from fern.crypto.keys import Keypair
+from fern.validator.config import ValidatorConfig, save_config
 from tests.bft.helpers import genesis_fixture, message_fixture, validator_fixture
 
 
@@ -211,3 +215,224 @@ async def test_request_readiness_policy_gated_remote_preparation(tmp_path) -> No
             await node.stop()
         for candidate_store in (host_store, trusted_store, untrusted_store):
             candidate_store.close()
+
+
+@pytest.mark.asyncio
+async def test_metadata_serves_signed_operator_notice(tmp_path) -> None:
+    keys, _validator_set = validator_fixture(faults=0)
+    config_path = tmp_path / "config.json"
+    key_path = tmp_path / "validator.key"
+    key_path.write_text(keys[0].privkey_hex, encoding="utf-8")
+    now = int(time.time())
+
+    def write_notice(text: str, expires: int, stamp: int) -> None:
+        save_config(
+            ValidatorConfig(
+                store=str(tmp_path / "server.sqlite"),
+                key_file=str(key_path),
+                notice_text=text,
+                notice_ts=now,
+                notice_expires=expires,
+            ),
+            config_path,
+        )
+        # Distinct mtimes so the server's change detection fires even on
+        # filesystems with coarse timestamp granularity.
+        os.utime(config_path, (stamp, stamp))
+
+    write_notice("Down for maintenance Tuesday", now + 3600, now + 10)
+
+    store = BFTStore(tmp_path / "server.sqlite")
+    timing = ConsensusTiming(
+        block_interval=0.02,
+        observation_timeout=0.02,
+        observation_timeout_delta=0.0,
+        proposal_timeout=0.02,
+        proposal_timeout_delta=0.0,
+        prevote_timeout=0.02,
+        prevote_timeout_delta=0.0,
+        precommit_timeout=0.02,
+        precommit_timeout_delta=0.0,
+        round_backoff=0.01,
+    )
+    node = ValidatorNode(keypair=keys[0], store=store, timing=timing)
+    port = _unused_port()
+    server = ValidatorServer(
+        node=node,
+        metadata=ServerMetadata(name="test", description="", pubkey=keys[0].pubkey_hex),
+        host="127.0.0.1",
+        port=port,
+        notice_file=config_path,
+    )
+    shutdown = asyncio.Event()
+    task = asyncio.create_task(server.run(shutdown))
+    client = BFTWebSocketClient(f"ws://127.0.0.1:{port}")
+    metadata: dict[str, object] = {}
+    for _ in range(100):
+        try:
+            metadata = await client.metadata()
+            break
+        except OSError:
+            await asyncio.sleep(0.01)
+
+    try:
+        # An active notice is served, signed by the validator key.
+        raw_notice = metadata.get("notice")
+        assert isinstance(raw_notice, dict)
+        notice = OperatorNotice.from_dict(raw_notice)
+        assert notice.validator == keys[0].pubkey_hex
+        assert notice.text == "Down for maintenance Tuesday"
+        assert verify_operator_notice(notice)
+
+        # An expired notice is not served.
+        write_notice("Down for maintenance Tuesday", now - 10, now + 20)
+        metadata = await client.metadata()
+        assert "notice" not in metadata
+
+        # A replaced notice is picked up without a restart.
+        write_notice("Back up again", now + 3600, now + 30)
+        metadata = await client.metadata()
+        raw_notice = metadata.get("notice")
+        assert isinstance(raw_notice, dict)
+        assert OperatorNotice.from_dict(raw_notice).text == "Back up again"
+    finally:
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=1.0)
+        await node.stop()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_peer_notice_aggregation(tmp_path) -> None:
+    """A validator collects verified notices from its consensus peers."""
+
+    keys, base_validator_set = validator_fixture(faults=0, validator_count=2)
+    now = int(time.time())
+
+    port_a = _unused_port()
+    port_b = _unused_port()
+
+    # Update validator URLs to match the actual server ports.
+    from fern.bft.validators import Validator, make_validator_set
+
+    validator_set = make_validator_set(
+        [
+            Validator(pubkey=keys[0].pubkey_hex, url=f"ws://127.0.0.1:{port_a}"),
+            Validator(pubkey=keys[1].pubkey_hex, url=f"ws://127.0.0.1:{port_b}"),
+        ],
+        epoch=0,
+        fault_tolerance=0,
+    )
+
+    # Validator A has a notice.
+    config_a_path = tmp_path / "config_a.json"
+    key_a_path = tmp_path / "key_a"
+    key_a_path.write_text(keys[0].privkey_hex, encoding="utf-8")
+    save_config(
+        ValidatorConfig(
+            store=str(tmp_path / "a.sqlite"),
+            key_file=str(key_a_path),
+            notice_text="Validator A maintenance",
+            notice_ts=now,
+            notice_expires=now + 3600,
+        ),
+        config_a_path,
+    )
+
+    # Validator B has no notice.
+    config_b_path = tmp_path / "config_b.json"
+    key_b_path = tmp_path / "key_b"
+    key_b_path.write_text(keys[1].privkey_hex, encoding="utf-8")
+    save_config(
+        ValidatorConfig(
+            store=str(tmp_path / "b.sqlite"),
+            key_file=str(key_b_path),
+        ),
+        config_b_path,
+    )
+
+    _group_key, _founder, genesis_event, _head, _channel = genesis_fixture(validator_set)
+
+    # Bootstrap both validators with the same group.
+    store_a = BFTStore(tmp_path / "a.sqlite")
+    node_a = ValidatorNode(
+        keypair=keys[0], store=store_a,
+        timing=ConsensusTiming(
+            block_interval=0.02, observation_timeout=0.02,
+            observation_timeout_delta=0.0, proposal_timeout=0.02,
+            proposal_timeout_delta=0.0, prevote_timeout=0.02,
+            prevote_timeout_delta=0.0, precommit_timeout=0.02,
+            precommit_timeout_delta=0.0, round_backoff=0.01,
+        ),
+    )
+    node_a.bootstrap(genesis_event)
+    server_a = ValidatorServer(
+        node=node_a,
+        metadata=ServerMetadata(name="a", description="", pubkey=keys[0].pubkey_hex),
+        host="127.0.0.1", port=port_a, notice_file=config_a_path,
+    )
+
+    store_b = BFTStore(tmp_path / "b.sqlite")
+    node_b = ValidatorNode(
+        keypair=keys[1], store=store_b,
+        timing=ConsensusTiming(
+            block_interval=0.02, observation_timeout=0.02,
+            observation_timeout_delta=0.0, proposal_timeout=0.02,
+            proposal_timeout_delta=0.0, prevote_timeout=0.02,
+            prevote_timeout_delta=0.0, precommit_timeout=0.02,
+            precommit_timeout_delta=0.0, round_backoff=0.01,
+        ),
+    )
+    node_b.bootstrap(genesis_event)
+    server_b = ValidatorServer(
+        node=node_b,
+        metadata=ServerMetadata(name="b", description="", pubkey=keys[1].pubkey_hex),
+        host="127.0.0.1", port=port_b, notice_file=config_b_path,
+        peer_notice_refresh_interval=0.0,  # disable background loop
+    )
+
+    shutdown_a = asyncio.Event()
+    shutdown_b = asyncio.Event()
+    task_a = asyncio.create_task(server_a.run(shutdown_a))
+    task_b = asyncio.create_task(server_b.run(shutdown_b))
+
+    # Wait for both servers to start.
+    for _ in range(100):
+        try:
+            await BFTWebSocketClient(f"ws://127.0.0.1:{port_a}").metadata()
+            await BFTWebSocketClient(f"ws://127.0.0.1:{port_b}").metadata()
+            break
+        except OSError:
+            await asyncio.sleep(0.01)
+
+    try:
+        # Before refresh, B has no peer notices (the background loop is off).
+        metadata_b = await BFTWebSocketClient(f"ws://127.0.0.1:{port_b}").metadata()
+        assert "peer_notices" not in metadata_b
+
+        # After refresh, B sees A's notice.
+        await server_b._refresh_peer_notices()
+        metadata_b = await BFTWebSocketClient(f"ws://127.0.0.1:{port_b}").metadata()
+        raw_peer = metadata_b.get("peer_notices")
+        assert isinstance(raw_peer, list) and len(raw_peer) == 1
+        peer_notice = OperatorNotice.from_dict(
+            {str(k): v for k, v in raw_peer[0].items()}
+        )
+        assert peer_notice.validator == keys[0].pubkey_hex
+        assert peer_notice.text == "Validator A maintenance"
+        assert verify_operator_notice(peer_notice)
+
+        # B itself does not appear in peer notices.
+        peer_pubkeys = {
+            OperatorNotice.from_dict({str(k): v for k, v in n.items()}).validator
+            for n in raw_peer if isinstance(n, dict)
+        }
+        assert keys[1].pubkey_hex not in peer_pubkeys
+    finally:
+        shutdown_a.set()
+        shutdown_b.set()
+        await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=2.0)
+        await node_a.stop()
+        await node_b.stop()
+        store_a.close()
+        store_b.close()

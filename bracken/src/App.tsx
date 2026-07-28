@@ -341,6 +341,7 @@ export default function App() {
           activeGroup={bracken.activeGroup}
           identityPubkey={bracken.identity.publicKey}
           validatorConns={bracken.validatorConns}
+          peerNotices={bracken.peerNotices}
           channels={channels}
           selectedChannel={selectedChannel}
           onSelectGroup={(pk) => {
@@ -530,7 +531,9 @@ export default function App() {
         <ValidatorDrawer
           validatorConns={bracken.validatorConns}
           validatorSet={bracken.state?.validatorSet ?? null}
+          peerNotices={bracken.peerNotices}
           onFetchStatus={bracken.fetchValidatorStatus}
+          onFetchNotice={bracken.fetchValidatorNotice}
           onClose={() => setShowValidators(false)}
         />
       )}

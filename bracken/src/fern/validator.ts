@@ -38,6 +38,30 @@ export interface ValidatorMetadata {
   groups: string[]
   retention: { default: string }
   role: 'validator'
+  notice?: OperatorNotice
+  peer_notices?: OperatorNotice[]
+}
+
+export interface OperatorNotice {
+  type: 'operator_notice'
+  validator: string
+  text: string
+  ts: number
+  expires: number
+  sig: string
+}
+
+export function verifyOperatorNotice(notice: OperatorNotice, pubkey: string): boolean {
+  if (notice.validator !== pubkey || typeof notice.text !== 'string') return false
+  const textBytes = new TextEncoder().encode(notice.text).length
+  if (textBytes === 0 || textBytes > 200) return false
+  if (!Number.isSafeInteger(notice.ts) || notice.ts < 0) return false
+  if (!Number.isSafeInteger(notice.expires) || notice.expires <= notice.ts) return false
+  if (notice.expires * 1000 <= Date.now()) return false
+  const payload = canonicalJson(
+    ['operator_notice', notice.validator, notice.text, notice.ts, notice.expires],
+  )
+  return isValidSig(notice.sig) && verifySignature(notice.validator, payload, notice.sig)
 }
 
 export interface ValidatorStatus {
@@ -214,9 +238,35 @@ export class ValidatorClient {
     if (response.metadata.protocol !== PROTOCOL_VERSION || response.metadata.role !== 'validator' ||
       !isValidPubkey(response.metadata.pubkey)) throw new Error('invalid validator metadata')
     this.validatorPubkey = response.metadata.pubkey
+    const metadata = response.metadata
+    if (metadata.notice) {
+      if (verifyOperatorNotice(metadata.notice, metadata.pubkey)) {
+        log.info('transport', 'validator operator notice active', {
+          url: this.url, text: metadata.notice.text, expires: metadata.notice.expires,
+        })
+      } else {
+        log.warn('transport', 'discarded invalid operator notice', { url: this.url })
+        metadata.notice = undefined
+      }
+    }
+    if (metadata.peer_notices) {
+      const valid: OperatorNotice[] = []
+      for (const peer of metadata.peer_notices) {
+        if (verifyOperatorNotice(peer, peer.validator)) {
+          valid.push(peer)
+        } else {
+          log.warn('transport', 'discarded invalid peer notice', {
+            url: this.url, peer: shortId(peer.validator),
+          })
+        }
+      }
+      metadata.peer_notices = valid.length > 0 ? valid : undefined
+    }
     log.debug('transport', 'validator metadata verified', {
       url: this.url, validator: shortId(response.metadata.pubkey),
       groups: response.metadata.groups.length,
+      notices: metadata.notice ? 1 : 0,
+      peer_notices: metadata.peer_notices?.length ?? 0,
     })
     return response.metadata
   }

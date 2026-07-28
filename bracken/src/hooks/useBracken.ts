@@ -14,6 +14,7 @@ import type { FernEvent } from '../fern/events'
 import { buildEvent, canonicalJson, toWireEvent, verifyEvent } from '../fern/events'
 import { log, shortId } from '../fern/logger'
 import type { ValidatorStatus } from '../fern/validator'
+import type { OperatorNotice } from '../fern/validator'
 import {
   ValidatorClient, parseGroupAddress, validatorReconnectDelay, verifyIngressReceipt,
 } from '../fern/validator'
@@ -35,6 +36,8 @@ export interface ValidatorConnection {
   pubkey: string
   name?: string
   status?: ValidatorStatus
+  notice?: OperatorNotice
+  peerNotices?: OperatorNotice[]
 }
 
 export interface MessageDelivery {
@@ -169,6 +172,7 @@ export function useBracken() {
   const [defaultNickname, setDefaultNicknameState] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [messageDeliveries, setMessageDeliveries] = useState<Record<string, MessageDelivery>>({})
+  const [peerNotices, setPeerNotices] = useState<Record<string, OperatorNotice>>({})
   const clientsRef = useRef<Map<string, ValidatorClient>>(new Map())
   const commitQueues = useRef<Map<string, Promise<void>>>(new Map())
 
@@ -491,9 +495,19 @@ export function useBracken() {
           }
           await putValidatorPin(url, metadata.pubkey)
           clients.set(url, client)
+          if (metadata.peer_notices) {
+            setPeerNotices((current) => {
+              const next = { ...current }
+              for (const notice of metadata.peer_notices!) {
+                next[notice.validator] = notice
+              }
+              return next
+            })
+          }
           updateConnection(url, {
             client, connected: true, reconnecting: false, pubkey: metadata.pubkey,
-            name: metadata.name || url,
+            name: metadata.name || url, notice: metadata.notice,
+            peerNotices: metadata.peer_notices,
           })
           void client.status(entry.pubkey)
             .then((st) => updateConnection(url, { status: st }))
@@ -904,6 +918,22 @@ export function useBracken() {
     }
   }, [activeGroup])
 
+  const fetchValidatorNotice = useCallback(async (url: string): Promise<OperatorNotice | null> => {
+    const live = clientsRef.current.get(url)
+    if (live?.isConnected) {
+      try { return (await live.fetchMetadata()).notice ?? null } catch { return null }
+    }
+    let ephemeral: ValidatorClient | null = null
+    try {
+      ephemeral = await connect(url)
+      return (await ephemeral.fetchMetadata()).notice ?? null
+    } catch {
+      return null
+    } finally {
+      if (ephemeral) await ephemeral.close()
+    }
+  }, [])
+
   const leaveGroup = useCallback(async (group: string) => {
     if (group === activeGroup) await adminAction('leave')
     const updated = groups.filter((entry) => entry.pubkey !== group)
@@ -912,9 +942,9 @@ export function useBracken() {
 
   return {
     identity, loading, groups, activeGroup, events, state, defaultNickname,
-    validatorConns, messageDeliveries, setActiveGroup, importIdentity, logout,
+    validatorConns, peerNotices, messageDeliveries, setActiveGroup, importIdentity, logout,
     joinGroup, sendMessage, retryMessage, createGroup, adminAction,
     setNickname, setDefaultNickname, leaveGroup, updateValidatorSet,
-    addValidatorByUrl, removeValidatorByUrl, fetchValidatorStatus,
+    addValidatorByUrl, removeValidatorByUrl, fetchValidatorStatus, fetchValidatorNotice,
   }
 }

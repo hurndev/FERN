@@ -317,6 +317,13 @@ metadata, genesis bootstrap, peer messages, event submission, status and
 history queries, manifests, hosting attestations, pending lookup, remote
 validator preparation, and subscriptions. It pushes pending events and commits
 to subscribed clients and enforces message-size and per-action rate limits.
+The `metadata` response may carry a signed operator notice (a short
+message-of-the-day): the server re-reads it from the validator config file on
+change, signs it on demand with the validator key, and serves it only while
+unexpired. A background task periodically fetches metadata from every
+consensus peer and includes their verified notices under `peer_notices`, so a
+client connecting to a single validator sees every active notice across the
+set. Notices are operator-managed local policy, not consensus state.
 The `request_readiness` action runs the same policy-gated admission path as
 the CLI `prepare` command (trusted-host threshold, byte budget, never
 `manual`) under the node's per-group lock, so the periodic catch-up path
@@ -418,7 +425,9 @@ provides:
 - `init` to create a validator key, config, and SQLite path;
 - `run` to start the multi-group validator and WebSocket server;
 - `config show/add-witness/remove-witness` for local admission trust;
-- `prepare` to stage verified history and write a `SyncReady` JSON file.
+- `prepare` to stage verified history and write a `SyncReady` JSON file;
+- `notice` to set, show, or clear the operator notice served to connecting
+  clients.
 
 The `witness` command wording is retained for configuration compatibility; it
 now identifies a trusted validator source and local operator label.

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { FernLogo } from './FernLogo'
 import { truncateId } from '../fern/utils'
 import type { GroupEntry, ValidatorConnection } from '../hooks/useBracken'
+import type { OperatorNotice } from '../fern/validator'
 import type { Channel } from '../fern/state'
 import styles from '../styles/components.module.css'
 
@@ -10,6 +11,7 @@ interface Props {
   activeGroup: string | null
   identityPubkey: string
   validatorConns: ValidatorConnection[]
+  peerNotices: Record<string, OperatorNotice>
   channels: Channel[]
   selectedChannel: string
   onSelectGroup: (pubkey: string) => void
@@ -25,6 +27,7 @@ export function Sidebar({
   activeGroup,
   identityPubkey,
   validatorConns,
+  peerNotices,
   channels,
   selectedChannel,
   onSelectGroup,

@@ -76,3 +76,38 @@ def test_legacy_executable_warns_and_forwards_to_validator_cli() -> None:
     assert result.returncode == 0
     assert "renamed to 'fern-validator'" in result.stderr
     assert "Run and configure a FERN-BFT validator" in result.stdout
+
+
+def test_notice_command_sets_shows_and_clears(tmp_path: Path) -> None:
+    from click.testing import CliRunner
+
+    from cli.validator_main import main_fn
+    from fern.validator.config import load_config
+
+    config_path = tmp_path / "config.json"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main_fn,
+        ["--config", str(config_path), "notice", "Maintenance Tuesday", "--expires", "2h"],
+    )
+    assert result.exit_code == 0, result.output
+    value = load_config(config_path)
+    assert value.notice_text == "Maintenance Tuesday"
+    assert value.notice_expires > value.notice_ts
+
+    result = runner.invoke(main_fn, ["--config", str(config_path), "notice"])
+    assert result.exit_code == 0, result.output
+    assert "Maintenance Tuesday" in result.output
+
+    result = runner.invoke(main_fn, ["--config", str(config_path), "notice", "--clear"])
+    assert result.exit_code == 0, result.output
+    assert load_config(config_path).notice_text == ""
+
+    result = runner.invoke(main_fn, ["--config", str(config_path), "notice", "x" * 201])
+    assert result.exit_code != 0
+
+    result = runner.invoke(
+        main_fn, ["--config", str(config_path), "notice", "hi", "--expires", "soon"]
+    )
+    assert result.exit_code != 0

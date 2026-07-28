@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import signal
+import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 
 from cli.logging_config import configure_logging
+from fern.bft.constants import MAX_NOTICE_BYTES
 from fern.bft.node import ConsensusTiming, ValidatorNode
 from fern.bft.admission import prepare_validator_history
 from fern.bft.store import BFTStore
@@ -38,7 +42,7 @@ def _configure_logging(level: str, no_color: bool) -> None:
     configure_logging(level=level, no_color=no_color)
 
 
-async def run_validator(config: ValidatorConfig) -> None:
+async def run_validator(config: ValidatorConfig, notice_file: Path | None = None) -> None:
     keypair = load_keypair(config)
     store = BFTStore(config.store)
     timing = ConsensusTiming(
@@ -76,6 +80,7 @@ async def run_validator(config: ValidatorConfig) -> None:
         trusted_operators={host.pubkey: host.operator for host in config.trusted_hosts},
         minimum_trusted_operators=config.minimum_trusted_operators,
         maximum_group_logical_bytes=config.maximum_group_logical_bytes,
+        notice_file=notice_file,
     )
     shutdown = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -201,7 +206,7 @@ def run(
     finally:
         inspection_store.close()
     try:
-        asyncio.run(run_validator(config))
+        asyncio.run(run_validator(config, notice_file=config_path))
     except KeyboardInterrupt:
         # Fallback for event loops without add_signal_handler(). Cleanup has
         # already run in run_validator's finally block.
@@ -255,6 +260,61 @@ def config_remove_witness(ctx: click.Context, pubkey: str) -> None:
         raise click.ClickException(str(exc)) from exc
     save_config(value, path)
     click.echo(f"Trusted host removed: {pubkey}")
+
+
+_DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def _parse_duration(spec: str) -> int:
+    match = re.fullmatch(r"(\d+)([mhdw])", spec.strip().lower())
+    if match is None:
+        raise click.UsageError(
+            "expires must be a number followed by m, h, d, or w (for example 7d)"
+        )
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2)]
+
+
+@main_fn.command(name="notice")
+@click.argument("text", required=False)
+@click.option(
+    "--expires",
+    "expires_spec",
+    default="7d",
+    show_default=True,
+    help="How long to show the notice (for example 30m, 12h, 7d, 2w).",
+)
+@click.option("--clear", is_flag=True, help="Remove the active notice.")
+@click.pass_context
+def notice_command(ctx: click.Context, text: str | None, expires_spec: str, clear: bool) -> None:
+    """Set, show, or clear the operator notice served to connecting clients.
+
+    The notice is a short message-of-the-day (max 200 bytes) that clients
+    display when they connect to this validator. It is a signed side-channel
+    object and never touches consensus or group history.
+    """
+
+    path = ctx.obj.get("config_path") or default_config_file()
+    config_value = load_config(path)
+    now = int(time.time())
+    if clear:
+        save_config(replace(config_value, notice_text="", notice_ts=0, notice_expires=0), path)
+        click.echo("Operator notice cleared.")
+        return
+    if text is None:
+        if config_value.notice_text and config_value.notice_expires > now:
+            until = datetime.fromtimestamp(config_value.notice_expires, tz=timezone.utc)
+            click.echo(f"Active until {until:%Y-%m-%d %H:%M} UTC:")
+            click.echo(f"  {config_value.notice_text}")
+        else:
+            click.echo("No active operator notice.")
+        return
+    if len(text.encode("utf-8")) > MAX_NOTICE_BYTES:
+        raise click.UsageError(f"notice text must be at most {MAX_NOTICE_BYTES} bytes")
+    expires = now + _parse_duration(expires_spec)
+    save_config(replace(config_value, notice_text=text, notice_ts=now, notice_expires=expires), path)
+    until = datetime.fromtimestamp(expires, tz=timezone.utc)
+    click.echo(f"Notice set until {until:%Y-%m-%d %H:%M} UTC.")
+    click.echo("A running validator serves it on its next metadata read; no restart needed.")
 
 
 @main_fn.command(name="prepare")

@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.client import connect
@@ -27,9 +28,11 @@ from fern.bft.manifest import (
     verify_history_manifest,
 )
 from fern.bft.node import ValidatorNode
+from fern.bft.notices import OperatorNotice, sign_operator_notice, verify_operator_notice
 from fern.bft.validators import ValidatorSet
 from fern.events.event import Event
 from fern.errors import VerificationError
+from fern.validator.config import load_config
 from fern.validator.rate_limiter import RateLimiter
 from fern.crypto.encoding import is_valid_event_id_hex, is_valid_pubkey_hex, is_valid_sig_hex
 from fern.crypto.keys import Keypair
@@ -144,6 +147,8 @@ class ValidatorServer:
         trusted_operators: dict[str, str] | None = None,
         minimum_trusted_operators: int = 2,
         maximum_group_logical_bytes: int | None = None,
+        notice_file: Path | None = None,
+        peer_notice_refresh_interval: float = 60.0,
     ) -> None:
         self.node = node
         self.store = node.store
@@ -159,6 +164,12 @@ class ValidatorServer:
         self.trusted_operators = dict(trusted_operators or {})
         self.minimum_trusted_operators = minimum_trusted_operators
         self.maximum_group_logical_bytes = maximum_group_logical_bytes
+        self.notice_file = notice_file
+        self.peer_notice_refresh_interval = peer_notice_refresh_interval
+        self._notice_mtime: float | None = None
+        self._notice_cache: dict[str, object] | None = None
+        self._peer_notices: dict[str, dict[str, object]] = {}
+        self._peer_notices_lock = asyncio.Lock()
         self._rate_limiter = RateLimiter()
         self._subscriptions: dict[str, set[ServerConnection]] = {}
         self._attached_engines: dict[str, int] = {}
@@ -234,6 +245,105 @@ class ValidatorServer:
             for group in subscribed:
                 self._subscriptions.get(group, set()).discard(websocket)
 
+    def _current_notice(self) -> dict[str, object] | None:
+        """Return the signed active operator notice, re-reading config on change.
+
+        The notice is operator-managed local policy, not consensus state: it
+        is signed on demand with the validator key and served only while
+        unexpired.
+        """
+
+        if self.notice_file is None:
+            return None
+        try:
+            mtime = self.notice_file.stat().st_mtime
+        except OSError:
+            return None
+        if mtime != self._notice_mtime:
+            self._notice_mtime = mtime
+            self._notice_cache = None
+            try:
+                config_value = load_config(self.notice_file)
+            except (OSError, ValueError):
+                config_value = None
+            now = int(time.time())
+            if (
+                config_value is not None
+                and config_value.notice_text
+                and config_value.notice_expires > now
+            ):
+                notice = sign_operator_notice(
+                    OperatorNotice(
+                        validator=self.node.keypair.pubkey_hex,
+                        text=config_value.notice_text,
+                        ts=config_value.notice_ts,
+                        expires=config_value.notice_expires,
+                    ),
+                    self.node.keypair,
+                )
+                self._notice_cache = notice.to_dict()
+        if self._notice_cache is not None:
+            expires = self._notice_cache["expires"]
+            if isinstance(expires, int) and expires <= int(time.time()):
+                self._notice_cache = None
+                return None
+        return self._notice_cache
+
+    async def _refresh_peer_notices(self) -> None:
+        """Fetch and verify operator notices from every peer in every hosted group.
+
+        A client connecting to a single validator sees all active notices
+        across the set, not just the local one. Each peer notice is
+        independently verified against that peer's pubkey as recorded in the
+        active validator set.
+        """
+
+        fresh: dict[str, dict[str, object]] = {}
+        for group in self.store.hosted_groups():
+            head = self.store.get_chain_head(group)
+            validator_set = head.state.validator_set
+            for validator in validator_set.validators:
+                pubkey = validator.pubkey
+                if pubkey == self.node.keypair.pubkey_hex:
+                    continue
+                if pubkey in self._peer_notices:
+                    cached = self._peer_notices[pubkey]
+                    expires = cached.get("expires")
+                    if isinstance(expires, int) and expires > int(time.time()):
+                        fresh[pubkey] = cached
+                        continue
+                try:
+                    metadata = await BFTWebSocketClient(
+                        validator.url, timeout=3.0
+                    ).metadata()
+                except (OSError, ValueError, TimeoutError):
+                    continue
+                raw_notice = metadata.get("notice")
+                if not isinstance(raw_notice, dict):
+                    continue
+                try:
+                    notice = OperatorNotice.from_dict(
+                        {str(k): v for k, v in raw_notice.items()}
+                    )
+                except (ValueError, TypeError):
+                    continue
+                if (
+                    notice.validator == pubkey
+                    and verify_operator_notice(notice)
+                    and notice.expires > int(time.time())
+                ):
+                    fresh[pubkey] = notice.to_dict()
+        async with self._peer_notices_lock:
+            self._peer_notices = fresh
+
+    async def _peer_notices_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.peer_notice_refresh_interval)
+            try:
+                await self._refresh_peer_notices()
+            except Exception:
+                logger.debug("peer notice refresh failed", exc_info=True)
+
     def _check_rate_limit(self, websocket: ServerConnection, action: str) -> None:
         remote = websocket.remote_address
         key = str(remote[0]) if isinstance(remote, tuple) and remote else "unknown"
@@ -262,9 +372,16 @@ class ValidatorServer:
     ) -> dict[str, object]:
         action = str(request.get("action", ""))
         if action == "metadata":
+            payload = self.metadata.to_dict(self.store.hosted_groups())
+            notice = self._current_notice()
+            if notice is not None:
+                payload["notice"] = notice
+            async with self._peer_notices_lock:
+                if self._peer_notices:
+                    payload["peer_notices"] = list(self._peer_notices.values())
             return {
                 "type": "metadata",
-                "metadata": self.metadata.to_dict(self.store.hosted_groups()),
+                "metadata": payload,
             }
         if action == "bootstrap":
             if not self.allow_genesis:
@@ -573,6 +690,7 @@ class ValidatorServer:
 
     async def run(self, shutdown: asyncio.Event | None = None) -> None:
         catchup_task: asyncio.Task[None] | None = None
+        peer_notices_task: asyncio.Task[None] | None = None
         try:
             async with serve(
                 self.handler,
@@ -597,6 +715,10 @@ class ValidatorServer:
                     catchup_task = asyncio.create_task(
                         self._catch_up_loop(), name="fern-validator-catchup"
                     )
+                if self.peer_notice_refresh_interval > 0:
+                    peer_notices_task = asyncio.create_task(
+                        self._peer_notices_loop(), name="fern-validator-peer-notices"
+                    )
                 if shutdown is None:
                     await server.serve_forever()
                 else:
@@ -605,6 +727,9 @@ class ValidatorServer:
             if catchup_task is not None:
                 catchup_task.cancel()
                 await asyncio.gather(catchup_task, return_exceptions=True)
+            if peer_notices_task is not None:
+                peer_notices_task.cancel()
+                await asyncio.gather(peer_notices_task, return_exceptions=True)
             self._server = None
             logger.info("validator websocket stopped")
 
