@@ -14,19 +14,18 @@ PHASE_PREVOTE = "prevote"
 PHASE_PRECOMMIT = "precommit"
 VOTE_PHASES = frozenset({PHASE_PREVOTE, PHASE_PRECOMMIT})
 
-GOVERNANCE_TYPES = frozenset(
-    {
-        "invite",
-        "kick",
-        "ban",
-        "unban",
-        "admin_add",
-        "admin_remove",
-        "validator_update",
-        "metadata_update",
-        "chat.channel_create",
-        "chat.channel_update",
-        "chat.channel_delete",
-        "chat.settings_update",
-    }
+# Core (bare) event types the protocol core validates and applies directly.
+# Self-service events are authorized by the core against membership state;
+# authorized events are policy decisions delegated to the app module.
+SELF_SERVICE_CORE_TYPES = frozenset({"join", "leave"})
+AUTHORIZED_CORE_TYPES = frozenset(
+    {"invite", "kick", "ban", "unban", "validator_update", "metadata_update"}
 )
+CORE_EVENT_TYPES = SELF_SERVICE_CORE_TYPES | AUTHORIZED_CORE_TYPES
+
+# Core events that are *boundary* events: applied last in a block, at most one
+# per block. These change the validity domain (who may act, what may be
+# referenced, who validates). ``metadata_update`` is core but ordinary — it
+# changes an attribute, not the validity domain. App modules declare their own
+# boundary types; the full set is ``CORE_BOUNDARY_TYPES | app.boundary_types``.
+CORE_BOUNDARY_TYPES = frozenset({"invite", "kick", "ban", "unban", "validator_update"})

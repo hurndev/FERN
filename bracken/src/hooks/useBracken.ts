@@ -717,7 +717,7 @@ export function useBracken() {
     if (!entry || seq === null) return
     const content = { ...extra }
     if (type === 'invite') { content['invitee'] = target; content['role'] = 'member' }
-    else if (['kick', 'ban', 'unban', 'admin_add', 'admin_remove'].includes(type)) content['target'] = target
+    else if (['kick', 'ban', 'unban', 'chat.manager_add', 'chat.manager_remove', 'chat.mod_add', 'chat.mod_remove'].includes(type)) content['target'] = target
     const event = await buildEvent({
       type, group: activeGroup, author: identity.publicKey, seq, content,
       ts: Math.floor(Date.now() / 1000), tags: [],
@@ -752,7 +752,7 @@ export function useBracken() {
       content: {
         chain_id: randomHexId(), name, description: options?.description ?? '',
         public: options?.public ?? true, founder: identity.publicKey,
-        admins: [identity.publicKey], validators: discovered,
+        'chat.managers': [identity.publicKey], validators: discovered,
         fault_tolerance: faultTolerance, app: 'chat',
         'chat.channels': [{ id: channel, name: 'general', description: '', position: 0 }],
         'chat.default_channel': channel, 'chat.system_channel': channel,

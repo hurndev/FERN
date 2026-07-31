@@ -7,6 +7,7 @@ import click
 from cli.bft import build_user_event, open_store, publish_user_event, sync_group
 from cli.config import get_cache_path, load_config, resolve_group
 from cli.output import print_error, print_success
+from fern.apps.chat import ChatState
 from fern.events.types import ChatTypes
 from fern.identity.user import UserIdentity
 
@@ -36,12 +37,14 @@ async def _post(channel: str | None, reply_to: str | None, group_id: str, text: 
         if user.pubkey not in state.joined:
             print_error("You are not finalized as a joined member of this group.")
             return
-        channel_id = channel or state.chat_settings.get("default_channel", "")
-        for record in state.channels.values():
+        chat = state.app
+        assert isinstance(chat, ChatState)
+        channel_id = channel or chat.settings.get("default_channel", "")
+        for record in chat.channels.values():
             if record.name == channel_id:
                 channel_id = record.id
                 break
-        if channel_id not in state.channels:
+        if channel_id not in chat.channels:
             print_error("Unknown channel.")
             return
         event = build_user_event(

@@ -80,7 +80,6 @@ Genesis uses `seq = 0` and contains at least:
   "description": "",
   "public": true,
   "founder": "<user public key>",
-  "admins": ["<user public key>"],
   "validators": [
     {
       "pubkey": "<validator public key>",
@@ -89,9 +88,21 @@ Genesis uses `seq = 0` and contains at least:
     }
   ],
   "fault_tolerance": 1,
-  "app": "chat"
+  "app": "chat",
+  "chat.channels": [
+    { "id": "<64-hex>", "name": "general", "description": "", "position": 0 }
+  ],
+  "chat.managers": ["<user public key>"],
+  "chat.mods": []
 }
 ```
+
+Bare fields are owned by the protocol core; `<app>.*` fields are owned by the
+app module named by `app` (see
+[protocol-app-boundary.md](protocol-app-boundary.md)). For `chat`,
+`chat.channels` must be non-empty and `chat.managers` defaults to `[founder]`
+if omitted. Roles (`managers`/`mods`) are app state; there is no core `admins`
+field.
 
 Validators are equal-weight and sorted by public key. A set may contain any
 number of validators from 1 to 100. The fault count `f` and quorum `q` are
@@ -246,25 +257,35 @@ an honest validator's durable lock.
 
 Every validator and client verifies the complete chain from a trusted genesis
 or verified checkpoint. For every block it checks signatures, sizes,
-sequences, schemas, membership, bans, admin authority, observation medians,
+sequences, schemas, membership, bans, role authority, observation medians,
 state execution, roots and commit quorum.
 
 Block position `(height, position)` is the only canonical event order. Events
-are checked and applied sequentially. A governance event is checked against
-the state after the ordinary batch and applied last.
+are checked and applied sequentially. Authorization and application state are
+split between the protocol core and the group's app module (see
+[protocol-app-boundary.md](protocol-app-boundary.md)): the core owns membership
+(`members`/`joined`/`banned`) and the validator set; the chat app owns roles
+(`managers`/`mods`), channels and settings, and authorizes every event. In
+chat, managers may perform any action and mods may moderate
+(invite/kick/ban/unban and channel management); content events (message,
+reaction, nickname) require the author to be joined and not banned.
 
-Privileged governance types are:
+A **boundary event** is an authority-gated change to the validity domain (who
+may act, what may be referenced, who validates). A boundary event is carried in
+the candidate's `governance` slot, is checked against the state after the
+ordinary batch, is applied last, and at most one appears in a block. The
+boundary set is the core boundary types plus the app's declared boundary types:
 
 ```text
-invite, kick, ban, unban, admin_add, admin_remove,
-validator_update, metadata_update,
-chat.channel_create, chat.channel_update, chat.channel_delete,
-chat.settings_update
+core:  invite, kick, ban, unban, validator_update
+chat:  chat.channel_create, chat.channel_delete,
+       chat.manager_add, chat.manager_remove, chat.mod_add, chat.mod_remove
 ```
 
-At most one of these appears in a block. Join, leave, nickname, message and
-reaction events may be batched normally. An invalid event invalidates the
-whole proposed block; validators do not partially execute proposals.
+Join, leave, nickname, message, reaction, metadata_update, chat.channel_update
+and chat.settings_update are ordinary and may be batched normally. An invalid
+event invalidates the whole proposed block; validators do not partially execute
+proposals.
 
 Ban expiration is evaluated using an event's certified timestamp. A message
 finalized after a permanent ban is unauthorized regardless of its author `ts`
@@ -377,5 +398,5 @@ Between those bounds a group halts rather than forks. Unanimous small sets
 Byzantine fault-tolerance claim. More Byzantine validators than the safety
 bound, obsolete validator-key compromise, a bad freshness anchor, or a faulty
 implementation can violate assumptions. A quorum outage halts progress.
-User signatures still prevent validators from forging user or admin actions
+User signatures still prevent validators from forging user or governance actions
 even outside the normal fault assumption.

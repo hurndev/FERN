@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from fern.bft.application import ApplicationError, ChainHead, execute_events, genesis_chain_head
+from fern.bft.app import ApplicationError, ChainHead, execute_events, genesis_chain_head
 from fern.bft.blocks import Commit, verify_commit_evidence
 from fern.bft.canonical import canonical_json
 from fern.events.event import Event

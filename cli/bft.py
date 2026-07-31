@@ -5,6 +5,7 @@ from pathlib import Path
 
 import click
 
+from fern.apps import register_builtins
 from fern.bft.client import PublishResult, publish_to_validators, sync_from_validators
 from fern.bft.store import BFTStore
 from fern.bft.validators import ValidatorSet
@@ -12,6 +13,8 @@ from fern.events.build import build_event
 from fern.events.event import Event
 from fern.identity.user import UserIdentity
 
+
+register_builtins()
 
 logger = logging.getLogger(__name__)
 

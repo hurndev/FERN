@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from fern.bft.application import ApplicationError, ApplicationState, ChainHead, execute_events
+from fern.bft.app import ApplicationError, ChainHead, GroupState, execute_events
 from fern.events.build import build_event
 from fern.events.event import Event
 from tests.bft.helpers import genesis_fixture, validator_fixture
@@ -14,7 +14,7 @@ def _execute(
     events: tuple[Event, ...] = (),
     governance: Event | None = None,
     times: tuple[int, ...] = (),
-) -> ApplicationState:
+) -> GroupState:
     return execute_events(
         head.state,
         events,

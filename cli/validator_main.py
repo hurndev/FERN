@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from cli.logging_config import configure_logging
+from fern.apps import register_builtins
 from fern.bft.constants import MAX_NOTICE_BYTES
 from fern.bft.node import ConsensusTiming, ValidatorNode
 from fern.bft.admission import prepare_validator_history
@@ -126,6 +127,7 @@ async def run_validator(config: ValidatorConfig, notice_file: Path | None = None
 def main_fn(ctx: click.Context, config_path: str | None, port: int | None, verbose: bool) -> None:
     """Run and configure a FERN-BFT validator."""
 
+    register_builtins()
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = Path(config_path) if config_path else None
     ctx.obj["port"] = port

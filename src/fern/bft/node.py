@@ -7,13 +7,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
-from fern.bft.application import (
+from fern.bft.app import (
     ApplicationError,
     ChainHead,
     apply_event,
+    boundary_types_for,
     execute_events,
-    validate_event_for_state,
     genesis_chain_head,
+    validate_event_for_state,
 )
 from fern.bft.blocks import (
     Candidate,
@@ -39,7 +40,7 @@ from fern.bft.certificates import (
 from fern.bft.consensus import ConsensusCore, ConsensusSafetyError, DoubleVoteError, VoteSet
 from fern.bft.canonical import canonical_json
 from fern.bft.constants import (
-    GOVERNANCE_TYPES,
+    CORE_EVENT_TYPES,
     MAX_BLOCK_EVENTS,
     MAX_CANDIDATE_EVENT_BYTES,
     PHASE_PRECOMMIT,
@@ -48,8 +49,9 @@ from fern.bft.constants import (
 from fern.bft.store import BFTStore
 from fern.bft.validators import ValidatorSet
 from fern.crypto.keys import Keypair
+from fern.apps import get_app
 from fern.events.event import Event
-from fern.events.semantic import SemanticValidationError, validate_event_semantics
+from fern.events.semantic import validate_core_event_semantics
 from fern.events.validation import verify_event
 
 
@@ -134,6 +136,9 @@ class GroupEngine:
         head = self.store.get_chain_head(group)
         if self.keypair.pubkey_hex not in head.state.validator_set.pubkeys:
             raise ValueError("local node is not a validator for this group")
+        # The app is fixed at genesis, so the boundary-event set is constant for
+        # the life of this engine.
+        self._boundary_types = boundary_types_for(head.state.core.app)
 
     @property
     def head(self) -> ChainHead:
@@ -225,9 +230,9 @@ class GroupEngine:
                 "client" if gossip else "peer",
             )
         self._changed.set()
-        if event.type in GOVERNANCE_TYPES:
-            # Governance cannot affect application state until it commits, so
-            # don't leave it waiting behind the ordinary batching window.
+        if event.type in self._boundary_types:
+            # A boundary event cannot affect application state until it commits,
+            # so don't leave it waiting behind the ordinary batching window.
             self._start_consensus.set()
         if gossip:
             self._send({"type": "peer_event", "event": event.to_dict()})
@@ -317,7 +322,7 @@ class GroupEngine:
             try:
                 self._start_consensus.clear()
                 urgent_governance = any(
-                    event.type in GOVERNANCE_TYPES
+                    event.type in self._boundary_types
                     for event in self.store.pending_events(self.group)
                 )
                 if not urgent_governance and not self._candidates and not self._proposals:
@@ -524,8 +529,8 @@ class GroupEngine:
     def _select_pending_events(self) -> tuple[tuple[Event, ...], Event | None]:
         head = self.head
         pending = self.store.pending_events(self.group)
-        ordinary = [event for event in pending if event.type not in GOVERNANCE_TYPES]
-        governance = [event for event in pending if event.type in GOVERNANCE_TYPES]
+        ordinary = [event for event in pending if event.type not in self._boundary_types]
+        governance = [event for event in pending if event.type in self._boundary_types]
         selected: list[Event] = []
         selected_bytes = 0
         state = head.state
@@ -621,23 +626,23 @@ class GroupEngine:
                 and candidate.previous_state_root == head.state.root
             ):
                 return
-            if any(event.type in GOVERNANCE_TYPES for event in candidate.events):
+            if any(event.type in self._boundary_types for event in candidate.events):
                 return
             if (
                 candidate.governance is not None
-                and candidate.governance.type not in GOVERNANCE_TYPES
+                and candidate.governance.type not in self._boundary_types
             ):
                 return
+            app_module = get_app(head.state.core.app)
             observed: list[int] = []
             now = int(time.time() * 1000)
             for event in candidate.all_events:
                 try:
                     verify_event(event)
-                    try:
-                        validate_event_semantics(event)
-                    except SemanticValidationError:
-                        if "." not in event.type or event.type.startswith("chat."):
-                            raise
+                    if event.type in CORE_EVENT_TYPES:
+                        validate_core_event_semantics(event)
+                    else:
+                        app_module.validate_semantics(event)
                     first_seen = self.store.first_seen_ms(event.id or "") or now
                 except (ValueError, TypeError):
                     return

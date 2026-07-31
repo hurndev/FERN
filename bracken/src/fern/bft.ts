@@ -97,10 +97,13 @@ export interface SyncReady {
   sig: string
 }
 
-export const GOVERNANCE_TYPES = new Set([
-  'invite', 'kick', 'ban', 'unban', 'admin_add', 'admin_remove',
-  'validator_update', 'metadata_update', 'chat.channel_create',
-  'chat.channel_update', 'chat.channel_delete', 'chat.settings_update',
+// Boundary events: applied last in a block, at most one per block. These change
+// the validity domain (who may act, what may be referenced, who validates).
+// Core boundary types plus the chat app's declared boundary types.
+export const BOUNDARY_TYPES = new Set([
+  'invite', 'kick', 'ban', 'unban', 'validator_update',
+  'chat.channel_create', 'chat.channel_delete',
+  'chat.manager_add', 'chat.manager_remove', 'chat.mod_add', 'chat.mod_remove',
 ])
 
 const MAX_VALIDATORS = 100
@@ -234,8 +237,8 @@ export async function verifyCommitEvidence(commit: Commit, set: ValidatorSet): P
     throw new Error('invalid event count in block')
   if (new Set(allEvents.map((event) => event.id)).size !== allEvents.length)
     throw new Error('duplicate event in block')
-  if (candidate.events.some((event) => GOVERNANCE_TYPES.has(event.type)) ||
-    (candidate.governance !== null && !GOVERNANCE_TYPES.has(candidate.governance.type)))
+  if (candidate.events.some((event) => BOUNDARY_TYPES.has(event.type)) ||
+    (candidate.governance !== null && !BOUNDARY_TYPES.has(candidate.governance.type)))
     throw new Error('invalid governance slot')
   for (const event of allEvents) {
     await verifyEvent(event)

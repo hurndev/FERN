@@ -6,6 +6,7 @@ import click
 
 from cli.bft import open_store, sync_group, validator_urls
 from cli.config import get_cache_path, load_config, resolve_group
+from fern.apps.chat import ChatState
 from fern.bft.blocks import Commit
 from fern.bft.websocket import BFTWebSocketClient
 
@@ -47,6 +48,8 @@ async def _watch(channel: str | None, group_id: str) -> None:
                 except ValueError:
                     continue
                 state = store.get_chain_head(group).state
+                chat = state.app
+                assert isinstance(chat, ChatState)
                 for event, certified_ms in zip(
                     commit.block.candidate.all_events,
                     commit.block.certified_times_ms,
@@ -55,7 +58,7 @@ async def _watch(channel: str | None, group_id: str) -> None:
                     if event.type != "chat.message":
                         continue
                     event_channel = str(event.content.get("channel", ""))
-                    channel_name = state.channels.get(event_channel)
+                    channel_name = chat.channels.get(event_channel)
                     label = channel_name.name if channel_name else event_channel
                     if channel and channel not in {label, event_channel}:
                         continue

@@ -7,18 +7,20 @@ import styles from '../styles/components.module.css'
 interface Props {
   pubkey: string
   nickname: string | null
-  isAdmin: boolean
+  isManager: boolean
+  isMod: boolean
   isBanned?: boolean
   isMember?: boolean
-  viewerIsAdmin?: boolean
+  viewerIsManager?: boolean
+  viewerIsMod?: boolean
   viewerPubkey?: string
   onClose: () => void
   onAdminAction?: (type: string, targetPubkey: string, extra?: Record<string, unknown>) => Promise<void>
 }
 
 export function ProfilePopup({
-  pubkey, nickname, isAdmin, isBanned = false, isMember = true,
-  viewerIsAdmin = false, viewerPubkey = '',
+  pubkey, nickname, isManager, isMod, isBanned = false, isMember = true,
+  viewerIsManager = false, viewerIsMod = false, viewerPubkey = '',
   onClose, onAdminAction,
 }: Props) {
   const overlayHandlers = useDefiniteOverlayClick(onClose)
@@ -56,7 +58,9 @@ export function ProfilePopup({
     }
   }
 
-  const showAdminActions = viewerIsAdmin && !isSelf
+  const viewerCanModerate = viewerIsManager || viewerIsMod
+  const showAdminActions = viewerCanModerate && !isSelf
+  const showRoleActions = viewerIsManager && !isSelf
 
   return (
     <div className={styles.profileOverlay} {...overlayHandlers}>
@@ -67,12 +71,12 @@ export function ProfilePopup({
             <Avatar value={pubkey} size={48} />
           </div>
           <div className={styles.profileIdentity}>
-            <div className={styles.profileName + (isAdmin && isMember ? ' ' + styles.profileNameMod : '')}>
+            <div className={styles.profileName + ((isManager || isMod) && isMember ? ' ' + styles.profileNameMod : '')}>
               {nickname ?? truncateId(pubkey)}
               {isSelf && <span className={styles.memberModTag}> (You)</span>}
             </div>
             <div className={styles.profileRole}>
-              {isMember ? (isAdmin ? 'Admin' : 'Member') : 'Not in group'}
+              {isMember ? (isManager ? 'Manager' : isMod ? 'Moderator' : 'Member') : 'Not in group'}
               {isBanned && <span className={styles.profileBanned}> · Banned</span>}
             </div>
           </div>
@@ -94,7 +98,7 @@ export function ProfilePopup({
         )}
         {showAdminActions && (
           <div className={styles.modActions}>
-            <span className={styles.profileLabel}>Admin Actions</span>
+            <span className={styles.profileLabel}>Moderation</span>
             <div className={styles.modActionBtns}>
               <button
                 className={styles.modActionBtn}
@@ -120,24 +124,45 @@ export function ProfilePopup({
                   Ban
                 </button>
               )}
-              {isAdmin ? (
-                <button
-                  className={styles.modActionBtn}
-                  onClick={() => handleAction('admin_remove')}
-                  disabled={acting}
-                >
-                  Demote
-                </button>
-              ) : (
-                <button
-                  className={styles.modActionBtn}
-                  onClick={() => handleAction('admin_add')}
-                  disabled={acting}
-                >
-                  Promote
-                </button>
-              )}
             </div>
+            {showRoleActions && (
+              <div className={styles.modActionBtns}>
+                {isManager ? (
+                  <button
+                    className={styles.modActionBtn}
+                    onClick={() => handleAction('chat.manager_remove')}
+                    disabled={acting}
+                  >
+                    Remove manager
+                  </button>
+                ) : (
+                  <button
+                    className={styles.modActionBtn}
+                    onClick={() => handleAction('chat.manager_add')}
+                    disabled={acting}
+                  >
+                    Make manager
+                  </button>
+                )}
+                {isMod ? (
+                  <button
+                    className={styles.modActionBtn}
+                    onClick={() => handleAction('chat.mod_remove')}
+                    disabled={acting}
+                  >
+                    Remove mod
+                  </button>
+                ) : (
+                  <button
+                    className={styles.modActionBtn}
+                    onClick={() => handleAction('chat.mod_add')}
+                    disabled={acting}
+                  >
+                    Make mod
+                  </button>
+                )}
+              </div>
+            )}
             {error && <div className={styles.formError}>{error}</div>}
           </div>
         )}

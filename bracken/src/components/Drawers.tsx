@@ -26,9 +26,10 @@ export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onA
     setProfile(pubkey)
   }, [])
 
-  const admins = [...state.joined].filter((pk) => state.admins.has(pk)).sort()
-  const nonAdmins = [...state.joined].filter((pk) => !state.admins.has(pk)).sort()
-  const ordered = [...admins, ...nonAdmins]
+  const managers = [...state.joined].filter((pk) => state.managers.has(pk)).sort()
+  const mods = [...state.joined].filter((pk) => state.mods.has(pk) && !state.managers.has(pk)).sort()
+  const members = [...state.joined].filter((pk) => !state.managers.has(pk) && !state.mods.has(pk)).sort()
+  const ordered = [...managers, ...mods, ...members]
   const banned = [...state.banned.entries()].sort((a, b) => a[0].localeCompare(b[0]))
 
   return (
@@ -41,7 +42,8 @@ export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onA
         </div>
         <div className={styles.drawerBody}>
           {ordered.map((pubkey) => {
-            const isAdmin = state.admins.has(pubkey)
+            const isManager = state.managers.has(pubkey)
+            const isMod = state.mods.has(pubkey)
             const nick = nicknames.get(pubkey)
             return (
               <div
@@ -50,7 +52,7 @@ export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onA
                 onClick={() => openProfile(pubkey)}
               >
                 <Avatar value={pubkey} size={24} />
-                <span className={`${styles.memberPubkey} ${isAdmin ? styles.memberPubkeyMod : ''}`}>
+                <span className={`${styles.memberPubkey} ${isManager || isMod ? styles.memberPubkeyMod : ''}`}>
                   {nick ?? truncateId(pubkey)}
                   {pubkey === viewerPubkey && ' (You)'}
                 </span>
@@ -93,10 +95,12 @@ export function MemberDrawer({ state, nicknames, viewerPubkey = '', onClose, onA
         <ProfilePopup
           pubkey={profile}
           nickname={nicknames.get(profile) ?? null}
-          isAdmin={state.admins.has(profile)}
+          isManager={state.managers.has(profile)}
+          isMod={state.mods.has(profile)}
           isBanned={state.banned.has(profile)}
           isMember={state.joined.has(profile)}
-          viewerIsAdmin={state.admins.has(viewerPubkey)}
+          viewerIsManager={state.managers.has(viewerPubkey)}
+          viewerIsMod={state.mods.has(viewerPubkey)}
           viewerPubkey={viewerPubkey}
           onClose={() => setProfile(null)}
           onAdminAction={onAdminAction}

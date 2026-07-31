@@ -27,6 +27,7 @@ from cli.config import (
     save_config,
 )
 from cli.output import print_success
+from fern.apps.chat import ChatState
 from fern.bft.validators import Validator, make_validator_set
 from fern.bft.certificates import SyncReady, verify_sync_ready
 from fern.bft.constants import PROTOCOL_VERSION
@@ -131,7 +132,7 @@ async def _create(
             "description": description,
             "public": public,
             "founder": user.pubkey,
-            "admins": [user.pubkey],
+            "chat.managers": [user.pubkey],
             "validators": [validator.to_dict() for validator in validators],
             "fault_tolerance": faults,
             "app": "chat",
@@ -311,9 +312,16 @@ async def _members(group_id: str) -> None:
         for event, _height, _position, _time in store.finalized_events(group):
             if event.type == ChatTypes.NICKNAME_SET:
                 nicknames[event.author] = str(event.content["nickname"])
+        chat_state = head.state.app
+        assert isinstance(chat_state, ChatState)
         click.echo(f"Members ({len(head.state.joined)}):")
         for pubkey in sorted(head.state.joined):
-            role = "admin" if pubkey in head.state.admins else "member"
+            if pubkey in chat_state.managers:
+                role = "manager"
+            elif pubkey in chat_state.mods:
+                role = "mod"
+            else:
+                role = "member"
             nickname = f" ({nicknames[pubkey]})" if pubkey in nicknames else ""
             click.echo(f"  {pubkey}{nickname}  {role}")
     finally:
@@ -399,25 +407,39 @@ def invite(group_id: str, invitee_pubkey: str) -> None:
     )
 
 
-@command.command(name="admin-add")
+@command.command(name="manager-add")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-def admin_add_cmd(group_id: str, target_pubkey: str) -> None:
+def manager_add_cmd(group_id: str, target_pubkey: str) -> None:
     asyncio.run(
-        _publish(
-            group_id, ProtocolTypes.ADMIN_ADD, {"target": target_pubkey}, "Promotion submitted."
-        )
+        _publish(group_id, ChatTypes.MANAGER_ADD, {"target": target_pubkey}, "Manager added.")
     )
 
 
-@command.command(name="admin-remove")
+@command.command(name="manager-remove")
 @click.argument("group_id")
 @click.argument("target_pubkey")
-def admin_remove_cmd(group_id: str, target_pubkey: str) -> None:
+def manager_remove_cmd(group_id: str, target_pubkey: str) -> None:
     asyncio.run(
-        _publish(
-            group_id, ProtocolTypes.ADMIN_REMOVE, {"target": target_pubkey}, "Demotion submitted."
-        )
+        _publish(group_id, ChatTypes.MANAGER_REMOVE, {"target": target_pubkey}, "Manager removed.")
+    )
+
+
+@command.command(name="mod-add")
+@click.argument("group_id")
+@click.argument("target_pubkey")
+def mod_add_cmd(group_id: str, target_pubkey: str) -> None:
+    asyncio.run(
+        _publish(group_id, ChatTypes.MOD_ADD, {"target": target_pubkey}, "Moderator added.")
+    )
+
+
+@command.command(name="mod-remove")
+@click.argument("group_id")
+@click.argument("target_pubkey")
+def mod_remove_cmd(group_id: str, target_pubkey: str) -> None:
+    asyncio.run(
+        _publish(group_id, ChatTypes.MOD_REMOVE, {"target": target_pubkey}, "Moderator removed.")
     )
 
 

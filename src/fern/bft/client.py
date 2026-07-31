@@ -4,7 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from fern.bft.application import ChainHead
+from fern.bft.app import ChainHead
 from fern.bft.certificates import IngressReceipt, verify_ingress_receipt
 from fern.bft.manifest import HistoryManifest, verify_history_manifest
 from fern.bft.store import BFTStore

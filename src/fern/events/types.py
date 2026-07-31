@@ -1,4 +1,6 @@
 class ProtocolTypes:
+    """Core (bare) event types owned by the protocol."""
+
     GENESIS = "genesis"
     JOIN = "join"
     LEAVE = "leave"
@@ -6,13 +8,13 @@ class ProtocolTypes:
     KICK = "kick"
     BAN = "ban"
     UNBAN = "unban"
-    ADMIN_ADD = "admin_add"
-    ADMIN_REMOVE = "admin_remove"
     VALIDATOR_UPDATE = "validator_update"
     METADATA_UPDATE = "metadata_update"
 
 
 class ChatTypes:
+    """Chat app (dotted) event types."""
+
     MESSAGE = "chat.message"
     REACTION = "chat.reaction"
     NICKNAME_SET = "chat.nickname_set"
@@ -20,6 +22,10 @@ class ChatTypes:
     CHANNEL_UPDATE = "chat.channel_update"
     CHANNEL_DELETE = "chat.channel_delete"
     SETTINGS_UPDATE = "chat.settings_update"
+    MANAGER_ADD = "chat.manager_add"
+    MANAGER_REMOVE = "chat.manager_remove"
+    MOD_ADD = "chat.mod_add"
+    MOD_REMOVE = "chat.mod_remove"
 
 
 PROTOCOL_TYPES: frozenset[str] = frozenset(
@@ -31,8 +37,6 @@ PROTOCOL_TYPES: frozenset[str] = frozenset(
         ProtocolTypes.KICK,
         ProtocolTypes.BAN,
         ProtocolTypes.UNBAN,
-        ProtocolTypes.ADMIN_ADD,
-        ProtocolTypes.ADMIN_REMOVE,
         ProtocolTypes.VALIDATOR_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
     }
@@ -47,9 +51,15 @@ CHAT_TYPES: frozenset[str] = frozenset(
         ChatTypes.CHANNEL_UPDATE,
         ChatTypes.CHANNEL_DELETE,
         ChatTypes.SETTINGS_UPDATE,
+        ChatTypes.MANAGER_ADD,
+        ChatTypes.MANAGER_REMOVE,
+        ChatTypes.MOD_ADD,
+        ChatTypes.MOD_REMOVE,
     }
 )
 
+# Events that mutate deterministic group state (core or app), as opposed to
+# pure content (message/reaction/nickname). Used for display/filtering.
 STATE_EVENT_TYPES: frozenset[str] = frozenset(
     {
         ProtocolTypes.JOIN,
@@ -58,14 +68,16 @@ STATE_EVENT_TYPES: frozenset[str] = frozenset(
         ProtocolTypes.KICK,
         ProtocolTypes.BAN,
         ProtocolTypes.UNBAN,
-        ProtocolTypes.ADMIN_ADD,
-        ProtocolTypes.ADMIN_REMOVE,
         ProtocolTypes.VALIDATOR_UPDATE,
         ProtocolTypes.METADATA_UPDATE,
         ChatTypes.CHANNEL_CREATE,
         ChatTypes.CHANNEL_UPDATE,
         ChatTypes.CHANNEL_DELETE,
         ChatTypes.SETTINGS_UPDATE,
+        ChatTypes.MANAGER_ADD,
+        ChatTypes.MANAGER_REMOVE,
+        ChatTypes.MOD_ADD,
+        ChatTypes.MOD_REMOVE,
     }
 )
 

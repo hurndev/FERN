@@ -25,6 +25,8 @@ lost instead of choosing a recovery path that could fork finalized history.
   new groups and how new validators are admitted to existing ones.
 - [python-architecture.md](python-architecture.md) maps those rules to the
   Python packages, validator runtime, CLI and Bracken boundary.
+- [protocol-app-boundary.md](protocol-app-boundary.md) documents the separation
+  between the protocol core and the chat application module.
 - [tendermint-design.md](tendermint-design.md) is the architectural plan behind
   the rewrite.
 - [BFT-NOTES.md](BFT-NOTES.md) records implementation choices, deviations and

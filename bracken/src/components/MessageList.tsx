@@ -9,7 +9,8 @@ interface Props {
   events: FernEvent[]
   rejectedIds: Set<string>
   connectedEventIds: Set<string>
-  admins: Set<string>
+  managers: Set<string>
+  mods: Set<string>
   joined: Set<string>
   nicknames: Map<string, string>
   banned: Set<string>
@@ -35,7 +36,7 @@ interface MessageDelivery {
   majorityRejected?: boolean
 }
 
-const ADMIN_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'admin_add', 'admin_remove', 'join', 'leave', 'genesis', 'metadata_update', 'validator_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'])
+const ADMIN_TYPES = new Set(['kick', 'ban', 'unban', 'invite', 'chat.manager_add', 'chat.manager_remove', 'chat.mod_add', 'chat.mod_remove', 'join', 'leave', 'genesis', 'metadata_update', 'validator_update', 'chat.channel_create', 'chat.channel_update', 'chat.channel_delete', 'chat.settings_update'])
 
 function displaySeconds(event: FernEvent): number {
   return event.bft?.certifiedTimeMs
@@ -60,8 +61,10 @@ function formatAdminAction(
   else if (t === 'ban') { a.push(author, { text: ' banned ' }, target); const r = event.content['reason'] as string; if (r) a.push({ text: ` (${r})` }) }
   else if (t === 'unban') { a.push(author, { text: ' unbanned ' }, target) }
   else if (t === 'invite') { a.push(author, { text: ' invited ' }, invitee) }
-  else if (t === 'admin_add') { a.push(author, { text: ' promoted ' }, target, { text: ' to admin' }) }
-  else if (t === 'admin_remove') { a.push(author, { text: ' demoted ' }, target) }
+  else if (t === 'chat.manager_add') { a.push(author, { text: ' made ' }, target, { text: ' a manager' }) }
+  else if (t === 'chat.manager_remove') { a.push(author, { text: ' removed manager from ' }, target) }
+  else if (t === 'chat.mod_add') { a.push(author, { text: ' made ' }, target, { text: ' a moderator' }) }
+  else if (t === 'chat.mod_remove') { a.push(author, { text: ' removed moderator from ' }, target) }
   else if (t === 'join') { a.push(author, { text: ' joined the group' }) }
   else if (t === 'leave') { a.push(author, { text: ' left the group' }) }
   else if (t === 'genesis') { a.push(author, { text: ' created the group' }) }
@@ -103,7 +106,8 @@ export function MessageList({
   events,
   rejectedIds,
   connectedEventIds,
-  admins,
+  managers,
+  mods,
   joined,
   nicknames,
   banned,
@@ -205,7 +209,7 @@ export function MessageList({
                   part.clickable && part.pubkey ? (
                     <span
                       key={i}
-                      className={styles.systemChip + (admins.has(part.pubkey) ? ' ' + styles.systemChipMod : '')}
+                      className={styles.systemChip + ((managers.has(part.pubkey) || mods.has(part.pubkey)) ? ' ' + styles.systemChipMod : '')}
                       onClick={() => openProfile(part.pubkey!)}
                       title="Click to view profile"
                     >
@@ -231,7 +235,7 @@ export function MessageList({
         lastAuthor = event.author
         lastTs = eventTime
 
-        const isAdmin = admins.has(event.author)
+        const isAdmin = managers.has(event.author) || mods.has(event.author)
         const nick = nicknames.get(event.author)
         const delivery = deliveries[event.id]
         const isUnconfirmed = event.bft?.status !== 'finalized'
@@ -315,10 +319,12 @@ export function MessageList({
         <ProfilePopup
           pubkey={profile.pubkey}
           nickname={nicknames.get(profile.pubkey) ?? null}
-          isAdmin={admins.has(profile.pubkey)}
+          isManager={managers.has(profile.pubkey)}
+          isMod={mods.has(profile.pubkey)}
           isBanned={banned.has(profile.pubkey)}
           isMember={joined.has(profile.pubkey)}
-          viewerIsAdmin={admins.has(viewerPubkey)}
+          viewerIsManager={managers.has(viewerPubkey)}
+          viewerIsMod={mods.has(viewerPubkey)}
           viewerPubkey={viewerPubkey}
           onClose={() => setProfile(null)}
           onAdminAction={onAdminAction}

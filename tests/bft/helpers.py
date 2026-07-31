@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 
-from fern.bft.application import ChainHead, execute_events, genesis_chain_head
+from fern.bft.app import ChainHead, execute_events, genesis_chain_head
 from fern.bft.blocks import (
     Block,
     Candidate,
@@ -56,7 +56,7 @@ def genesis_fixture(
             "description": "",
             "public": True,
             "founder": founder.pubkey_hex,
-            "admins": [founder.pubkey_hex],
+            "chat.managers": [founder.pubkey_hex],
             "validators": [validator.to_dict() for validator in validator_set.validators],
             "fault_tolerance": validator_set.fault_tolerance,
             "app": "chat",

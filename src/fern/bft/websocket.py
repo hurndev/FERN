@@ -15,6 +15,7 @@ from websockets.exceptions import ConnectionClosed
 
 from urllib.parse import urlparse
 
+from fern.apps import is_supported
 from fern.bft.blocks import Commit
 from fern.bft.canonical import sign_payload, verify_payload_signature
 from fern.bft.canonical import strict_int
@@ -387,6 +388,9 @@ class ValidatorServer:
             if not self.allow_genesis:
                 raise ValueError("genesis auto-hosting is disabled")
             genesis = Event.from_dict(_object(request.get("genesis"), "genesis"))
+            app_name = str(genesis.content.get("app", ""))
+            if not is_supported(app_name):
+                raise ValueError(f"this validator does not support app={app_name!r}")
             head = self.node.bootstrap(genesis)
             self._attach_engine(genesis.group)
             return {"type": "bootstrapped", "group": genesis.group, "state_root": head.state.root}

@@ -365,7 +365,7 @@ export interface GroupPreview {
   description: string
   public: boolean
   founder: string
-  admins: string[]
+  managers: string[]
   canonicalValidators: string[]
   sourceValidator: string
 }
@@ -390,7 +390,7 @@ export async function fetchGroupPreview(
         description: String(genesis.content['description'] ?? ''),
         public: genesis.content['public'] !== false,
         founder: String(genesis.content['founder'] ?? ''),
-        admins: Array.isArray(genesis.content['admins']) ? genesis.content['admins'] as string[] : [],
+        managers: Array.isArray(genesis.content['chat.managers']) ? genesis.content['chat.managers'] as string[] : [],
         canonicalValidators: validators.map((validator) => String(validator.url ?? '')).filter(Boolean),
         sourceValidator: url,
       }

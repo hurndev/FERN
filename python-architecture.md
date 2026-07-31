@@ -58,24 +58,29 @@ The intended dependency direction is:
 fern.crypto
     ^
     |
-fern.events -----> fern.identity / fern.chat
+fern.events -----> fern.identity / fern.chat (content builders)
     ^
     |
 fern.bft canonical values, validators, certificates, blocks
     ^
     |
-fern.bft application + chain + consensus
+fern.bft app (core state + AppModule interface) + chain + consensus
     ^
     |
 fern.bft store + node + websocket + client + admission
     ^
     |
-cli commands / fern-validator process
+fern.apps.chat (implements AppModule; depends on fern.bft.app, never the reverse)
+    ^
+    |
+cli commands / fern-validator process (register_builtins wires the chat app)
 ```
 
 `consensus.py` knows how to vote safely but does not open sockets, wait on
 timeouts, select mempool events, or apply SQLite commits. `node.py` owns those
 runtime concerns. `websocket.py` adapts the node and store to the wire API.
+`fern.bft.app` owns the core state and delegates policy to the `AppModule`
+implemented by `fern.apps.chat`.
 
 The `fern.validator` package holds process configuration and network rate
 limiting. The old `fern-relay` executable remains only as a warning-emitting
@@ -87,21 +92,24 @@ migration alias for existing installations.
 src/fern/
 ├── bft/
 │   ├── admission.py       prospective-validator history preparation
-│   ├── application.py     deterministic replicated application state
+│   ├── app.py             core state, AppModule interface, execution orchestration
 │   ├── blocks.py          candidate, block, proposal, and commit objects
 │   ├── canonical.py       cross-runtime canonical JSON, hashes, signatures
 │   ├── certificates.py    ingress, observation, vote, and readiness objects
 │   ├── chain.py           commit and full-chain verification
 │   ├── client.py          verified sync and multi-validator publication
 │   ├── consensus.py       crash-safe voting and locking kernel
-│   ├── constants.py       protocol version, phases, and size limits
+│   ├── constants.py       protocol version, phases, size limits, core event/boundary sets
 │   ├── manifest.py        manifests, hosting evidence, local admission
 │   ├── node.py            per-group engine and multi-group validator node
 │   ├── store.py           SQLite history, mempool, and safety journal
 │   └── validators.py      validator and quorum rules
-├── chat/                  event-content helpers for the built-in app
+├── apps/
+│   ├── __init__.py        app registry (register_app, get_app, register_builtins)
+│   └── chat.py            the chat app module (ChatApp, ChatState, roles, channels)
+├── chat/                  client-side event-content builders for the chat app
 ├── crypto/                Ed25519, hashes, and key encoding
-├── events/                event model, building, serialization, validation
+├── events/                event model, building, serialization, core semantic validation
 ├── identity/              user and group key wrappers
 ├── validator/
 │   ├── config.py          validator process configuration and keys
@@ -145,13 +153,14 @@ familiar content model while changing the signed structure to:
 
 `build.py` constructs and signs user or genesis events. `serialization.py` and
 `validation.py` enforce exact fields, size limits, canonical IDs, signatures,
-and sequence shape. `semantic.py` validates known protocol and chat content.
-`types.py` centralizes event type constants and identifies governance/state
-events.
+and sequence shape. `semantic.py` validates core event content and exports
+shared field helpers; chat content validation lives in `apps/chat.py`.
+`types.py` centralizes event type constants and identifies protocol/app and
+state events.
 
-Event validation here is context-free. Membership, authorization, expected
-sequence, channel existence, and certified-time bans belong to
-`bft.application` because they depend on a particular finalized state.
+Event validation here is context-free. Membership and sequencing belong to
+`bft.app`; chat authorization and channel existence belong to `apps.chat`;
+both depend on a particular finalized state.
 
 ### 4.3 `bft.canonical`
 
@@ -215,19 +224,37 @@ The block layer is split into progressively stronger objects:
 signers, quorums, exact object IDs, size/event bounds, and evidence alignment.
 They do not mutate application state.
 
-### 4.7 `bft.application`
+### 4.7 `bft.app` and `apps.chat` (the protocol/app boundary)
 
-`ApplicationState` is an immutable snapshot of all consensus-controlled group
-state. `initial_state_from_genesis` validates and derives height-zero state.
-`validate_event_for_state`, `apply_event`, and `execute_events` implement
-authorization and deterministic state transitions.
+This is where the core/app split lives (see
+[protocol-app-boundary.md](protocol-app-boundary.md)).
 
-`execute_events` enforces the ordinary-events-first, single-governance-last
-rule. Validator updates validate readiness against the incoming checkpoint and
-produce the next epoch's complete set. The `ApplicationState.root` property
-hashes canonical serialized state and is checked against each proposed block.
+`bft/app.py` defines the `AppModule` and `AppState` protocols, the core state
+(`CoreState`: identity, validator set, members/joined/banned, sequences,
+metadata), the combined `GroupState` (core plus the app's opaque state), and the
+execution orchestration: `initial_state_from_genesis`, `genesis_chain_head`,
+`validate_event_for_state`, `apply_event`, `execute_events`, and
+`boundary_types_for`. `GroupState.root` hashes the canonical combined state
+(core keys merged with the app's keys) and is checked against each proposed
+block.
 
-The module never calls `time.time()`. The caller supplies certified event times
+The core owns membership and the validator-set mechanism; it delegates all
+authorization to the app via `app.authorize(core, app, event, certified_time)`
+and calls `app.apply_event` for every event so the app can apply its own state
+transitions (including side effects of core events, such as dropping a banned
+user's roles). `execute_events` enforces the ordinary-events-first,
+single-boundary-event-last rule across the core and app boundary types.
+Validator updates validate readiness against the incoming checkpoint and
+produce the next epoch's complete set.
+
+`apps/chat.py` implements `AppModule` for the chat app: `ChatState` (`managers`,
+`mods`, `channels`, `settings`), chat semantic and genesis validation, the chat
+authorization policy (managers supreme, mods delegated), and the chat state
+transitions. `apps/__init__.py` is the app registry (`register_app`, `get_app`,
+`register_builtins`); the core looks the app up by the `app` name committed in
+state and never imports app code directly.
+
+Neither module calls `time.time()`. The caller supplies certified event times
 and the checkpoint values used to validate readiness.
 
 ### 4.8 `bft.chain`
@@ -401,7 +428,7 @@ The user-facing command families are:
 | `fern init`, `fern whoami` | User identity |
 | `fern group create/join/list/info/members` | Group lifecycle and verified state |
 | `fern group leave/invite/kick/ban/unban` | Membership governance |
-| `fern group admin-add/admin-remove/nickname` | Administration and profile events |
+| `fern group manager-add/manager-remove/mod-add/mod-remove/nickname` | Role management and profile events |
 | `fern group validator-update` | Full validator-set replacement with readiness |
 | `fern post/read/watch` | Publish, inspect, and subscribe to chat history |
 | `fern verify` | Re-verify the full cached chain from genesis |

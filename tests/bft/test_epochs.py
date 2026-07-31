@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from fern.bft.blocks import Commit
-from fern.bft.application import ApplicationError, execute_events
+from fern.bft.app import ApplicationError, execute_events
 from fern.bft.certificates import SyncReady, sign_sync_ready
 from fern.bft.chain import verify_and_apply_commit
 from fern.bft.node import ValidatorNode

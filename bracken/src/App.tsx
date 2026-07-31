@@ -80,20 +80,25 @@ const USER_COMMANDS: SlashCommand[] = [
   { cmd: '/nickname', desc: 'Set your display name' },
 ]
 
-const ADMIN_COMMANDS: SlashCommand[] = [
+const MOD_COMMANDS: SlashCommand[] = [
   { cmd: '/kick', desc: 'Kick a member by pubkey' },
   { cmd: '/ban', desc: 'Ban a member by pubkey' },
   { cmd: '/unban', desc: 'Lift a ban by pubkey' },
   { cmd: '/invite', desc: 'Invite a pubkey' },
-  { cmd: '/promote', desc: 'Promote a member to admin' },
-  { cmd: '/demote', desc: 'Demote an admin' },
-  { cmd: '/name', desc: 'Set group name' },
-  { cmd: '/description', desc: 'Set group description' },
   { cmd: '/channel-create', desc: 'Create a new channel' },
   { cmd: '/channel-delete', desc: 'Delete a channel' },
+]
+const MANAGER_COMMANDS: SlashCommand[] = [
+  { cmd: '/mod-add', desc: 'Make a member a moderator' },
+  { cmd: '/mod-remove', desc: 'Remove a moderator' },
+  { cmd: '/manager-add', desc: 'Make a member a manager (full control)' },
+  { cmd: '/manager-remove', desc: 'Remove a manager' },
+  { cmd: '/name', desc: 'Set group name' },
+  { cmd: '/description', desc: 'Set group description' },
   { cmd: '/validator-add', desc: 'Add a validator: /validator-add <url> (it prepares its own proof)' },
   { cmd: '/validator-remove', desc: 'Remove a validator by URL' },
 ]
+const MANAGER_ONLY_COMMANDS = new Set(MANAGER_COMMANDS.map((command) => command.cmd))
 
 function firstArg(args: string): string {
   return args.trim().split(/\s+/, 1)[0] ?? ''
@@ -214,8 +219,11 @@ export default function App() {
     return computeChannelNames(bracken.events.filter((event) => acceptedEventIds.has(event.id)))
   }, [bracken.events, acceptedEventIds])
 
-  const admins = useMemo(() => {
-    return bracken.state?.admins ?? new Set<string>()
+  const managers = useMemo(() => {
+    return bracken.state?.managers ?? new Set<string>()
+  }, [bracken.state])
+  const mods = useMemo(() => {
+    return bracken.state?.mods ?? new Set<string>()
   }, [bracken.state])
 
   const [selectedChannels, setSelectedChannels] = useState<Record<string, string>>({})
@@ -234,10 +242,16 @@ export default function App() {
       ? defaultChannel
       : channels[0]?.id ?? ''
 
-  const isViewerAdmin = bracken.identity ? admins.has(bracken.identity.publicKey) : false
+  const isViewerManager = bracken.identity ? managers.has(bracken.identity.publicKey) : false
+  const isViewerMod = bracken.identity ? mods.has(bracken.identity.publicKey) : false
+  const isViewerAdmin = isViewerManager || isViewerMod
   const slashCommands = useMemo(() => {
-    return isViewerAdmin ? [...USER_COMMANDS, ...ADMIN_COMMANDS] : USER_COMMANDS
-  }, [isViewerAdmin])
+    return [
+      ...USER_COMMANDS,
+      ...(isViewerAdmin ? MOD_COMMANDS : []),
+      ...(isViewerManager ? MANAGER_COMMANDS : []),
+    ]
+  }, [isViewerAdmin, isViewerManager])
 
   if (bracken.loading) {
     return (
@@ -340,7 +354,6 @@ export default function App() {
           groups={bracken.groups}
           activeGroup={bracken.activeGroup}
           identityPubkey={bracken.identity.publicKey}
-          validatorConns={bracken.validatorConns}
           channels={channels}
           selectedChannel={selectedChannel}
           onSelectGroup={(pk) => {
@@ -416,7 +429,8 @@ export default function App() {
               events={bracken.events}
               rejectedIds={rejectedIds}
               connectedEventIds={acceptedEventIds}
-              admins={admins}
+              managers={managers}
+              mods={mods}
               joined={joinedSet}
               nicknames={nicknames}
               banned={bannedSet}
@@ -455,32 +469,38 @@ export default function App() {
                   assertPublished(await bracken.adminAction('unban', firstArg(args)))
                 } else if (isViewerAdmin && cmd === '/invite') {
                   assertPublished(await bracken.adminAction('invite', firstArg(args)))
-                } else if (isViewerAdmin && cmd === '/promote') {
-                  assertPublished(await bracken.adminAction('admin_add', firstArg(args)))
-                } else if (isViewerAdmin && cmd === '/demote') {
-                  assertPublished(await bracken.adminAction('admin_remove', firstArg(args)))
-                } else if (isViewerAdmin && cmd === '/name' && args.trim()) {
+                } else if (isViewerManager && cmd === '/mod-add') {
+                  assertPublished(await bracken.adminAction('chat.mod_add', firstArg(args)))
+                } else if (isViewerManager && cmd === '/mod-remove') {
+                  assertPublished(await bracken.adminAction('chat.mod_remove', firstArg(args)))
+                } else if (isViewerManager && cmd === '/manager-add') {
+                  assertPublished(await bracken.adminAction('chat.manager_add', firstArg(args)))
+                } else if (isViewerManager && cmd === '/manager-remove') {
+                  assertPublished(await bracken.adminAction('chat.manager_remove', firstArg(args)))
+                } else if (isViewerManager && cmd === '/name' && args.trim()) {
                   assertPublished(await bracken.adminAction('metadata_update', '', { name: args.trim() }))
-                } else if (isViewerAdmin && cmd === '/description') {
+                } else if (isViewerManager && cmd === '/description') {
                   assertPublished(await bracken.adminAction('metadata_update', '', { description: args.trim() }))
                 } else if (isViewerAdmin && cmd === '/channel-create' && args.trim()) {
                   assertPublished(await bracken.adminAction('chat.channel_create', '', { id: randomHexId(), name: args.trim() }))
                 } else if (isViewerAdmin && cmd === '/channel-delete' && args.trim()) {
                   const channel = [...(bracken.state?.channels.values() ?? [])].find((ch) => ch.name === args.trim() || ch.id === args.trim())
                   if (channel) assertPublished(await bracken.adminAction('chat.channel_delete', '', { id: channel.id, name: channel.name }))
-                } else if (isViewerAdmin && cmd === '/validator-add') {
+                } else if (isViewerManager && cmd === '/validator-add') {
                   const url = firstArg(args)
                   if (!url)
                     throw new Error('Usage: /validator-add <validator-url> — the validator syncs its own history and signs its own readiness proof.')
                   assertPublished(await bracken.addValidatorByUrl(url))
-                } else if (isViewerAdmin && cmd === '/validator-remove') {
+                } else if (isViewerManager && cmd === '/validator-remove') {
                   const url = firstArg(args)
                   if (!url) throw new Error('Usage: /validator-remove <validator-url>')
                   assertPublished(await bracken.removeValidatorByUrl(url))
                 } else if (cmd === '/nickname') {
                   throw new Error('Usage: /nickname <name>')
                 } else if (!isViewerAdmin) {
-                  throw new Error(`Only group admins can use ${cmd}.`)
+                  throw new Error(`Only moderators and managers can use ${cmd}.`)
+                } else if (MANAGER_ONLY_COMMANDS.has(cmd)) {
+                  throw new Error(`Only managers can use ${cmd}.`)
                 } else if (cmd === '/channel-delete') {
                   throw args.trim()
                     ? new Error(`No channel named "${args.trim()}" exists in this group.`)

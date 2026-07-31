@@ -11,7 +11,6 @@ from fern.bft.certificates import (
     verify_vote,
 )
 from fern.bft.constants import (
-    GOVERNANCE_TYPES,
     MAX_BLOCK_BYTES,
     MAX_BLOCK_EVENTS,
     PHASE_PRECOMMIT,
@@ -135,10 +134,6 @@ def verify_candidate(candidate: Candidate, validator_set: ValidatorSet) -> bool:
     ):
         return False
     try:
-        if any(event.type in GOVERNANCE_TYPES for event in candidate.events):
-            return False
-        if candidate.governance is not None and candidate.governance.type not in GOVERNANCE_TYPES:
-            return False
         for event in candidate.all_events:
             verify_event(event)
             if event.group != candidate.group or event.type == "genesis":

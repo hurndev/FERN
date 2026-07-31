@@ -74,7 +74,7 @@ content, or validator compensation.
 
 FERN uses three distinct Ed25519 identities:
 
-- A **user key** signs ordinary and governance events. A user public key is the
+- A **user key** signs ordinary and boundary events. A user public key is the
   durable application identity.
 - A **group key** signs only genesis. Its public key is the permanent group ID;
   it is not a validator key and does not override consensus after genesis.
@@ -134,9 +134,10 @@ consensus order, authorization, ban expiration, or validator transitions.
 
 ## 5. Genesis and chain commitments
 
-Genesis commits the chain ID, group metadata, founder and initial admins,
-public/private join policy, application namespace, chat channels, and epoch-zero
-validator set. The group public key remains the addressable group identity.
+Genesis commits the core fields (chain ID, group metadata, founder,
+public/private join policy, application namespace, and epoch-zero validator set)
+plus the app's initial state — for chat, the channels and the initial managers
+and mods. The group public key remains the addressable group identity.
 
 Height zero is derived from genesis. Every later block commits to:
 
@@ -152,10 +153,10 @@ appear in signed status, manifest, and readiness objects so a checkpoint
 describes not just a height but the exact retained history.
 
 Blocks contain at least one event: a bounded list of ordinary events and at
-most one governance event. Ordinary events execute in listed order; governance
-executes last. This keeps a membership, channel, ban, or validator-set change
-from retroactively altering the validity of ordinary events earlier in the
-same block.
+most one boundary event (carried in the block's governance slot). Ordinary
+events execute in listed order; the boundary event executes last. This keeps a
+membership, channel, ban, role, or validator-set change from retroactively
+altering the validity of ordinary events earlier in the same block.
 
 ## 6. Validator sets and epochs
 
@@ -191,8 +192,9 @@ validators meet the standard Byzantine fault model; it offers no
 unavailable-validator tolerance, and CLI and Bracken clients display a
 persistent warning.
 
-A `validator_update` is an administrator-signed governance event. The old
-validator set validates and commits the transition block. The new set becomes
+A `validator_update` is a boundary event whose authorization is delegated to
+the app (in chat, only managers may trigger it). The old validator set
+validates and commits the transition block. The new set becomes
 active at the following height with its epoch incremented by one. The group
 freezes safely if either active set cannot form a quorum; there is no
 out-of-band membership recovery.
@@ -262,15 +264,17 @@ exactly the same order. State includes:
 
 - chain ID, application namespace, and validator set;
 - members currently known to the group and members currently joined;
-- admins and certified-time ban records;
+- managers and mods (chat roles), and certified-time ban records;
 - each author's last finalized sequence;
 - group metadata, chat channels, and chat settings.
 
-Protocol actions include join, leave, invite, kick, ban, unban, admin changes,
-metadata changes, and validator-set replacement. The built-in chat namespace
-includes messages, reactions, nicknames, channel administration, and settings.
-Unknown non-`chat` application namespaces can remain opaque, but protocol and
-built-in chat events receive full semantic validation.
+Core actions include join, leave, invite, kick, ban, unban, metadata changes,
+and validator-set replacement. The chat app adds role changes (managers/mods),
+channel administration, settings, and content (messages, reactions,
+nicknames), and authorizes every event (see
+[protocol-app-boundary.md](protocol-app-boundary.md)). Events whose namespace
+is neither core nor the group's app are rejected; core and built-in chat events
+receive full semantic validation.
 
 Authorization is evaluated against the state immediately before an event.
 Time-sensitive checks use certified median time, not the author's `ts` or the

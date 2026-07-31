@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from fern.bft.application import ApplicationState, ChainHead, genesis_chain_head
+from fern.bft.app import ChainHead, GroupState, genesis_chain_head
 from fern.bft.blocks import Commit, Proposal
 from fern.bft.certificates import TimestampObservation, Vote
 from fern.bft.chain import verify_and_apply_commit
@@ -242,7 +242,7 @@ class BFTStore(SafetyJournal):
             block_hash=str(row["block_hash"]),
             history_root=str(row["history_root"]),
             logical_bytes=int(row["logical_bytes"]),
-            state=ApplicationState.from_dict(json.loads(str(row["state_json"]))),
+            state=GroupState.from_dict(json.loads(str(row["state_json"]))),
         )
 
     def add_pending(self, event: Event, first_seen_ms: int | None = None) -> int:

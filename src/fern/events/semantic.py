@@ -1,39 +1,42 @@
+"""Context-free semantic validation for core (protocol) events.
+
+Core events are the bare types the protocol owns (membership, validator set,
+group metadata). Application events (dotted types) are validated by their app
+module, which reuses the generic field helpers exported here.
+
+Validation here is context-free: membership, authorization, expected sequence
+and certified-time bans depend on a particular finalized state and live in
+``fern.bft.app`` / the app module.
+"""
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
+from fern.bft.validators import Validator, make_validator_set
 from fern.crypto.encoding import is_valid_event_id_hex, is_valid_pubkey_hex
 from fern.events.event import Event
 from fern.events.limits import (
-    MAX_ADMINS,
     MAX_APP_NAME_BYTES,
     MAX_BAN_REASON_BYTES,
-    MAX_CHANNEL_DESCRIPTION_BYTES,
-    MAX_CHANNEL_ID_BYTES,
-    MAX_CHANNEL_NAME_BYTES,
     MAX_GROUP_DESCRIPTION_BYTES,
     MAX_GROUP_NAME_BYTES,
-    MAX_MESSAGE_TEXT_BYTES,
-    MAX_NICKNAME_BYTES,
-    MAX_REACTION_BYTES,
-    MAX_VALIDATOR_URL_BYTES,
 )
-from fern.events.types import ChatTypes, ProtocolTypes
-from fern.bft.validators import Validator, make_validator_set
+from fern.events.types import ProtocolTypes
 
 
 class SemanticValidationError(ValueError):
     pass
 
 
-def _byte_len(value: str) -> int:
+# --- Generic content-field helpers (shared with app modules) -----------------
+
+
+def byte_len(value: str) -> int:
     return len(value.encode("utf-8"))
 
 
-def _string(value: object, field: str, *, min_bytes: int = 0, max_bytes: int) -> str:
+def string_field(value: object, field: str, *, min_bytes: int = 0, max_bytes: int) -> str:
     if not isinstance(value, str):
         raise SemanticValidationError(f"{field} must be a string")
-    size = _byte_len(value)
+    size = byte_len(value)
     if size < min_bytes:
         raise SemanticValidationError(f"{field} is too short")
     if size > max_bytes:
@@ -41,224 +44,135 @@ def _string(value: object, field: str, *, min_bytes: int = 0, max_bytes: int) ->
     return value
 
 
-def _pubkey(value: object, field: str) -> str:
+def pubkey_field(value: object, field: str) -> str:
     if not isinstance(value, str) or not is_valid_pubkey_hex(value):
         raise SemanticValidationError(f"{field} must be a pubkey")
     return value
 
 
-def _event_id(value: object, field: str) -> str:
+def event_id_field(value: object, field: str) -> str:
     if not isinstance(value, str) or not is_valid_event_id_hex(value):
         raise SemanticValidationError(f"{field} must be an event id")
     return value
 
 
-def _int(value: object, field: str) -> int:
+def int_field(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise SemanticValidationError(f"{field} must be an integer")
     return value
 
 
-def _only(content: dict[str, object], allowed: set[str]) -> None:
+def only_fields(content: dict[str, object], allowed: set[str]) -> None:
     extra = set(content) - allowed
     if extra:
         raise SemanticValidationError(f"unexpected content field: {sorted(extra)[0]}")
 
 
-def _validator_url(value: object) -> str:
-    url = _string(value, "validator", min_bytes=1, max_bytes=MAX_VALIDATOR_URL_BYTES)
-    parsed = urlparse(url)
-    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
-        raise SemanticValidationError("validator must be a ws:// or wss:// URL")
-    return url
+# --- Core event validation ---------------------------------------------------
 
 
-def _channel_id(value: object, field: str = "channel id") -> str:
-    s = _string(value, field, min_bytes=MAX_CHANNEL_ID_BYTES, max_bytes=MAX_CHANNEL_ID_BYTES)
-    if not is_valid_event_id_hex(s):
-        raise SemanticValidationError(f"{field} must be 64-char lowercase hex")
-    return s
+def _validate_validator_list(content: dict[str, object]) -> None:
+    raw_validators = content.get("validators")
+    if not isinstance(raw_validators, list):
+        raise SemanticValidationError("validators must be an array")
+    try:
+        validators = [Validator.from_dict(raw) for raw in raw_validators if isinstance(raw, dict)]
+        if len(validators) != len(raw_validators):
+            raise ValueError("invalid validator entry")
+        fault_tolerance = int_field(content["fault_tolerance"], "fault_tolerance")
+        make_validator_set(validators, epoch=0, fault_tolerance=fault_tolerance)
+    except ValueError as exc:
+        raise SemanticValidationError(str(exc)) from exc
 
 
-def _validate_chat_channel(raw: object) -> str:
-    if not isinstance(raw, dict):
-        raise SemanticValidationError("chat channel must be an object")
-    _only(raw, {"id", "name", "description", "position"})
-    channel_id = _channel_id(raw.get("id"), "channel.id")
-    _string(raw.get("name"), "channel.name", min_bytes=1, max_bytes=MAX_CHANNEL_NAME_BYTES)
-    if "description" in raw:
-        _string(raw["description"], "channel.description", max_bytes=MAX_CHANNEL_DESCRIPTION_BYTES)
-    if "position" in raw:
-        _int(raw["position"], "channel.position")
-    return channel_id
+def validate_genesis_core(event: Event) -> None:
+    """Validate the core (bare) fields of a genesis event.
+
+    App-namespaced (dotted) fields are validated by the app module; this only
+    checks that they belong to the declared app's namespace.
+    """
+    c = event.content
+    required = {
+        "chain_id",
+        "name",
+        "description",
+        "public",
+        "founder",
+        "validators",
+        "fault_tolerance",
+        "app",
+    }
+    missing = required - set(c)
+    if missing:
+        raise SemanticValidationError(f"missing genesis field: {sorted(missing)[0]}")
+    for key in c:
+        if "." not in key and key not in required:
+            raise SemanticValidationError(f"unexpected genesis protocol field: {key}")
+    string_field(c["name"], "name", min_bytes=1, max_bytes=MAX_GROUP_NAME_BYTES)
+    string_field(c["description"], "description", max_bytes=MAX_GROUP_DESCRIPTION_BYTES)
+    if not isinstance(c["public"], bool):
+        raise SemanticValidationError("public must be a boolean")
+    founder = pubkey_field(c["founder"], "founder")
+    if founder != event.author:
+        raise SemanticValidationError("founder must equal author")
+    chain_id = c["chain_id"]
+    if not isinstance(chain_id, str) or not is_valid_event_id_hex(chain_id):
+        raise SemanticValidationError("chain_id must be 64-char lowercase hex")
+    _validate_validator_list(c)
+    app = string_field(c["app"], "app", min_bytes=1, max_bytes=MAX_APP_NAME_BYTES)
+    prefix = app + "."
+    for key in c:
+        if "." in key and not key.startswith(prefix):
+            raise SemanticValidationError(f"genesis field for foreign app namespace: {key}")
 
 
-def validate_event_semantics(event: Event) -> None:
+def validate_core_event_semantics(event: Event) -> None:
     c = event.content
     t = event.type
 
-    if t == ProtocolTypes.GENESIS:
-        required = {
-            "chain_id",
-            "name",
-            "description",
-            "public",
-            "founder",
-            "admins",
-            "validators",
-            "fault_tolerance",
-            "app",
-        }
-        missing = required - set(c)
-        if missing:
-            raise SemanticValidationError(f"missing genesis field: {sorted(missing)[0]}")
-        known_bare = required
-        for key in c:
-            if "." not in key and key not in known_bare:
-                raise SemanticValidationError(f"unexpected genesis protocol field: {key}")
-        _string(c["name"], "name", min_bytes=1, max_bytes=MAX_GROUP_NAME_BYTES)
-        _string(c["description"], "description", max_bytes=MAX_GROUP_DESCRIPTION_BYTES)
-        if not isinstance(c["public"], bool):
-            raise SemanticValidationError("public must be a boolean")
-        founder = _pubkey(c["founder"], "founder")
-        if founder != event.author:
-            raise SemanticValidationError("founder must equal author")
-        admins = c["admins"]
-        if not isinstance(admins, list) or not 1 <= len(admins) <= MAX_ADMINS:
-            raise SemanticValidationError("admins must be a non-empty bounded array")
-        for admin in admins:
-            _pubkey(admin, "admin")
-        if founder not in admins:
-            raise SemanticValidationError("admins must include founder")
-        chain_id = c["chain_id"]
-        if not isinstance(chain_id, str) or not is_valid_event_id_hex(chain_id):
-            raise SemanticValidationError("chain_id must be 64-char lowercase hex")
-        raw_validators = c["validators"]
-        if not isinstance(raw_validators, list):
-            raise SemanticValidationError("validators must be an array")
-        try:
-            validators = [
-                Validator.from_dict(raw) for raw in raw_validators if isinstance(raw, dict)
-            ]
-            if len(validators) != len(raw_validators):
-                raise ValueError("invalid validator entry")
-            fault_tolerance = _int(c["fault_tolerance"], "fault_tolerance")
-            make_validator_set(validators, epoch=0, fault_tolerance=fault_tolerance)
-        except ValueError as exc:
-            raise SemanticValidationError(str(exc)) from exc
-        app = _string(c["app"], "app", min_bytes=1, max_bytes=MAX_APP_NAME_BYTES)
-        if app == "chat":
-            channels = c.get("chat.channels")
-            if not isinstance(channels, list) or not channels:
-                raise SemanticValidationError("chat.channels must be a non-empty array")
-            channel_ids = [_validate_chat_channel(raw) for raw in channels]
-            if len(channel_ids) != len(set(channel_ids)):
-                raise SemanticValidationError("chat channel ids must be unique")
-            channel_names = [str(raw["name"]) for raw in channels if isinstance(raw, dict)]
-            if len(channel_names) != len(set(channel_names)):
-                raise SemanticValidationError("chat channel names must be unique")
-            if "chat.default_channel" in c:
-                default = _channel_id(c["chat.default_channel"], "chat.default_channel")
-                if default not in channel_ids:
-                    raise SemanticValidationError("chat.default_channel is unknown")
-            if "chat.system_channel" in c:
-                system = _channel_id(c["chat.system_channel"], "chat.system_channel")
-                if system not in channel_ids:
-                    raise SemanticValidationError("chat.system_channel is unknown")
-        return
-
     if t in (ProtocolTypes.JOIN, ProtocolTypes.LEAVE):
-        _only(c, set())
+        only_fields(c, set())
     elif t == ProtocolTypes.INVITE:
-        _only(c, {"invitee", "role"})
-        _pubkey(c.get("invitee"), "invitee")
+        only_fields(c, {"invitee", "role"})
+        pubkey_field(c.get("invitee"), "invitee")
         if c.get("role") != "member":
             raise SemanticValidationError("role must be member")
-    elif t in (
-        ProtocolTypes.KICK,
-        ProtocolTypes.UNBAN,
-        ProtocolTypes.ADMIN_ADD,
-        ProtocolTypes.ADMIN_REMOVE,
-    ):
-        _only(c, {"target"})
-        _pubkey(c.get("target"), "target")
+    elif t in (ProtocolTypes.KICK, ProtocolTypes.UNBAN):
+        only_fields(c, {"target"})
+        pubkey_field(c.get("target"), "target")
     elif t == ProtocolTypes.BAN:
-        _only(c, {"target", "until", "reason"})
-        _pubkey(c.get("target"), "target")
+        only_fields(c, {"target", "until", "reason"})
+        pubkey_field(c.get("target"), "target")
         if c.get("until") is not None:
-            until = _int(c.get("until"), "until")
+            until = int_field(c.get("until"), "until")
             if until <= 0:
                 raise SemanticValidationError("until must be positive")
-        _string(c.get("reason", ""), "reason", max_bytes=MAX_BAN_REASON_BYTES)
+        string_field(c.get("reason", ""), "reason", max_bytes=MAX_BAN_REASON_BYTES)
     elif t == ProtocolTypes.VALIDATOR_UPDATE:
-        _only(c, {"validators", "fault_tolerance", "readiness"})
-        raw_validators = c.get("validators")
-        if not isinstance(raw_validators, list):
-            raise SemanticValidationError("validators must be an array")
-        try:
-            validators = [
-                Validator.from_dict(raw) for raw in raw_validators if isinstance(raw, dict)
-            ]
-            if len(validators) != len(raw_validators):
-                raise ValueError("invalid validator entry")
-            fault_tolerance = _int(c.get("fault_tolerance"), "fault_tolerance")
-            make_validator_set(validators, epoch=0, fault_tolerance=fault_tolerance)
-        except ValueError as exc:
-            raise SemanticValidationError(str(exc)) from exc
+        only_fields(c, {"validators", "fault_tolerance", "readiness"})
+        _validate_validator_list(c)
         if not isinstance(c.get("readiness"), list):
             raise SemanticValidationError("readiness must be an array")
     elif t == ProtocolTypes.METADATA_UPDATE:
-        _only(c, {"name", "description"})
+        only_fields(c, {"name", "description"})
         if "name" not in c and "description" not in c:
             raise SemanticValidationError("metadata_update must include a field")
         if "name" in c:
-            _string(c["name"], "name", min_bytes=1, max_bytes=MAX_GROUP_NAME_BYTES)
+            string_field(c["name"], "name", min_bytes=1, max_bytes=MAX_GROUP_NAME_BYTES)
         if "description" in c:
-            _string(c["description"], "description", max_bytes=MAX_GROUP_DESCRIPTION_BYTES)
-    elif t == ChatTypes.MESSAGE:
-        _only(c, {"text", "channel", "reply_to"})
-        _string(c.get("text"), "text", min_bytes=1, max_bytes=MAX_MESSAGE_TEXT_BYTES)
-        _channel_id(c.get("channel"), "channel")
-        if c.get("reply_to") is not None:
-            _event_id(c.get("reply_to"), "reply_to")
-    elif t == ChatTypes.REACTION:
-        _only(c, {"target", "emoji"})
-        _event_id(c.get("target"), "target")
-        _string(c.get("emoji"), "emoji", min_bytes=1, max_bytes=MAX_REACTION_BYTES)
-    elif t == ChatTypes.NICKNAME_SET:
-        _only(c, {"nickname"})
-        _string(c.get("nickname"), "nickname", min_bytes=1, max_bytes=MAX_NICKNAME_BYTES)
-    elif t == ChatTypes.CHANNEL_CREATE:
-        _only(c, {"id", "name", "description", "position"})
-        _channel_id(c.get("id"), "id")
-        _string(c.get("name"), "name", min_bytes=1, max_bytes=MAX_CHANNEL_NAME_BYTES)
-        if "description" in c:
-            _string(c["description"], "description", max_bytes=MAX_CHANNEL_DESCRIPTION_BYTES)
-        if "position" in c:
-            _int(c["position"], "position")
-    elif t == ChatTypes.CHANNEL_UPDATE:
-        _only(c, {"id", "name", "description", "position"})
-        _channel_id(c.get("id"), "id")
-        if not any(key in c for key in ("name", "description", "position")):
-            raise SemanticValidationError("channel_update must include an update")
-        if "name" in c:
-            _string(c["name"], "name", min_bytes=1, max_bytes=MAX_CHANNEL_NAME_BYTES)
-        if "description" in c:
-            _string(c["description"], "description", max_bytes=MAX_CHANNEL_DESCRIPTION_BYTES)
-        if "position" in c:
-            _int(c["position"], "position")
-    elif t == ChatTypes.CHANNEL_DELETE:
-        _only(c, {"id", "name"})
-        _channel_id(c.get("id"), "id")
-        if "name" in c:
-            _string(c["name"], "name", min_bytes=1, max_bytes=MAX_CHANNEL_NAME_BYTES)
-    elif t == ChatTypes.SETTINGS_UPDATE:
-        _only(c, {"default_channel", "system_channel"})
-        if "default_channel" not in c and "system_channel" not in c:
-            raise SemanticValidationError("settings_update must include a field")
-        if "default_channel" in c:
-            _channel_id(c["default_channel"], "default_channel")
-        if "system_channel" in c:
-            _channel_id(c["system_channel"], "system_channel")
+            string_field(c["description"], "description", max_bytes=MAX_GROUP_DESCRIPTION_BYTES)
     else:
-        raise SemanticValidationError(f"unknown event type: {t}")
+        raise SemanticValidationError(f"unknown core event type: {t}")
+
+
+__all__ = [
+    "SemanticValidationError",
+    "byte_len",
+    "event_id_field",
+    "int_field",
+    "only_fields",
+    "pubkey_field",
+    "string_field",
+    "validate_core_event_semantics",
+    "validate_genesis_core",
+]
