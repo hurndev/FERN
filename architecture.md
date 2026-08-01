@@ -274,7 +274,9 @@ channel administration, settings, and content (messages, reactions,
 nicknames), and authorizes every event (see
 [protocol-app-boundary.md](protocol-app-boundary.md)). Events whose namespace
 is neither core nor the group's app are rejected; core and built-in chat events
-receive full semantic validation.
+receive full semantic validation. The core itself is app-agnostic: it looks the
+app up by the name committed in genesis and delegates policy to it, so other apps
+(e.g. the chess example in `examples/chess`) plug into the same machinery.
 
 Authorization is evaluated against the state immediately before an event.
 Time-sensitive checks use certified median time, not the author's `ts` or the

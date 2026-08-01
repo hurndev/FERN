@@ -20,8 +20,9 @@ The protocol core is shared and app-agnostic; each app is a pluggable module tha
 rides on top of it. A validator declares which app modules it supports and refuses
 any group whose `app` it does not implement.
 
-- **One app per group.** The `app` name is committed in genesis (currently always
-  `chat`). In-app features use sub-namespaces (e.g. `chat.poll.create`).
+- **One app per group.** The `app` name is committed in genesis (e.g. `chat`;
+  a second example app, `chess`, lives in `examples/chess`). In-app features use
+  sub-namespaces (e.g. `chat.poll.create`).
 - **App modules are linked code**, shipped by the operator (the Cosmos-module /
   Substrate-pallet model). WASM / permissionless app deployment is **out of scope**;
   it could be added later as one app module among native ones, but is not needed for
@@ -30,6 +31,12 @@ any group whose `app` it does not implement.
 The reference chat app is implemented twice and kept in lockstep: in Python
 (`fern.apps.chat`, used by validators and the CLI) and in TypeScript (Bracken's
 `state.ts`, the browser client). Both produce byte-identical state roots (§13).
+
+A second app, **chess**, lives in `examples/chess` as a worked example of this
+boundary: it implements the same `AppModule` interface for a turn-based game and
+runs on the unmodified core (its own validator entry point registers it with
+`register_app`). It exists to show the core hosts a genuinely different,
+non-chat app with no changes to `src/fern`.
 
 ## 2. The dividing principle
 
@@ -407,6 +414,16 @@ validator entry point, and the test `conftest.py` call `register_builtins()`.
 **CLI commands** for role management are `manager-add` / `manager-remove` / `mod-add` /
 `mod-remove` (the old `admin-add` / `admin-remove` are gone).
 
+### Example apps (out-of-tree)
+
+`examples/chess` is a complete second application built against this interface
+without modifying `src/fern`: a pure `board` engine, the `ChessApp` / `ChessState`
+module, a client, and a validator entry point (`run_cluster.py`). It registers
+with `register_app(CHESS_APP)`. Because the stock validator calls
+`register_builtins()` — which registers chat only — a chess-aware entry point is
+what lets a validator host `app: "chess"` groups; the core then delegates to the
+chess module exactly as it does to chat.
+
 ### Bracken (TypeScript)
 
 - `src/fern/state.ts` — `GroupState` (flat), genesis validation, authorization
@@ -439,10 +456,11 @@ share one history.
 - **The boundary check lives in different places** in the two implementations
   (`execute_events` in Python, `verifyCommitEvidence` in Bracken) because their
   verification flows differ; both enforce the same rule.
-- **Single-app assumption in chat code.** The chat module and CLI use
-  `assert isinstance(app, ChatState)`. Fine while a process hosts one app; a future
-  multi-app validator would want proper per-app dispatch. The core itself never assumes
-  the app state type (it stays opaque).
+- **Single-app assumption in app code.** The chat module and CLI use
+  `assert isinstance(app, ChatState)` (the chess example does the same with
+  `ChessState`). Fine while a process hosts one app; a future multi-app validator
+  would want proper per-app dispatch. The core itself never assumes the app state
+  type (it stays opaque).
 
 ## 15. Future work
 

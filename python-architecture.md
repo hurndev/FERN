@@ -134,6 +134,10 @@ The old `fern.client`, `fern.completeness`, `fern.dag`, `fern.state`,
 encoded assumptions about loose DAG events and server reconciliation that do not
 fit committed block history.
 
+Application modules can also live **out-of-tree**: `examples/chess` is a complete
+second app (a pure board engine, the `ChessApp` module, a client, and a validator
+entry point) built against `fern.bft.app` without modifying `src/fern`.
+
 ## 4. Pure protocol layers
 
 ### 4.1 `fern.crypto`
@@ -252,7 +256,9 @@ produce the next epoch's complete set.
 authorization policy (managers supreme, mods delegated), and the chat state
 transitions. `apps/__init__.py` is the app registry (`register_app`, `get_app`,
 `register_builtins`); the core looks the app up by the `app` name committed in
-state and never imports app code directly.
+state and never imports app code directly. A second app, chess, is implemented
+out-of-tree in `examples/chess` against the same interface, demonstrating that
+the core hosts a non-chat app unchanged.
 
 Neither module calls `time.time()`. The caller supplies certified event times
 and the checkpoint values used to validate readiness.
